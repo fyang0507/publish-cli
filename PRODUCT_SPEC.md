@@ -3,7 +3,7 @@
 > A per-channel content distribution toolkit for growing Fred's audience in the AI community.
 > CLI binary: `publish`. This deliverable ships the **X channel only** (session + watcher + publisher).
 >
-> **X auth backbone:** unattended **credential auto-login** through a **persistent Playwright browser profile** — credentials from `.env`, no pasted cookies. **One login event feeds two consumers:** the watcher reads via the harvested cookies; the publisher drives the same logged-in profile. The publisher creates **native drafts on X** (typed into X's own composer and saved as drafts), never local copy-paste files, and **never clicks Post**.
+> **X auth backbone:** unattended **credential auto-login** through a **persistent Playwright browser profile** — credentials from `.env`, no pasted cookies. **One login event feeds two consumers, and BOTH drive the same logged-in browser:** the watcher reads by navigating X in that browser and **capturing X's own GraphQL responses** (`SearchTimeline` / `UserTweets`) off the wire; the publisher drives the same profile's composer. The publisher creates **native drafts on X** (typed into X's own composer and saved as drafts), never local copy-paste files, and **never clicks Post**. (X gates every authenticated read behind a per-request `x-client-transaction-id` that only X's own page JS can mint, so out-of-band HTTP clients like `agent-twitter-client` / `twikit` were abandoned — driving the real browser is the only reliable read path.)
 
 ---
 
@@ -43,13 +43,13 @@ Channels are uniform behind these two capabilities. The **task layer** composes 
 
 | Channel | Publish feasibility | Watch feasibility | Notes |
 |---|---|---|---|
-| **X (Twitter)** | Browser-driven (Playwright, native drafts) | Programmable (cookies harvested from the login) | No official API key. A persistent Playwright profile auto-logs-in from `.env` credentials; the **publisher drives that profile** to create native drafts, and the **watcher reads via the harvested session cookies** (`agent-twitter-client`). **This deliverable.** |
+| **X (Twitter)** | Browser-driven (Playwright, native drafts) | Browser-driven (Playwright, GraphQL-response capture) | No official API key. A persistent Playwright profile auto-logs-in from `.env` credentials; the **publisher drives that profile** to create native drafts, and the **watcher drives the same profile** to read — navigating the search/profile page and **capturing X's own `SearchTimeline` / `UserTweets` GraphQL responses** off the wire (out-of-band cookie clients like `agent-twitter-client` no longer work; see legend). **This deliverable.** |
 | **Reddit** | Programmable (API) | Programmable (API) | Official API; subreddit + search monitoring is well-supported. Phase 2. |
 | **微信公众号 (WeChat Official Account)** | Programmable (API) | Limited | Official Account API supports draft + publish. Discovery/watch is weak on-platform. Phase 3. |
 | **LinkedIn** | Browser-driven (Playwright) | Browser-driven | No friendly write API for personal posting; reuse the X pattern — a persistent logged-in browser profile drives publish + watch. Phase 2. |
 | **小红书 (Xiaohongshu)** | Browser-driven (Playwright) | Browser-driven | No public posting API; persistent browser profile. Phase 3. |
 
-**Feasibility legend.** "Programmable (API)" = automatable end-to-end against a stable official API. "Programmable (cookies …)" = automatable against an unofficial endpoint using a logged-in session's cookies. "Browser-driven (Playwright)" = no stable write API, so the channel is automated by **driving a persistent, already-logged-in browser profile** (type into the platform's own composer, save native drafts) — not by producing ready-to-paste files. X is the reference implementation of the browser-driven pattern that LinkedIn and 小红书 reuse later.
+**Feasibility legend.** "Programmable (API)" = automatable end-to-end against a stable official API. "Browser-driven (Playwright)" = no stable write/read API, so the channel is automated by **driving a persistent, already-logged-in browser profile** — for writes, type into the platform's own composer and save native drafts (not ready-to-paste files); for reads, navigate the platform and **capture its own GraphQL responses off the wire**. X is the reference implementation of the browser-driven pattern that LinkedIn and 小红书 reuse later. (X's read path was originally planned as an out-of-band cookie client against an unofficial endpoint — "Programmable (cookies)" — but X now gates every authenticated read behind a per-request `x-client-transaction-id` that only its page JS can mint, defeating `agent-twitter-client` / `twikit`; reads therefore moved into the browser too.)
 
 ---
 
@@ -142,28 +142,32 @@ This gate applies uniformly to both loops' send actions (owned publish and watch
 
 ## 6. X Module Specification (BUILD NOW)
 
-The X module has three parts, layered so a **single login event feeds two consumers**:
+The X module has three parts, layered so a **single login event feeds two consumers** — and **both consumers drive the same logged-in browser**:
 
-1. **Session** (the backbone) — unattended credential auto-login through a persistent Playwright profile; exports cookies.
-2. **Watcher** — reads X via the harvested cookies (`agent-twitter-client`), dedupes, and triages.
-3. **Publisher** — drives the same persistent profile to create **native drafts on X**, never posting.
+1. **Session** (the backbone) — unattended credential auto-login through a persistent Playwright profile; exposes the shared logged-in browser context via `getBrowserContext()`. (It also still harvests `auth_token`/`ct0` cookies to a cache file, but nothing consumes them for reads anymore — see §6.1.)
+2. **Watcher** — drives the shared browser context: navigates the search/profile page and **captures X's own GraphQL responses** (`SearchTimeline` / `UserTweets`) off the wire, then walks the JSON for tweets — dedupes and triages.
+3. **Publisher** — drives the same persistent profile's composer to create **native drafts on X**, never posting.
 
 ```
         .env credentials (X_USERNAME / X_PASSWORD / X_EMAIL)
                             │
                             ▼
-              ┌──────── SESSION (Playwright) ────────┐
-              │  persistent profile  <dataDir>/x-profile │
-              │  auto-login → persist profile + export   │
-              │  cookies (auth_token, ct0)               │
-              └───────────────┬───────────────┬─────────┘
+              ┌──────── SESSION (Playwright) ────────────┐
+              │  persistent profile  <dataDir>/x-profile  │
+              │  auto-login → persist profile;            │
+              │  expose shared logged-in browser context  │
+              │  (also harvests auth_token/ct0 → cache,   │
+              │   but NOT used for reads)                 │
+              └───────────────┬───────────────┬──────────┘
                               │               │
-            getCookies() ─────┘               └───── same logged-in profile
-                              │                              │
-                              ▼                              ▼
-                  WATCHER (agent-twitter-client)     PUBLISHER (Playwright)
-                  reads via injected cookies         types into X composer,
-                                                     saves NATIVE DRAFT (no Post)
+       getBrowserContext() ───┴───────────────┘  (same logged-in browser)
+                              │               │
+                              ▼               ▼
+                  WATCHER (Playwright)     PUBLISHER (Playwright)
+                  navigates X + CAPTURES   types into X composer,
+                  GraphQL responses        saves NATIVE DRAFT (no Post)
+                  (SearchTimeline /
+                   UserTweets)
 ```
 
 ### 6.1 Session & authentication (the backbone — BUILD FIRST)
@@ -185,12 +189,13 @@ The session module is the foundation everything else depends on. It performs **u
 4. Fill the **password**.
 5. Land logged in; verify before proceeding.
 
-**Cookie export & API surface**
-- After a successful login, **export the session cookies** (at minimum **`auth_token`** + **`ct0`**) to a **cookie cache file under `PUBLISH_DATA_DIR`**.
+**Shared browser context & API surface**
+- After a successful login, the **same logged-in persistent profile** is the single shared resource for both consumers.
 - The module exposes:
   - **`ensureSession()`** — guarantees a valid logged-in session, **re-logging-in only if the persisted session is invalid** (cheap no-op when the profile is already authed).
-  - **`getCookies()`** — returns the harvested cookies for the watcher to inject.
-- **One login, two consumers:** the watcher consumes `getCookies()`; the publisher reuses the **same persistent profile**. There is exactly one place that authenticates.
+  - **`getBrowserContext()`** — returns the live, logged-in **persistent Playwright `BrowserContext`** for both the watcher (read) and the publisher (write) to drive. The caller must not close it directly; use `closeSession()` so the shared handle is cleared.
+- **Cookie harvest (retained, but NOT the read path):** after login the module still **harvests `auth_token` + `ct0` (and the rest)** to a cookie cache file under `PUBLISH_DATA_DIR` and exposes **`getCookies()`**. This was the original read mechanism, but **nothing consumes it for reads anymore** — it is kept only as a session-validity signal / potential future use. (`getCookies()` is not used by the watcher.)
+- **One login, two consumers:** **both** the watcher and the publisher drive the **same persistent browser context** via `getBrowserContext()`. There is exactly one place that authenticates.
 
 **Selector resilience (honest caveat)**
 - **X's login DOM drifts** and is the most fragile surface in the whole tool. Login selectors must be **centralized and configurable** in one place, and **tolerant**: try **multiple selector strategies** (role/text/test-id/CSS fallbacks) with **explicit waits** rather than fixed sleeps.
@@ -199,9 +204,9 @@ The session module is the foundation everything else depends on. It performs **u
 ### 6.2 X Watcher
 
 **Reader / auth (reuse the session — do NOT re-login)**
-- The reader uses **`agent-twitter-client`** initialized with the **cookies harvested by the session module** (`getCookies()`).
-- It must **inject those cookies** (e.g. build the cookie strings and call the client's `setCookies(...)`, verify with `isLoggedIn()`) and must **NOT** trigger `agent-twitter-client`'s own separate username/password login. The Playwright session module is the single authenticator; the watcher is a pure cookie consumer.
-- Read **`agent-twitter-client`'s actual API from `node_modules`** for the correct method names and cookie-injection signature (the package's surface — `Scraper`, `setCookies`, `getCookies`, `isLoggedIn`, and its search / user-tweets methods — must be confirmed against the installed version, not assumed).
+- The reader drives the **shared logged-in browser context** from the session module (`getBrowserContext()`). It does **NOT** use `agent-twitter-client`, `twikit`, or any out-of-band cookie-injection HTTP client, and never performs its own login.
+- **Why the browser, not cookies.** X gates every authenticated read behind a per-request **`x-client-transaction-id`** that only X's own page JS can mint. Out-of-band HTTP clients can't generate it: `agent-twitter-client` 401s and `twikit` can't bootstrap the transaction-id. Driving the real logged-in browser sidesteps this — X mints the transaction-ids natively — and unifies the X channel on one mechanism (the same persistent profile the publisher drives).
+- **How it reads (GraphQL-response capture).** Rather than scrape the fragile DOM, the reader (`src/x/reader.ts`, class `BrowserReader`) **navigates** to the search / profile URL and **captures X's own GraphQL responses off the wire** — listening for the `SearchTimeline` / `UserTweets` (and sibling `UserTweetsAndReplies` / `UserMedia`) operations on `/graphql/` — then **walks the JSON** for tweet results (identified by `legacy.full_text` + an id, wherever they nest). It scrolls to lazy-load more until it hits the requested limit or the feed stops growing. The JSON shape is far more stable than the rendered DOM and carries clean metrics.
 
 **Fetch methods → normalized posts**
 - **`fetchSearch(query)`** — recent posts matching a search query (origin = query).
@@ -289,7 +294,7 @@ All commands live under the **`publish`** binary (built with **commander**).
 
 | Command | Purpose |
 |---|---|
-| `publish watch x [--query <q>...] [--account <handle>...] [--config <watch.yaml>] [--json]` | Read recent posts from watched queries/accounts (via the session's harvested cookies), dedupe in SQLite, triage with the cheap Gemini model, emit ranked follow-up candidates (human text by default, machine JSON with `--json`). |
+| `publish watch x [--query <q>...] [--account <handle>...] [--config <watch.yaml>] [--json] [--inspect]` | Read recent posts from watched queries/accounts (by driving the session's shared logged-in browser and capturing X's `SearchTimeline` / `UserTweets` GraphQL responses), dedupe in SQLite, triage with the cheap Gemini model, emit ranked follow-up candidates (human text by default, machine JSON with `--json`). X is anti-headless, so unattended runs currently need `--inspect` (headful). |
 | `publish draft x --from <base.md> --format <tweet\|thread\|article> [--long] [--dry-run] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Never posts. `--dry-run` generates content only (no browser); `--inspect` runs headful for calibration. |
 | `publish --help` | Must work and list the above commands and options. |
 
@@ -301,7 +306,7 @@ All commands live under the **`publish`** binary (built with **commander**).
 - `--dry-run` (`draft x`) generates content without touching the browser; reports where content was written.
 - `--inspect` (both commands' browser paths) runs headful so a human can watch/calibrate drift-prone selectors.
 
-**Auth is implicit.** Both commands call `ensureSession()` first; it auto-logs-in from `.env` credentials only if the persistent profile / cached cookies are invalid. There is no cookie-paste step and no per-command login flag.
+**Auth is implicit.** Both commands obtain the shared logged-in browser via `getBrowserContext()`, which calls `ensureSession()` first; it auto-logs-in from `.env` credentials only if the persistent profile is invalid. There is no cookie-paste step and no per-command login flag. (The watcher reads by capturing X's GraphQL responses in that browser, not via harvested cookies — see §6.2.)
 
 ---
 
@@ -309,9 +314,9 @@ All commands live under the **`publish`** binary (built with **commander**).
 
 | Phase | Scope | Capabilities | Send automation |
 |---|---|---|---|
-| **Phase 1 — X (this deliverable)** | X channel only | SESSION (persistent Playwright profile, credential auto-login, cookie export) → WATCH (cookies + dedupe + Gemini triage) and PUBLISH (native X drafts: tweet / thread / article) | None — drafts only, no posting |
+| **Phase 1 — X (this deliverable)** | X channel only | SESSION (persistent Playwright profile, credential auto-login, shared logged-in browser context) → WATCH (browser GraphQL-response capture + dedupe + Gemini triage) and PUBLISH (native X drafts: tweet / thread / article) | None — drafts only, no posting |
 | **Phase 2 — Reddit + LinkedIn (browser)** | Add Reddit (API, publish + watch) and LinkedIn (Playwright persistent profile, publish + watch) | Extend task-layer parallel composition across X + Reddit + LinkedIn; LinkedIn reuses the X persistent-profile pattern | None — native drafts only |
 | **Phase 3 — 小红书 + WeChat** | Add 小红书 (Playwright persistent profile) and 微信公众号 (API publish) | Full 5-channel fan-out | None — native drafts only |
 | **Phase 4 — Send automation + measurement** | Wire the **SEND-GATE** (§5: Discord → wait ~2min → phone escalation) and outcome **measurement** into both loops | Autonomous scout/triage/draft with human-approved send; measure borrowed-reach conversion | Human-approved sends enabled |
 
-**Sequencing rationale.** X first because it is the densest AI-community surface **and** because its **browser-backed session is the reusable backbone**: the persistent-profile auto-login + cookie-export pattern built here is what LinkedIn (Phase 2) and 小红书 (Phase 3) inherit, and the one-login-two-consumers split (cookies for read, profile for write) generalizes to any no-official-API channel. Reddit and LinkedIn come next to broaden borrowed reach (Reddit via official API, LinkedIn via the X browser pattern). 小红书 and WeChat extend into Chinese-language audiences. Send automation and measurement come last, after the drafting and watch loops are trusted, because the send-gate is where autonomy meets risk and must be deliberately gated.
+**Sequencing rationale.** X first because it is the densest AI-community surface **and** because its **browser-backed session is the reusable backbone**: the persistent-profile auto-login pattern built here is what LinkedIn (Phase 2) and 小红书 (Phase 3) inherit, and the one-login-two-consumers split (browser GraphQL capture for read, composer for write) generalizes to any no-official-API channel. Reddit and LinkedIn come next to broaden borrowed reach (Reddit via official API, LinkedIn via the X browser pattern). 小红书 and WeChat extend into Chinese-language audiences. Send automation and measurement come last, after the drafting and watch loops are trusted, because the send-gate is where autonomy meets risk and must be deliberately gated.

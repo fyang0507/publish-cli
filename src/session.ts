@@ -1,11 +1,21 @@
 /**
  * X session manager — the backbone shared by BOTH the watcher and the publisher.
  *
- * ONE login event feeds both surfaces:
- *   - the watcher (src/x/reader.ts) reads via the harvested cookies
- *     (agent-twitter-client, cookie injection — NOT its own password login),
- *   - the publisher (src/commands/draft.ts) drives the SAME persistent browser
- *     profile via getBrowserContext().
+ * ONE login event feeds both surfaces, and BOTH drive the SAME logged-in
+ * persistent browser context (getBrowserContext()):
+ *   - the watcher (src/x/reader.ts) navigates X in that browser and CAPTURES
+ *     X's own GraphQL responses (SearchTimeline / UserTweets) off the wire,
+ *   - the publisher (src/commands/draft.ts) drives that browser's composer.
+ *
+ * NOTE on cookies: out-of-band HTTP cookie clients (agent-twitter-client /
+ * twikit) were ABANDONED for reads. X gates every authenticated read behind a
+ * per-request x-client-transaction-id that only X's own page JS can mint, so
+ * cookie-injected clients 401 / can't bootstrap. Driving the real browser
+ * sidesteps that — X mints the transaction-ids natively. We STILL harvest
+ * auth_token/ct0 to a cache file below, but NOTHING consumes them for reads
+ * anymore; the harvest is retained only as a session-validity signal / for
+ * possible future use. The single shared read+write resource is the browser
+ * CONTEXT, not the cookies.
  *
  * Auth model: UNATTENDED credential auto-login with Playwright over a PERSISTENT
  * browser context. Credentials come from env (config.ts): X_USERNAME, X_PASSWORD,
@@ -16,9 +26,9 @@
  * Persistence:
  *   - The browser user-data-dir lives at dataPaths().xProfileDir (off Drive),
  *     so once logged in, subsequent runs are already authed and skip the flow.
- *   - After a successful login we EXPORT the session cookies (at minimum
- *     auth_token + ct0) to dataPaths().xCookieCache as JSON, for the cookie
- *     reader to consume.
+ *   - After a successful login we harvest the session cookies (at minimum
+ *     auth_token + ct0) to dataPaths().xCookieCache as JSON. This is RETAINED
+ *     but is no longer a read path (see the cookie note above).
  *
  * Selector drift: X's login DOM changes often. All selectors are centralized
  * here (see X_SELECTORS), tolerant (try multiple strategies + explicit waits),
@@ -426,9 +436,11 @@ function normalizeCookies(cookies: Cookie[]): SessionCookie[] {
 
 /**
  * Harvest cookies from the live context and write the auth-relevant ones to the
- * cookie cache for the reader. We persist the FULL x/twitter cookie set (not
- * just auth_token + ct0) so agent-twitter-client has everything it may want,
- * but we hard-require auth_token + ct0 to consider the session valid.
+ * cookie cache. RETAINED but NOT a read path: the watcher reads by capturing
+ * GraphQL responses in the shared browser (see module header / src/x/reader.ts),
+ * not by injecting these cookies. We persist the FULL x/twitter cookie set (not
+ * just auth_token + ct0) for completeness / possible future use, but require
+ * auth_token + ct0 to consider the session valid.
  */
 async function harvestAndCacheCookies(context: BrowserContext): Promise<SessionCookie[]> {
   const all = await context.cookies(["https://x.com", "https://twitter.com"]);
@@ -476,11 +488,13 @@ function readCachedCookies(): SessionCookie[] | null {
  *      persisted profile is already authed, just (re)harvest cookies and return.
  *   3. Otherwise run the credential login flow (username -> optional email/phone
  *      challenge with X_EMAIL -> password -> wait for home).
- *   4. Harvest auth_token + ct0 (and the rest) to the cookie cache. The profile
- *      stays warm on disk so the next run skips straight to step 2.
+ *   4. Harvest auth_token + ct0 (and the rest) to the cookie cache (retained as
+ *      a session-validity signal, NOT a read path — see module header). The
+ *      profile stays warm on disk so the next run skips straight to step 2.
  *
- * Idempotent + cheap when already authed. Leaves the shared context OPEN so the
- * publisher can drive the same profile; call closeSession() at process end.
+ * Idempotent + cheap when already authed. Leaves the shared context OPEN so BOTH
+ * the watcher (GraphQL capture) and the publisher (composer) can drive the same
+ * profile via getBrowserContext(); call closeSession() at process end.
  */
 export async function ensureSession(opts: EnsureSessionOptions = {}): Promise<void> {
   const inspect = !!opts.inspect;
@@ -505,12 +519,14 @@ export async function ensureSession(opts: EnsureSessionOptions = {}): Promise<vo
 }
 
 /**
- * Return the harvested session cookies (auth_token + ct0 at minimum) for the
- * cookie reader (agent-twitter-client). Uses the cache when valid; otherwise
- * runs ensureSession() to (re)login and re-harvest.
+ * Return the harvested session cookies (auth_token + ct0 at minimum). Uses the
+ * cache when valid; otherwise runs ensureSession() to (re)login and re-harvest.
  *
- * This is the ONLY thing the watcher needs from the session — it injects these
- * cookies and never performs its own password login.
+ * NOTE: this is NO LONGER the watcher's read path. The watcher now drives the
+ * shared browser via getBrowserContext() and captures GraphQL responses (see
+ * the module header and src/x/reader.ts). This accessor is retained for the
+ * harvested-cookie surface (session-validity signal / possible future use) but
+ * is not consumed by reads.
  */
 export async function getCookies(opts: EnsureSessionOptions = {}): Promise<SessionCookie[]> {
   if (!opts.force) {
