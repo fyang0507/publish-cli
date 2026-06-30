@@ -195,7 +195,11 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
     //   - section headings (bare labels like "Working Thesis" make weak hooks /
     //     thread filler) — they stay in `body` for the article format only.
     // Everything else flows into the hook-first prose stream.
-    const isMetaPair = /^[A-Z][\w /]{0,40}:\s+\S/.test(line) && i < 12;
+    // Metadata pairs have a SHORT label key (1-3 words) at the very top, e.g.
+    // "Draft: v0.4", "Platforms: X, LinkedIn". Restrict the key to ≤3 words so a
+    // normal prose sentence with an early colon ("The pattern I keep hitting: …")
+    // is NOT mistaken for metadata and dropped.
+    const isMetaPair = /^[A-Z][\w/]*(?: [\w/]+){0,2}:\s+\S/.test(line) && i < 8;
     const isImageOnly = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line);
     const isHeading = /^#{1,6}\s/.test(line);
     if (isMetaPair || isImageOnly || isHeading) continue;

@@ -72,14 +72,14 @@ export const X_COMPOSER_SELECTORS = {
     'button[aria-label="Close"]',
     '//div[@aria-label="Close"]',
   ],
-  // The "Save" affordance in the close→save dialog (saves as an Unsent draft).
+  // The "Save" affordance in the close→save confirmationSheet (saves as an
+  // Unsent draft). Calibrated: data-testid="confirmationSheetConfirm" (the
+  // sibling "Discard" is confirmationSheetCancel — never click it).
   saveDraftButton: [
-    'button[data-testid="confirmationSheetConfirm"]',
+    '[data-testid="confirmationSheetConfirm"]',
     '//span[text()="Save"]/ancestor::*[@role="button"][1]',
     '//span[text()="Save draft"]/ancestor::*[@role="button"][1]',
   ],
-  // Where saved drafts live, for verification.
-  unsentUrl: "https://x.com/compose/post/unsent",
 
   // ---- Article composer ----
   articleTitleInput: [
@@ -312,38 +312,30 @@ async function typeText(page: Page, box: Locator, text: string): Promise<void> {
 }
 
 /**
- * Save the current composer as a draft WITHOUT posting. Strategy:
- *   1. Prefer an explicit "Drafts"/"Unsent" control if present.
- *   2. Otherwise close the composer (X button) and confirm "Save" in the dialog,
- *      which stores it under Unsent posts.
- * Returns a short label of the path used, or null if neither path resolved.
+ * Save the current composer as a draft WITHOUT posting.
  *
- * NEEDS LIVE CALIBRATION — both affordances drift.
+ * Calibrated 2026-06 flow: click the composer's close (X / app-bar-close); X
+ * raises a confirmationSheetDialog with "Save" (confirmationSheetConfirm) and
+ * "Discard" (confirmationSheetCancel); click Save → stored under Unsent.
+ *
+ * IMPORTANT: we do NOT use the composer's own "Drafts" (unsentButton) control —
+ * it OPENS the drafts list, it does not save the current post (verified live).
+ * Returns a short label of the path used, or null if the flow didn't resolve.
  */
 async function saveAsDraft(page: Page): Promise<string | null> {
-  const drafts = await optionalLocator(page, X_COMPOSER_SELECTORS.draftsButton, 3_000);
-  if (drafts) {
-    await drafts.click();
-    // Some UIs save immediately; others open a menu. Give it a beat.
-    await page.waitForTimeout(750);
-    return 'the "Drafts" control';
-  }
+  const close = await optionalLocator(page, X_COMPOSER_SELECTORS.closeComposerButton, 5_000);
+  if (!close) return null;
+  await close.click();
 
-  const close = await optionalLocator(page, X_COMPOSER_SELECTORS.closeComposerButton, 4_000);
-  if (close) {
-    await close.click();
-    const save = await optionalLocator(page, X_COMPOSER_SELECTORS.saveDraftButton, 4_000);
-    if (save) {
-      await save.click();
-      await page.waitForTimeout(750);
-      return "the close→Save dialog";
-    }
-    // Dialog didn't appear as expected — do NOT guess at another button (a wrong
-    // click could discard or, worse, post). Leave it to the human + calibration.
+  const save = await optionalLocator(page, X_COMPOSER_SELECTORS.saveDraftButton, 5_000);
+  if (!save) {
+    // The Save/Discard confirmation didn't appear as expected — do NOT guess at
+    // another button (a wrong click could discard or post). Leave it to a human.
     return null;
   }
-
-  return null;
+  await save.click();
+  await page.waitForTimeout(750);
+  return "the close→Save dialog";
 }
 
 /**
@@ -353,15 +345,17 @@ async function saveAsDraft(page: Page): Promise<string | null> {
  */
 async function verifyDraftSaved(page: Page, _article = false): Promise<boolean> {
   try {
-    await page.goto(X_COMPOSER_SELECTORS.unsentUrl, { waitUntil: "domcontentloaded" });
-    // Drafts list rows: best-effort. X uses cellInnerDiv rows in many lists.
+    // The drafts list has no stable direct URL (the /compose/post/unsent route
+    // errors). Open a fresh (empty) composer and click its "Drafts" (unsentButton)
+    // control to view Unsent posts, then check for at least one row.
+    await page.goto(X_COMPOSER_SELECTORS.composeUrl, { waitUntil: "domcontentloaded" });
+    const draftsBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.draftsButton, 6_000);
+    if (!draftsBtn) return false;
+    await draftsBtn.click();
+    await page.waitForTimeout(1_500);
     const row = await optionalLocator(
       page,
-      [
-        'div[data-testid="cellInnerDiv"]',
-        'article[data-testid="tweet"]',
-        '//div[@role="button" and .//span]',
-      ],
+      ['div[data-testid="cellInnerDiv"]', 'article[data-testid="tweet"]'],
       6_000,
     );
     return row !== null;
