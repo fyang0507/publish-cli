@@ -82,15 +82,28 @@ export const X_COMPOSER_SELECTORS = {
   ],
 
   // ---- Article composer ----
+  // articleComposeUrl is the Articles HUB (a list with Drafts/Published tabs),
+  // NOT the editor. Reach the editor by clicking a create/"Write" control, which
+  // navigates to https://x.com/compose/articles/edit/<id>. CALIBRATED 2026-06:
+  //   - aria-label="create" is the persistent create control (always present),
+  //   - empty_state_button_text ("Write") only shows when you have no articles.
+  articleCreateButton: [
+    '[aria-label="create"]',
+    '[data-testid="empty_state_button_text"]',
+    '//span[normalize-space()="Write"]/ancestor::*[@role="button"][1]',
+  ],
+  // Editor inputs. CALIBRATED 2026-06: title = twitter-article-title; body =
+  // the contenteditable data-testid="composer" (inside composerRichTextInputContainer).
   articleTitleInput: [
+    '[data-testid="twitter-article-title"]',
     'div[data-testid="longformRichTextTitleInput"]',
     'div[role="textbox"][aria-label="Title"]',
-    'input[aria-label="Title"]',
   ],
   articleBodyInput: [
+    'div[data-testid="composer"][contenteditable="true"]',
+    '[data-testid="composer"]',
+    'div[data-testid="composerRichTextInputContainer"] [contenteditable="true"]',
     'div[data-testid="longformRichTextInput"]',
-    'div[role="textbox"][contenteditable="true"][aria-label="Article body"]',
-    'div[role="textbox"][contenteditable="true"]',
   ],
 
   // The PUBLISH/POST button — listed ONLY so we are explicit about what we must
@@ -259,17 +272,28 @@ async function stageArticleDraft(
 ): Promise<StageDraftResult> {
   if (!content.article) throw new Error("No article content to stage.");
 
+  // articleComposeUrl is the Articles HUB, not the editor. Open it, then click a
+  // create/"Write" control to enter the editor (/compose/articles/edit/<id>).
   await page.goto(X_COMPOSER_SELECTORS.articleComposeUrl, { waitUntil: "domcontentloaded" });
 
-  // The Articles composer may be unavailable for the account; surface that
-  // clearly rather than typing into the wrong (standard) composer.
-  const titleBox = await optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 8_000);
+  const createBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCreateButton, 8_000);
+  if (!createBtn) {
+    throw new Error(
+      "Could not find the 'create article' control on the X Articles hub. This " +
+        "account may not have Articles (Premium+) access, or the selector drifted " +
+        "(re-run with --inspect to recalibrate articleCreateButton). " +
+        `URL: ${X_COMPOSER_SELECTORS.articleComposeUrl}`,
+    );
+  }
+  await createBtn.click();
+
+  // Wait for the editor's Title input to surface (also confirms the editor opened).
+  const titleBox = await optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 12_000);
   if (!titleBox) {
     throw new Error(
-      "Could not open the X Articles composer (the Title input was not found). " +
-        "This account may not have Articles access, or the selector drifted " +
-        "(NEEDS LIVE CALIBRATION; re-run with --inspect). " +
-        `URL tried: ${X_COMPOSER_SELECTORS.articleComposeUrl}`,
+      "Clicked the Articles create control but the editor's Title input never " +
+        "appeared (selector drift or Articles unavailable; re-run with --inspect). " +
+        `URL now: ${page.url()}`,
     );
   }
 
@@ -286,17 +310,18 @@ async function stageArticleDraft(
   // adjust formatting in X's Articles editor (code blocks still need images).
   await typeText(page, bodyBox, content.article.markdown);
 
-  // Articles autosave as drafts; give the autosave a moment, then verify.
-  await page.waitForTimeout(2_000);
-  const verified = await verifyDraftSaved(page, /* article */ true);
+  // Articles autosave as drafts; give autosave a moment. Being in the editor with
+  // an article id in the URL is our verification that a draft now exists.
+  await page.waitForTimeout(2_500);
+  const verified = /\/compose\/articles\/edit\/\d+/.test(page.url());
 
   return {
     format: "article",
     posts: 1,
     verified,
     note:
-      "Article typed into the Articles composer; X autosaves Article drafts. " +
-      "Open Articles drafts to review and publish manually. NEVER auto-published.",
+      "Article typed into the X Articles editor; X autosaves Article drafts under " +
+      "Articles → Drafts. Review and publish manually there. NEVER auto-published.",
   };
 }
 
