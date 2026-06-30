@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+*.db
+.DS_Store
+
+# Local runtime data (browser profile, cookie cache, sqlite) lives OFF-repo under
+# PUBLISH_DATA_DIR (~/.publish-cli by default). Ignore any local .runtime just in case.
+.runtime/
+
+# User-specific watch config (commit watch.yaml.example instead).
+watch.yaml

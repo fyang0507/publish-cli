@@ -1,0 +1,41 @@
+# publish-cli — X watch config (borrowed-reach / watch loop).
+# Copy to watch.yaml and edit. CLI flags (--query, --account) merge with / override
+# these values at runtime.
+
+# Cheap model used to triage candidates. Overrides TRIAGE_MODEL env when set.
+triage_model: gemini-3.5-flash
+
+# Search queries to monitor. Each is run against X search; recent matching posts are
+# pulled, deduped against the local seen-store, then triaged.
+queries:
+  - "agent harness reliability"
+  - "LLM evals in production"
+  - "context engineering"
+  - "\"forward deployed engineer\" AI"
+
+# Accounts (handles, without the leading @) whose recent timelines to monitor.
+accounts:
+  - swyx
+  - simonw
+  - eugeneyan
+
+# How many recent posts to pull per origin (query or account) on each poll.
+per_origin_limit: 25
+
+# Triage criteria — passed to the cheap model as the rubric for scoring each post on
+# whether it's worth a follow-up reply. Higher score = stronger follow-up candidate.
+triage:
+  # Free-text description of who Fred is and what unique value he can add, so the
+  # model can judge fit and whether a reply would be additive (not noise).
+  persona: >
+    Fred is an AI engineer/consultant focused on agent harnesses, evals, and
+    forward-deployed engineering for the AI community. A good follow-up is one where
+    Fred can add a concrete, non-obvious insight from hands-on experience.
+  # The dimensions the model should weigh (documented for humans; the prompt builder
+  # reads these).
+  dimensions:
+    - fit            # topical match to Fred's expertise/audience
+    - timeliness     # is the post recent / still part of a live conversation
+    - unique_value   # can Fred add something others in the thread can't
+  # Only surface candidates at or above this score (0-100) in the ranked output.
+  min_score: 60
