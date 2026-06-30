@@ -90,12 +90,14 @@ function buildTriagePrompt(batch: XPost[], cfg: TriageConfig): string {
     ? cfg.dimensions.join(", ")
     : "fit, timeliness, unique_value";
 
+  // NOTE: `origin` (which query/handle surfaced the post) is intentionally NOT
+  // sent to the model — it's a local provenance breadcrumb (output + seen-store),
+  // not a triage signal, so omitting it saves tokens on every batch.
   const items = batch.map((p) => ({
     postId: p.id,
     author: p.authorHandle,
     text: p.text,
     createdAt: p.createdAt,
-    origin: p.origin,
     metrics: p.metrics,
   }));
 
