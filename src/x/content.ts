@@ -220,12 +220,12 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
       if (line.trim() && !title) {
         title = line.trim();
         titleLineConsumed = true;
-        // Drop this line from body/prose just like the H1 branch above:
-        // it's consumed as the Article title / headline. Keeping it caused the
-        // title to appear both in the title field and as the first body
-        // paragraph (duplicate headline) when the doc leads with a plain
-        // (non-`#`) title line. buildArticle re-adds `# title` for the markdown
-        // audit artifact, so the title is never lost.
+        // KEEP this line in the PROSE stream: tweet/thread/reply use prose as
+        // their content, and a short post/reply may be ONLY this first line —
+        // dropping it here produced an EMPTY tweet/reply. But OMIT it from
+        // bodyLines so the ARTICLE format doesn't duplicate the headline
+        // (buildArticle uses `body` and re-adds `# title` itself).
+        proseLines.push(line);
         continue;
       }
     }

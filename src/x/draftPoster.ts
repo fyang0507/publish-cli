@@ -985,34 +985,24 @@ async function verifyDraftSaved(page: Page, expectedText?: string): Promise<bool
     await page.goto(X_COMPOSER_SELECTORS.draftsUrl, { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1_500);
 
-    // Scope to drafts rows on this dedicated surface. Because we're on the
-    // /drafts URL (not a composer over the timeline), cellInnerDiv here is the
-    // drafts list, not the background feed.
-    const rows = page.locator('div[data-testid="cellInnerDiv"], article[data-testid="tweet"]');
+    // CALIBRATED (issue #4): on /compose/post/unsent/drafts the drafts render
+    // inside a dialog OVER the home feed, so div[data-testid="cellInnerDiv"] here
+    // still matches the BACKGROUND TIMELINE — iterating those rows both
+    // false-negatives (misses the real draft) and, on empty content, false-
+    // positives (any timeline row counts). Instead match a short, stable prefix
+    // of the STAGED TEXT against the whole drafts-page text: our prefix is unique
+    // enough that the feed won't collide. Without staged text we CANNOT verify,
+    // so return false (unconfirmed) rather than trusting a background row.
+    const needle = normalizeForMatch(expectedText ?? "").slice(0, 40);
+    if (!needle) return false;
 
-    if (expectedText && expectedText.trim()) {
-      // Match on a leading, stable slice of the staged text (drafts rows may
-      // truncate long bodies with an ellipsis, so compare a short prefix).
-      const needle = normalizeForMatch(expectedText).slice(0, 60);
-      if (!needle) return (await rows.count()) > 0;
-      const deadline = Date.now() + 6_000;
-      while (Date.now() < deadline) {
-        const count = await rows.count();
-        for (let i = 0; i < count; i++) {
-          const hay = normalizeForMatch((await rows.nth(i).innerText().catch(() => "")) || "");
-          if (hay.includes(needle)) return true;
-        }
-        await page.waitForTimeout(500);
-      }
-      return false;
+    const deadline = Date.now() + 6_000;
+    while (Date.now() < deadline) {
+      const body = normalizeForMatch((await page.locator("body").innerText().catch(() => "")) || "");
+      if (body.includes(needle)) return true;
+      await page.waitForTimeout(500);
     }
-
-    const row = await optionalLocator(
-      page,
-      ['div[data-testid="cellInnerDiv"]', 'article[data-testid="tweet"]'],
-      6_000,
-    );
-    return row !== null;
+    return false;
   } catch {
     return false;
   }
