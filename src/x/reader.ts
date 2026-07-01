@@ -24,10 +24,11 @@ export interface XPost {
 export interface XReader {
   init(): Promise<void>;
   fetchSearch(query: string, limit: number): Promise<XPost[]>;
-  fetchUserTimeline(handle: string, limit: number): Promise<XPost[]>;
   /**
-   * Read one X List's merged member timeline in a single page load — scales the
+   * Read one X List's merged member timeline in a single page load — this IS the
    * account path (one fetch covers all N members instead of N profile loads).
+   * There is no per-account read: N profile navigations don't scale and read as
+   * bot traffic, so accounts are watched via a List (see create-watch-list).
    */
   fetchListTimeline(listId: string, limit: number): Promise<XPost[]>;
   /** Release the browser session (call once when done). */
@@ -46,9 +47,10 @@ export interface XReader {
  * persistent logged-in profile the publisher drives (session.ts).
  *
  * HOW IT READS: rather than scrape fragile DOM, we navigate to the search /
- * profile page and CAPTURE X's own GraphQL responses off the wire
- * (SearchTimeline / UserTweets), then walk the JSON for tweet results. The JSON
- * shape is far more stable than the rendered DOM and carries clean metrics.
+ * List page and CAPTURE X's own GraphQL responses off the wire
+ * (SearchTimeline / ListLatestTweetsTimeline), then walk the JSON for tweet
+ * results. The JSON shape is far more stable than the rendered DOM and carries
+ * clean metrics.
  *
  * Headless note: X is anti-headless; a scheduled watcher may need to run with
  * --inspect (headful). The session module owns that policy.
@@ -71,22 +73,11 @@ export class BrowserReader implements XReader {
     return this.collect(url, ["SearchTimeline"], query, limit);
   }
 
-  async fetchUserTimeline(handle: string, limit: number): Promise<XPost[]> {
-    const clean = handle.replace(/^@/, "");
-    const url = `https://x.com/${clean}`;
-    return this.collect(
-      url,
-      ["UserTweets", "UserTweetsAndReplies", "UserMedia"],
-      clean,
-      limit,
-    );
-  }
-
   /**
    * Read an X List's merged member timeline. One page load covers every member
    * of the List (a single response has been observed carrying ~39 distinct
-   * authors), so this is the scale path for the account side: put N watched
-   * accounts in a List and read them in one fetch instead of N profile loads.
+   * authors), so this is the account path: put N watched accounts in a List and
+   * read them in one fetch instead of N profile loads.
    *
    * origin is `list:<listId>` so surfaced posts are attributable to the List.
    *

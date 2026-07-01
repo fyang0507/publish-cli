@@ -4,7 +4,7 @@
  * ONE login event feeds both surfaces, and BOTH drive the SAME logged-in
  * persistent browser context (getBrowserContext()):
  *   - the watcher (src/x/reader.ts) navigates X in that browser and CAPTURES
- *     X's own GraphQL responses (SearchTimeline / UserTweets) off the wire,
+ *     X's own GraphQL responses (SearchTimeline / ListLatestTweetsTimeline) off the wire,
  *   - the publisher (src/commands/draft.ts) drives that browser's composer.
  *
  * NOTE on cookies: out-of-band HTTP cookie clients (agent-twitter-client /

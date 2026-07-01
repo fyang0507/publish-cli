@@ -25,9 +25,10 @@ export interface TriagedPost {
 /**
  * Score a batch of posts for follow-up worthiness with the cheap Gemini model
  * (minimal thinking). Posts are scored in batches so a single poll over many
- * queries/accounts stays within a small number of model calls.
+ * queries/Lists stays within a small number of model calls.
  *
- * The rubric (persona + dimensions) comes from watch.yaml's `triage:` block.
+ * The rubric = the caller's free-text persona (watch.yaml default or --persona)
+ * layered over a FIXED, defined scoring baseline (fit/timeliness/unique_value).
  * Scores returned here are 0-1; the caller maps to the 0-100 `min_score` gate.
  *
  * @param model cheap model id (config.TRIAGE_MODEL / watch.yaml triage_model).
@@ -85,12 +86,9 @@ export async function triagePosts(
   return results;
 }
 
-/** Build the triage prompt: persona + rubric + the batch as compact JSON. */
+/** Build the triage prompt: persona + fixed defined rubric + the batch as JSON. */
 function buildTriagePrompt(batch: XPost[], cfg: TriageConfig): string {
   const persona = cfg.persona?.trim() || "An AI builder looking for high-signal follow-up opportunities on X.";
-  const dimensions = cfg.dimensions?.length
-    ? cfg.dimensions.join(", ")
-    : "fit, timeliness, unique_value";
 
   // NOTE: `origin` (which query/handle surfaced the post) is intentionally NOT
   // sent to the model — it's a local provenance breadcrumb (output + seen-store),
@@ -109,10 +107,11 @@ function buildTriagePrompt(batch: XPost[], cfg: TriageConfig): string {
     "WHO IS REPLYING:",
     persona,
     "",
-    `Score each post 0.0-1.0 on whether a reply from this person would be a strong, additive follow-up. Weigh these dimensions: ${dimensions}.`,
+    "Score each post 0.0-1.0 on whether a reply from this person would be a strong, additive follow-up. Weigh these dimensions:",
     "- fit: topical match to the person's expertise/audience.",
     "- timeliness: is the post recent / part of a live conversation.",
     "- unique_value: can the person add a concrete, non-obvious insight others can't.",
+    "Let the WHO IS REPLYING description above refine what 'fit' and 'unique_value' mean for this person.",
     "A post that is off-topic, stale, or where a reply would just be noise should score low.",
     "",
     "POSTS (JSON):",

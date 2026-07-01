@@ -25,10 +25,13 @@ Copy `.env.example` → `.env` (gitignored) and set:
 
 ## Watch config — `watch.yaml`
 
-Copy `watch.yaml.example` → `watch.yaml` and set `queries`, `accounts`, `lists`,
-`per_origin_limit`, and the triage rubric (`persona`, `dimensions`, `min_score`,
-`batch_size`). CLI flags (`--query`, `--account`, `--list`, `--persona`, …) merge
-with / override this file.
+Copy `watch.yaml.example` → `watch.yaml` and set `queries`, `lists`,
+`per_origin_limit`, and the triage block (`persona`, `min_score`, `batch_size`).
+The file is schema-validated on load — unknown keys / wrong types fail loudly
+before the browser opens. CLI flags (`--query`, `--x-list`, `--persona`) ADD to /
+supply values over this file. (Accounts are watched via a `List` built with
+`publish x create-watch-list`, not a per-account origin. The triage `persona`
+ships blank — supply it per run with `--persona`.)
 
 ## Where state lives (two homes)
 

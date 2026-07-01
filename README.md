@@ -4,8 +4,9 @@ A per-channel content-distribution toolkit for growing the operator's audience i
 
 ## What it does (X channel)
 
-- **`publish watch x`** — borrowed-reach loop. Polls search queries and watched accounts, dedupes seen posts, triages each new post with a cheap Gemini model for follow-up worthiness, and emits ranked candidates (human-readable, or `--json`).
-- **`publish draft x`** — owned-content publisher. Turns a canonical base markdown into an X-ready **tweet / thread / article** and stages it as a **native draft on X**. It **never posts** — the send action is human-gated and out of scope here.
+- **`publish x watch`** — borrowed-reach loop. Polls search queries and watch Lists (accounts are watched via a List, not one-by-one), dedupes seen posts, triages each new post with a cheap Gemini model for follow-up worthiness, and emits ranked candidates (human-readable, or `--json`).
+- **`publish x create-watch-list`** — builds the account-watch List from the accounts you follow (a List reads all its members in one fetch, so it's the scalable account path). Precursor to `watch --x-list`.
+- **`publish x draft`** — owned-content publisher. Turns a canonical base markdown into an X-ready **tweet / thread / article** and stages it as a **native draft on X**. It **never posts** — the send action is human-gated and out of scope here.
 
 ## Install
 
@@ -29,7 +30,7 @@ npx playwright install chromium
   - `TRIAGE_MODEL` — cheap triage model id (default `gemini-3.5-flash`).
   - `X_USERNAME` / `X_PASSWORD` / `X_EMAIL` — X credential login. No 2FA; `X_EMAIL` answers X's email/identifier confirmation challenge.
   - `PUBLISH_DATA_DIR` (optional) — runtime data dir, default `~/.publish-cli`.
-- **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, accounts, per-origin limit, and the triage rubric.
+- **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, and the triage rubric.
 
 ### Session model
 
@@ -58,9 +59,10 @@ The source of truth for content is caller-supplied local markdown, passed to the
 ```bash
 publish --help
 
-publish watch x [--query <q>...] [--account <handle>...] [--list <id>...] [--config <watch.yaml>] [--json]
-publish draft x --from <base.md> --format tweet|thread|article [--inspect]
-publish reply x --to <id|url> --from <base.md> [--inspect]
+publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
+publish x watch [--query <q>...] [--x-list <id>...] [--persona <text>] [--config <watch.yaml>] [--no-triage] [--json]
+publish x draft --from <base.md> --format tweet|thread|article [--inspect]
+publish x reply --to <id|url> --from <base.md> [--inspect]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.

@@ -11,8 +11,8 @@ unexpected.
 
 1. Re-run the same command with **`--inspect`** for a headful browser you can watch:
    ```bash
-   publish draft x --from <file.md> --format tweet --inspect
-   publish watch x --inspect      # if the session needs a re-login
+   publish x draft --from <file.md> --format tweet --inspect
+   publish x watch --inspect      # if the session needs a re-login
    ```
 2. Note where the flow stalls:
    - **Login** — username field, the optional "enter your email/phone to confirm"

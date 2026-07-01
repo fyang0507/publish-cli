@@ -9,7 +9,7 @@ import {
 } from "../x/content.js";
 
 /**
- * `publish draft x` — owned-content publisher for the X channel. Creates a
+ * `publish x draft` — owned-content publisher for the X channel. Creates a
  * NATIVE DRAFT on X and STOPS THERE. It MUST NOT publish/Post (the send-gate is
  * documented as future scope, PRODUCT_SPEC §5, and is not built here).
  *
@@ -69,14 +69,10 @@ function renderFlagsBlock(content: GeneratedContent): string {
   return out.join("\n");
 }
 
-export function registerDraftCommand(program: Command): void {
-  const draft = program
+export function registerDraftCommand(x: Command): void {
+  x
     .command("draft")
-    .description("Generate channel drafts from a canonical base markdown");
-
-  draft
-    .command("x")
-    .description("Stage a NATIVE X draft (tweet/thread/article) — never posts")
+    .description("Stage a NATIVE X draft (tweet/thread/article) from a canonical base markdown — never posts")
     .requiredOption("--from <base.md>", "Path to the canonical base markdown")
     .requiredOption("--format <format>", "tweet | thread | article")
     .option("--long", "Raise the tweet limit to the Premium long-post cap (default up to 25000)")

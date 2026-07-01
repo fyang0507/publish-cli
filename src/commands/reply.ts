@@ -4,12 +4,12 @@ import { resolve } from "node:path";
 import { generateContent, renderForInspection } from "../x/content.js";
 
 /**
- * `publish reply x` — stage a NATIVE X REPLY draft targeted at an existing tweet
+ * `publish x reply` — stage a NATIVE X REPLY draft targeted at an existing tweet
  * (issue #8). Closes the watcher -> publisher loop: the watcher surfaces a
  * borrowed-reach opportunity (a tweet id/url), and this command turns the
  * operator's canonical base markdown into a reply that sits ONE CLICK from posting.
  *
- * HARD BOUNDARY (same as `draft x`): this NEVER posts. It opens a reply-targeted
+ * HARD BOUNDARY (same as `draft`): this NEVER posts. It opens a reply-targeted
  * composer (https://x.com/compose/post?in_reply_to=<id>), types the generated
  * reply (single tweet by default; a thread if the content overflows), and SAVES
  * IT AS A NATIVE DRAFT via the same close->Save flow. A human takes the last click.
@@ -30,13 +30,9 @@ interface ReplyXOptions {
   inspect?: boolean;
 }
 
-export function registerReplyCommand(program: Command): void {
-  const reply = program
+export function registerReplyCommand(x: Command): void {
+  x
     .command("reply")
-    .description("Generate channel REPLY drafts targeted at an existing post");
-
-  reply
-    .command("x")
     .description("Stage a NATIVE X reply draft targeted at a tweet — never posts")
     .requiredOption("--to <id|url>", "Target tweet: a status URL or a raw numeric id")
     .requiredOption("--from <base.md>", "Path to the canonical base markdown for the reply")
