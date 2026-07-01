@@ -100,6 +100,12 @@ export interface TriageConfig {
   persona: string;
   dimensions: string[];
   min_score: number;
+  /**
+   * How many posts to send the model per triage call. Short tweets pack fine at
+   * ~25; going much higher risks the low-effort model truncating its JSON array
+   * (the cap is output length). Overridable per-run via `--batch-size`.
+   */
+  batch_size: number;
 }
 
 /** Parsed watch.yaml behavior config for the X watch loop. */
@@ -107,6 +113,8 @@ export interface WatchConfig {
   triage_model: string;
   queries: string[];
   accounts: string[];
+  /** X List ids whose merged member timeline to read (one fetch covers N accounts). */
+  lists: string[];
   per_origin_limit: number;
   triage: TriageConfig;
 }
@@ -115,11 +123,13 @@ const WATCH_DEFAULTS: WatchConfig = {
   triage_model: env.TRIAGE_MODEL,
   queries: [],
   accounts: [],
+  lists: [],
   per_origin_limit: 25,
   triage: {
     persona: "",
     dimensions: ["fit", "timeliness", "unique_value"],
     min_score: 60,
+    batch_size: 25,
   },
 };
 

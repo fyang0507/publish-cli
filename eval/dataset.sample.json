@@ -1,0 +1,67 @@
+{
+  "_comment": "Placeholder labeled dataset for the triage eval. Replace with ~50 real, hand-labeled posts. Each item is an XPost-shaped record plus a human `label`: true = worth a reply from the persona, false = not worth it. See eval/README.md. `id` must be unique; `text` is what the model scores.",
+  "persona": "Fred is an AI engineer/consultant focused on agent harnesses, evals, and forward-deployed engineering for the AI community. A good follow-up is one where Fred can add a concrete, non-obvious insight from hands-on experience.",
+  "dimensions": ["fit", "timeliness", "unique_value"],
+  "posts": [
+    {
+      "id": "sample-1",
+      "url": "https://x.com/example/status/sample-1",
+      "authorHandle": "example",
+      "text": "Spent the day fighting flaky evals for our agent harness — tool-call assertions pass locally but drift in CI. How is everyone stabilizing LLM-in-the-loop tests?",
+      "createdAt": "2026-06-30T09:00:00.000Z",
+      "origin": "query:agent evals",
+      "metrics": { "likes": 42, "reposts": 3, "replies": 11, "views": 5300 },
+      "label": true
+    },
+    {
+      "id": "sample-2",
+      "url": "https://x.com/example/status/sample-2",
+      "authorHandle": "example",
+      "text": "Hot take: context engineering is just prompt engineering with extra steps. Change my mind.",
+      "createdAt": "2026-06-30T08:30:00.000Z",
+      "origin": "query:context engineering",
+      "metrics": { "likes": 210, "reposts": 8, "replies": 60, "views": 40000 },
+      "label": true
+    },
+    {
+      "id": "sample-3",
+      "url": "https://x.com/example/status/sample-3",
+      "authorHandle": "example",
+      "text": "gm ☕️ what's everyone building today?",
+      "createdAt": "2026-06-30T07:00:00.000Z",
+      "origin": "account:example",
+      "metrics": { "likes": 5, "reposts": 0, "replies": 2, "views": 300 },
+      "label": false
+    },
+    {
+      "id": "sample-4",
+      "url": "https://x.com/example/status/sample-4",
+      "authorHandle": "example",
+      "text": "SALE: my Notion productivity template is 50% off this week only. Link in bio 🔥🔥🔥",
+      "createdAt": "2026-06-29T12:00:00.000Z",
+      "origin": "query:productivity",
+      "metrics": { "likes": 1, "reposts": 0, "replies": 0, "views": 90 },
+      "label": false
+    },
+    {
+      "id": "sample-5",
+      "url": "https://x.com/example/status/sample-5",
+      "authorHandle": "example",
+      "text": "We deployed a forward-deployed engineer model with a client and cut their integration time from 6 weeks to 4 days. Writing up the playbook — what would you want to see in it?",
+      "createdAt": "2026-06-30T10:15:00.000Z",
+      "origin": "query:forward deployed engineer",
+      "metrics": { "likes": 88, "reposts": 12, "replies": 20, "views": 12000 },
+      "label": true
+    },
+    {
+      "id": "sample-6",
+      "url": "https://x.com/example/status/sample-6",
+      "authorHandle": "example",
+      "text": "The sunset over the bay tonight was unreal 🌅",
+      "createdAt": "2026-06-28T02:00:00.000Z",
+      "origin": "account:example",
+      "metrics": { "likes": 30, "reposts": 0, "replies": 1, "views": 800 },
+      "label": false
+    }
+  ]
+}

@@ -31,14 +31,16 @@ export interface TriagedPost {
  * Scores returned here are 0-1; the caller maps to the 0-100 `min_score` gate.
  *
  * @param model cheap model id (config.TRIAGE_MODEL / watch.yaml triage_model).
- * @param batchSize how many posts per model call (default 10).
+ * @param batchSize how many posts per model call (default 25; see
+ *   TriageConfig.batch_size — short tweets pack fine at ~25, much higher risks
+ *   the low-effort model truncating its JSON output).
  */
 export async function triagePosts(
   posts: XPost[],
   triageConfig: TriageConfig,
   model: string,
   gemini: GeminiClient = new GeminiClient(),
-  batchSize = 10,
+  batchSize = 25,
 ): Promise<TriagedPost[]> {
   if (posts.length === 0) return [];
 

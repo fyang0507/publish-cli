@@ -14,12 +14,22 @@ queries:
   - "\"forward deployed engineer\" AI"
 
 # Accounts (handles, without the leading @) whose recent timelines to monitor.
+# NOTE: each account is a separate profile page load per poll. For many accounts
+# prefer `lists:` below — one fetch of a List covers all its members. Keep
+# `accounts:` as the small-N fallback.
 accounts:
   - swyx
   - simonw
   - eugeneyan
 
-# How many recent posts to pull per origin (query or account) on each poll.
+# X List ids to monitor. One fetch of `x.com/i/lists/<id>` returns the merged
+# recent timeline of ALL members, so a List of N accounts costs one page load
+# instead of N. Curate the List in the X UI (/i/lists/create), then paste ids
+# here (repeatable) or pass --list <id> on the CLI.
+lists: []
+#   - "1700000000000000000"
+
+# How many recent posts to pull per origin (query / account / list) on each poll.
 per_origin_limit: 25
 
 # Triage criteria — passed to the cheap model as the rubric for scoring each post on
@@ -39,3 +49,10 @@ triage:
     - unique_value   # can Fred add something others in the thread can't
   # Only surface candidates at or above this score (0-100) in the ranked output.
   min_score: 60
+  # How many posts to send the cheap model per triage call. ~25 packs fine for
+  # short tweets; much higher risks the low-effort model truncating its JSON
+  # output. Tune with eval/ (see eval/README.md); override per-run with
+  # --batch-size. NOTE: the persona/dimensions here are DEFAULTS — the calling
+  # agent owns triage and can override them per-run with --persona / --dimensions,
+  # or skip triage entirely with --no-triage to judge the raw posts itself.
+  batch_size: 25

@@ -25,6 +25,11 @@ export interface XReader {
   init(): Promise<void>;
   fetchSearch(query: string, limit: number): Promise<XPost[]>;
   fetchUserTimeline(handle: string, limit: number): Promise<XPost[]>;
+  /**
+   * Read one X List's merged member timeline in a single page load — scales the
+   * account path (one fetch covers all N members instead of N profile loads).
+   */
+  fetchListTimeline(listId: string, limit: number): Promise<XPost[]>;
   /** Release the browser session (call once when done). */
   close(): Promise<void>;
 }
@@ -75,6 +80,25 @@ export class BrowserReader implements XReader {
       clean,
       limit,
     );
+  }
+
+  /**
+   * Read an X List's merged member timeline. One page load covers every member
+   * of the List (a single response has been observed carrying ~39 distinct
+   * authors), so this is the scale path for the account side: put N watched
+   * accounts in a List and read them in one fetch instead of N profile loads.
+   *
+   * origin is `list:<listId>` so surfaced posts are attributable to the List.
+   *
+   * NOTE (best-effort, needs live calibration): op name confirmed as
+   * `ListLatestTweetsTimeline` (issue #9). Member timelines page like any feed
+   * via cursor — collect()'s scroll loop drives that — and may include reposts,
+   * the same author-filter question the profile path has.
+   */
+  async fetchListTimeline(listId: string, limit: number): Promise<XPost[]> {
+    const clean = listId.replace(/^@/, "").trim();
+    const url = `https://x.com/i/lists/${encodeURIComponent(clean)}`;
+    return this.collect(url, ["ListLatestTweetsTimeline"], `list:${clean}`, limit);
   }
 
   async close(): Promise<void> {
