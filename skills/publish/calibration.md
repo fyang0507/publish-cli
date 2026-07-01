@@ -1,23 +1,34 @@
-# Selector Calibration (browser-driven paths)
+# Selector calibration (browser-driven paths)
 
-Load this note only when a browser-driven run (login or composer) hangs, times out, or lands somewhere unexpected — not for normal operation.
-
-## Why this exists
-
-X's **login DOM and composer DOM drift**. The CLI centralizes its selectors and tries multiple strategies (role / text / test-id / CSS) with explicit waits, but selectors are best-effort and need **live calibration** against the current X UI. This is the single most fragile surface in the tool.
+X's **login and composer DOM drift.** The CLI centralizes its selectors and tries
+multiple strategies (role / text / test-id / CSS) with explicit waits, but they are
+best-effort and occasionally need **live recalibration** against the current X UI.
+This is the most fragile surface in the tool. Consult this when a browser-driven
+run (login, composer, or the Articles editor) hangs, times out, or lands somewhere
+unexpected.
 
 ## How to calibrate
 
-1. Re-run the same command with **`--inspect`** to get a headful browser a human can watch:
+1. Re-run the same command with **`--inspect`** for a headful browser you can watch:
    ```bash
-   publish draft x --from <base.md> --format tweet --inspect
-   publish watch x --inspect   # if the session needs a re-login
+   publish draft x --from <file.md> --format tweet --inspect
+   publish watch x --inspect      # if the session needs a re-login
    ```
-2. Watch where the flow stalls:
-   - **Login** — username field, the optional "enter your email/phone to confirm" interstitial (answered with `X_EMAIL`), the password field, or the logged-in landing check.
-   - **Composer** — the tweet text box, the thread "add post" affordance, or the Articles composer.
-3. The persistent profile lives under `PUBLISH_DATA_DIR` (`~/.publish-cli/x-profile` by default). Once logged in it **stays** logged in, so a hang is usually a composer selector, not auth.
+2. Note where the flow stalls:
+   - **Login** — username field, the optional "enter your email/phone to confirm"
+     interstitial (answered with `X_EMAIL`), the password field, or the logged-in
+     landing check.
+   - **Composer** — the tweet text box, the thread "add post" affordance, the reply
+     composer, or the Articles editor (body paste, cover-image upload).
+3. The persistent profile lives under `PUBLISH_DATA_DIR` (`~/.publish-cli/x-profile`
+   by default). Once logged in it **stays** logged in, so a hang is usually a
+   composer/editor selector, not auth.
 
-## What to report back
+## Fixing
 
-If a step is genuinely broken (not a transient network blip), capture which step stalled and the current on-screen UI, and hand it to whoever maintains the selector module. In headless runs, follow the project's headless-error-report path rather than retrying blindly.
+Selectors live in one place per surface: `X_SELECTORS` (login) in `src/session.ts`
+and `X_COMPOSER_SELECTORS` in `src/x/draftPoster.ts`. Match X GraphQL read
+operations by op **name** (query-id hashes drift), not by full path. Capture which
+step stalled and the current on-screen DOM, update the relevant selector list, and
+rebuild. In unattended runs, route the failure through your environment's
+error-reporting path rather than retrying blindly.
