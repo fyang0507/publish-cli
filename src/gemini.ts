@@ -51,7 +51,7 @@ export class GeminiClient {
    * scored JSON it asked the model to produce in `prompt`.
    *
    * @param model cheap model id (e.g. gemini-3.5-flash / TRIAGE_MODEL).
-   * @param thinkingLevel reasoning effort; defaults to "low" per Fred's spec
+   * @param thinkingLevel reasoning effort; defaults to "low" per spec
    *   (cheap but slightly better discrimination than "minimal").
    */
   async triage(

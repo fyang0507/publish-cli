@@ -1,6 +1,6 @@
 {
   "_comment": "Placeholder labeled dataset for the triage eval. Replace with ~50 real, hand-labeled posts. Each item is an XPost-shaped record plus a human `label`: true = worth a reply from the persona, false = not worth it. See eval/README.md. `id` must be unique; `text` is what the model scores.",
-  "persona": "Fred is an AI engineer/consultant focused on agent harnesses, evals, and forward-deployed engineering for the AI community. A good follow-up is one where Fred can add a concrete, non-obvious insight from hands-on experience.",
+  "persona": "An AI engineer/consultant focused on agent harnesses, evals, and forward-deployed engineering for the AI community. A good follow-up is one where the operator can add a concrete, non-obvious insight from hands-on experience.",
   "dimensions": ["fit", "timeliness", "unique_value"],
   "posts": [
     {

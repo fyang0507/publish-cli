@@ -1,6 +1,6 @@
 # publish-cli — Product Specification
 
-> A per-channel content distribution toolkit for growing Fred's audience in the AI community.
+> A per-channel content distribution toolkit for growing the operator's audience in the AI community.
 > CLI binary: `publish`. This deliverable ships the **X channel only** (session + watcher + publisher).
 >
 > **X auth backbone:** unattended **credential auto-login** through a **persistent Playwright browser profile** — credentials from `.env`, no pasted cookies. **One login event feeds two consumers, and BOTH drive the same logged-in browser:** the watcher reads by navigating X in that browser and **capturing X's own GraphQL responses** (`SearchTimeline` / `UserTweets`) off the wire; the publisher drives the same profile's composer. The publisher creates **native drafts on X** (typed into X's own composer and saved as drafts), never local copy-paste files, and **never clicks Post**. (X gates every authenticated read behind a per-request `x-client-transaction-id` that only X's own page JS can mint, so out-of-band HTTP clients like `agent-twitter-client` / `twikit` were abandoned — driving the real browser is the only reliable read path.)
@@ -9,7 +9,7 @@
 
 ## 1. Vision
 
-The goal is **audience growth and distribution**, not authoring. Fred already produces high-signal long-form thinking on AI agents, enablement, and engineering practice. The bottleneck is reach: good writing that nobody encounters does not compound.
+The goal is **audience growth and distribution**, not authoring. The operator already produces high-signal long-form thinking on AI agents, enablement, and engineering practice. The bottleneck is reach: good writing that nobody encounters does not compound.
 
 **Why publishing alone is insufficient at cold start.** Pushing owned content into a feed assumes the feed already routes attention to you. At cold start it does not — there is no follower graph, no engagement history, and the ranking systems have no reason to surface your posts. Publishing into a vacuum produces near-zero distribution regardless of quality. Reach has to be *borrowed* first: you show up with additive, high-fit contributions inside conversations that **already have an audience** (popular posts, active threads, relevant searches), and you convert a slice of that borrowed attention into followers who will then see your owned content. Distribution is therefore two coupled motions — **publish** (owned) and **watch + engage** (borrowed) — and the toolkit treats them as first-class peers, not as a posting tool with monitoring bolted on.
 
@@ -65,7 +65,7 @@ author ──▶ tailor-per-platform ──▶ publish ──▶ log
    └──────────────── feeds future authoring ◀─────┘
 ```
 
-- **author** — Fred writes a canonical base draft (markdown) under `publish/<date>-<slug>/`.
+- **author** — the operator writes a canonical base draft (markdown) under `<date>-<slug>/` in the caller-supplied data repo.
 - **tailor-per-platform** — the channel's PUBLISH capability transforms the base draft into surface-specific content (for X: tweet / thread / Article).
 - **publish** — the content is **staged as a native draft on the platform**. For X, the publisher types the tailored content into X's own composer and saves it as a draft — **one click from publishing**, but it **never clicks Post** (the actual Post is future scope behind the SEND-GATE, §5).
 - **log** — the published item is recorded in Notion as the durable post-publish record (after a human posts).
@@ -85,7 +85,7 @@ draft additive reply  ──▶  human sends  ──▶  measure
 ```
 
 - **monitor** — pull recent posts from watched accounts and search queries.
-- **triage** — a cheap LLM scores each item for follow-up fit (timeliness, relevance, whether Fred can add unique value).
+- **triage** — a cheap LLM scores each item for follow-up fit (timeliness, relevance, whether the operator can add unique value).
 - **draft additive reply** — generate a reply that genuinely adds value (not a drive-by).
 - **human sends** — the send action is gated on human approval (see §5).
 - **measure** — track outcomes to refine targets and queries.
@@ -100,14 +100,14 @@ The watch loop earns the borrowed attention that the owned loop needs to land. T
 
 The **single source of truth for content is the local markdown filesystem**, not Notion.
 
-- Canonical drafts live under: `/Users/fredy/Downloads/fred-agent/publish/<date>-<slug>/`
+- Canonical drafts live under a per-article folder `<date>-<slug>/` inside the **caller-supplied data repo** (configurable via env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up; never a hardcoded personal path — see `skills/publish/SETUP.md`).
 - Each article folder holds the **base draft**, images, prompts, and notes together (per that directory's `AGENTS.md` workflow).
 - publish-cli **reads** the canonical base draft from this folder. It does **not** write platform-variant files here as the primary output: the X publisher's real output is a **native draft created on X itself** (typed into X's composer, saved unsent). The canonical folder stays the human-owned drafting surface; the platform draft lives on the platform.
 - The generated tweet/thread/Article content can optionally be echoed to disk for inspection (notably in `--dry-run`, which never touches the browser), but that is a debug artifact, not the deliverable.
 - **Notion is the post-publish record**, the durable final publication log — not the drafting or co-editing surface. publish-cli does not draft in Notion. The owned-content loop only writes to Notion at the **log** step, after a human has posted.
 
 ```
-publish/2026-06-29-agent-enablement/
+<data-repo>/2026-06-29-agent-enablement/
   agent-enablement-base.md        ← canonical source (READ by publish-cli)
   technical-visual.png            ← becomes a screenshot/image for code blocks
   thumbnail-illustration.png
@@ -116,11 +116,11 @@ publish/2026-06-29-agent-enablement/
 
 ### 4.1 Runtime data lives off Google Drive
 
-The canonical content folder is under `/Users/fredy/Downloads/fred-agent/publish/` (local, **not** Google Drive). publish-cli's **runtime state** — the persistent Playwright profile, the exported cookie cache, and the better-sqlite3 dedupe DB — also lives off Google Drive, under a configurable **`PUBLISH_DATA_DIR`** (default a local app-data path). Reasons:
+The canonical content folder lives in a local, caller-supplied data repo (**not** on a cloud-synced path). publish-cli's **runtime state** — the persistent Playwright profile, the exported cookie cache, and the better-sqlite3 dedupe DB — also lives off any cloud-synced path, under a configurable **`PUBLISH_DATA_DIR`** (default a local app-data path). Reasons:
 
 - The persistent browser profile and SQLite file are mutated continuously and tolerate no cloud-sync races, file-lock contention, or partial uploads.
-- Cookies and a logged-in profile are **secrets**; they must not be replicated into Drive.
-- This keeps the "scratchpad" (local) cleanly separated from any archival surface (Drive is an archive only, never touched by this tool).
+- Cookies and a logged-in profile are **secrets**; they must not be replicated into any cloud-synced location.
+- This keeps the "scratchpad" (local) cleanly separated from any archival surface (a cloud-synced drive is an archive only, never touched by this tool).
 
 ---
 
@@ -237,9 +237,9 @@ accounts:
 
 **Triage**
 - Invoke a **cheap Gemini model** to score each new post for follow-up worthiness:
-  - **fit** — relevance to Fred's topics/voice,
+  - **fit** — relevance to the operator's topics/voice,
   - **timeliness** — is the conversation still live,
-  - **unique value** — can Fred add something genuinely additive.
+  - **unique value** — can the operator add something genuinely additive.
 - Default model id **`gemini-3.5-flash`**, configurable via **`TRIAGE_MODEL`** (env/config).
 - Use a **minimal / low thinking budget** (triage is cheap and high-volume).
 - Each scored item yields: **`{ postId, score (0–1), reason, suggestedAngle }`**.

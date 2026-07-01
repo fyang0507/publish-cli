@@ -1,6 +1,6 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing Fred's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **This deliverable is the X channel only.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **This deliverable is the X channel only.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap.
 
 ## What it does (X channel)
 
@@ -48,7 +48,7 @@ The browser profile, harvested cookie cache, and sqlite dedupe db all live under
 
 ## Canonical content
 
-The source of truth for content is local markdown under `/Users/fredy/Downloads/fred-agent/publish/<date>-<slug>/`. Notion is the post-publish record, not the drafting surface.
+The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from`. The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/SETUP.md](./skills/publish/SETUP.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
 
 ## Usage
 

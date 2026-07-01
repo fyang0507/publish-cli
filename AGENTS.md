@@ -54,4 +54,4 @@ watch.yaml.example    queries / accounts / per_origin_limit / triage rubric
 
 ## Canonical content
 
-Source of truth = local markdown under `/Users/fredy/Downloads/fred-agent/publish/<date>-<slug>/`. The publisher reads `--from` there and writes artifacts back into the same folder (or `--out`). Notion is the post-publish record only.
+Source of truth = caller-supplied local markdown, passed via `--from`. The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — never a hardcoded personal path; see `skills/publish/SETUP.md` for setup specifics. The publisher reads `--from` and writes artifacts back into the same folder (or `--out`). Notion is the post-publish record only.

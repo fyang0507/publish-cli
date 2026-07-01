@@ -4,7 +4,7 @@ import type { XPost } from "./reader.js";
 
 /**
  * Triage verdict for a single candidate post: how worthwhile is a follow-up
- * reply from Fred? Score is normalized 0-1 (1 = strong follow-up candidate).
+ * reply from the operator? Score is normalized 0-1 (1 = strong follow-up candidate).
  */
 export interface TriageResult {
   postId: string;
@@ -12,7 +12,7 @@ export interface TriageResult {
   score: number;
   /** One-line justification the model produced. */
   reason: string;
-  /** A concrete angle Fred could reply with (the additive insight). */
+  /** A concrete angle the operator could reply with (the additive insight). */
   suggestedAngle: string;
 }
 

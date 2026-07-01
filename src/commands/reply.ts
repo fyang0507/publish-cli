@@ -6,8 +6,8 @@ import { generateContent, renderForInspection } from "../x/content.js";
 /**
  * `publish reply x` — stage a NATIVE X REPLY draft targeted at an existing tweet
  * (issue #8). Closes the watcher -> publisher loop: the watcher surfaces a
- * borrowed-reach opportunity (a tweet id/url), and this command turns Fred's
- * canonical base markdown into a reply that sits ONE CLICK from posting.
+ * borrowed-reach opportunity (a tweet id/url), and this command turns the
+ * operator's canonical base markdown into a reply that sits ONE CLICK from posting.
  *
  * HARD BOUNDARY (same as `draft x`): this NEVER posts. It opens a reply-targeted
  * composer (https://x.com/compose/post?in_reply_to=<id>), types the generated

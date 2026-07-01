@@ -1,6 +1,6 @@
 # publish-cli
 
-Per-channel content-distribution toolkit for growing Fred's AI-community audience. Binary: `publish`. **This deliverable = the X channel only** — a WATCH loop and a drafting-only PUBLISH that **never posts**.
+Per-channel content-distribution toolkit for growing the operator's AI-community audience. Binary: `publish`. **This deliverable = the X channel only** — a WATCH loop and a drafting-only PUBLISH that **never posts**.
 
 See [AGENTS.md](./AGENTS.md) for the full working contract and [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the vision/roadmap. Key points:
 

@@ -52,7 +52,7 @@ Flags (all optional; sensible defaults shown in `run.ts`):
 | `--efforts minimal,low,medium,high` | Gemini `thinkingLevel`s to sweep | `low` |
 | `--threshold <0-100>` | score gate → predicted worth-reply label | `60` |
 
-## How Fred adds real labels
+## How to add real labels
 
 1. Copy `dataset.sample.json` to `dataset.json` (gitignored-friendly; keep the
    sample as the committed placeholder).
