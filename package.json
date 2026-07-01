@@ -9,7 +9,6 @@
     "dist/",
     "skills/publish/",
     "README.md",
-    "AGENTS.md",
     "CLAUDE.md",
     ".env.example",
     "watch.yaml.example",
