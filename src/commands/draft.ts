@@ -116,7 +116,7 @@ export function registerDraftCommand(program: Command): void {
       const { stageDraft } = await import("../x/draftPoster.js");
 
       try {
-        const result = await stageDraft(content, { inspect: opts.inspect });
+        const result = await stageDraft(content, { inspect: opts.inspect, basePath: fromPath });
         const count =
           result.format === "thread"
             ? `${result.posts} posts`

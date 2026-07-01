@@ -57,6 +57,37 @@ export interface LinkFlag {
   note: string;
 }
 
+/**
+ * An inline text run inside an article block. Rich formatting is expressed as a
+ * small, deterministic set of marks so the browser layer can apply REAL editor
+ * formatting (bold / links) instead of typing literal markdown characters.
+ */
+export interface InlineRun {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  /** Inline `code` — X Articles has no inline-code style, so this renders as plain text (flagged). */
+  code?: boolean;
+  /** Absolute URL if this run is a link; the editor applies a real hyperlink. */
+  href?: string;
+}
+
+/**
+ * A structured article block, mapped to what X's Articles editor can actually
+ * represent. X Articles supports ~2 heading levels plus body/list/quote — so
+ * markdown H1–H6 are collapsed here (see mapHeadingLevel).
+ */
+export type ArticleBlock =
+  | { kind: "heading"; level: 1 | 2; runs: InlineRun[] }
+  /** H3+ that couldn't map to a real heading — emitted as a bold lead-in paragraph. */
+  | { kind: "subheading"; runs: InlineRun[] }
+  | { kind: "paragraph"; runs: InlineRun[] }
+  | { kind: "bullet"; runs: InlineRun[] }
+  | { kind: "ordered"; runs: InlineRun[] }
+  | { kind: "quote"; runs: InlineRun[] }
+  /** Fenced code — X can't render code; the human pastes a screenshot here. */
+  | { kind: "code"; index: number; lang?: string; text: string };
+
 /** A single post within a thread. */
 export interface ThreadPost {
   /** 1-based position in the thread. */
@@ -78,8 +109,14 @@ export interface GeneratedContent {
   tweet?: { text: string; chars: number };
   /** thread: ordered posts, hook first. */
   thread?: ThreadPost[];
-  /** article: long-form markdown body + a derived title. */
-  article?: { title: string; markdown: string };
+  /**
+   * article: long-form content for X's Articles editor.
+   *   - title:    the Article title field (the doc's leading H1 / first line).
+   *   - markdown: the raw body markdown (retained for --dry-run artifacts / audit).
+   *   - blocks:   STRUCTURED blocks with real formatting marks — the browser layer
+   *               applies these as actual editor styles instead of literal chars.
+   */
+  article?: { title: string; markdown: string; blocks: ArticleBlock[] };
   /** Code blocks that must become screenshots on X. */
   codeFlags: CodeBlockFlag[];
   /** Links surfaced with placement notes. */
@@ -183,7 +220,13 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
       if (line.trim() && !title) {
         title = line.trim();
         titleLineConsumed = true;
-        // keep this line in the body/prose since it wasn't a heading
+        // Drop this line from body/prose just like the H1 branch above:
+        // it's consumed as the Article title / headline. Keeping it caused the
+        // title to appear both in the title field and as the first body
+        // paragraph (duplicate headline) when the doc leads with a plain
+        // (non-`#`) title line. buildArticle re-adds `# title` for the markdown
+        // audit artifact, so the title is never lost.
+        continue;
       }
     }
 
@@ -472,12 +515,219 @@ function buildThread(prose: string, limit: number, warnings: string[]): ThreadPo
   return posts;
 }
 
-function buildArticle(title: string, body: string): { title: string; markdown: string } {
+// ---------------------------------------------------------------------------
+// Article structure (deterministic markdown -> editor-mappable blocks)
+// ---------------------------------------------------------------------------
+
+/**
+ * Map a markdown heading level (1..6) to X Articles' ~2 heading styles.
+ *   - H1/H2 -> editor heading level 1 / 2 (its two real heading styles).
+ *   - H3+   -> no real heading; caller emits a "subheading" (bold lead-in).
+ * Deterministic so structure is reproducible/verifiable (issue #5 req 2).
+ * NOTE: the article DOC title (leading H1/first line) is consumed as the
+ * Article title field upstream (parseBaseMarkdown), so body headings here are
+ * section headings — H1 body heading -> editor H1, H2 -> editor H2.
+ */
+export function mapHeadingLevel(mdLevel: number): 1 | 2 | null {
+  if (mdLevel <= 1) return 1;
+  if (mdLevel === 2) return 2;
+  return null; // H3+ flattens to a bold lead-in paragraph
+}
+
+const INLINE_LINK_RE = /\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
+const INLINE_TOKEN_RE = /(\*\*|__|(?<!\*)\*(?!\*)|_|`)/;
+
+/**
+ * Parse a single line of markdown into inline runs (bold / italic / code / link),
+ * deterministically. Links are extracted first (so their label text can itself
+ * hold emphasis is out of scope — labels are treated as plain), then remaining
+ * emphasis/code markers are resolved with a small stack scan. Best-effort but
+ * dependency-free; unmatched markers degrade to literal text.
+ */
+export function parseInlineRuns(text: string): InlineRun[] {
+  // 1) Split out links, leaving placeholders we re-expand as link runs.
+  interface Segment { text: string; href?: string }
+  const segments: Segment[] = [];
+  let last = 0;
+  INLINE_LINK_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = INLINE_LINK_RE.exec(text)) !== null) {
+    if (m.index > last) segments.push({ text: text.slice(last, m.index) });
+    segments.push({ text: m[1] || m[2], href: m[2] });
+    last = INLINE_LINK_RE.lastIndex;
+  }
+  if (last < text.length) segments.push({ text: text.slice(last) });
+
+  // 2) Within each non-link segment, resolve **bold**, *italic*/_italic_, `code`.
+  const runs: InlineRun[] = [];
+  for (const seg of segments) {
+    if (seg.href) {
+      runs.push({ text: seg.text, href: seg.href });
+      continue;
+    }
+    runs.push(...resolveEmphasis(seg.text));
+  }
+  // Merge adjacent runs with identical marks to keep the stream compact.
+  return mergeRuns(runs);
+}
+
+function resolveEmphasis(text: string): InlineRun[] {
+  const out: InlineRun[] = [];
+  let rest = text;
+  const state = { bold: false, italic: false, code: false };
+  const push = (t: string) => {
+    if (!t) return;
+    out.push({
+      text: t,
+      ...(state.bold ? { bold: true } : {}),
+      ...(state.italic ? { italic: true } : {}),
+      ...(state.code ? { code: true } : {}),
+    });
+  };
+  while (rest.length) {
+    const mm = rest.match(INLINE_TOKEN_RE);
+    if (!mm || mm.index === undefined) {
+      push(rest);
+      break;
+    }
+    push(rest.slice(0, mm.index));
+    const tok = mm[0];
+    if (tok === "**" || tok === "__") state.bold = !state.bold;
+    else if (tok === "`") state.code = !state.code;
+    else state.italic = !state.italic; // * or _
+    rest = rest.slice(mm.index + tok.length);
+  }
+  return out;
+}
+
+function mergeRuns(runs: InlineRun[]): InlineRun[] {
+  const out: InlineRun[] = [];
+  for (const r of runs) {
+    const prev = out[out.length - 1];
+    if (
+      prev &&
+      !prev.href &&
+      !r.href &&
+      !!prev.bold === !!r.bold &&
+      !!prev.italic === !!r.italic &&
+      !!prev.code === !!r.code
+    ) {
+      prev.text += r.text;
+    } else {
+      out.push({ ...r });
+    }
+  }
+  return out.filter((r) => r.text.length > 0);
+}
+
+/**
+ * Parse an article body (markdown, title line already removed) into structured
+ * blocks the X Articles editor can represent. Fenced code becomes `code` blocks
+ * (flagged for screenshots, consistent with tweet/thread handling).
+ */
+export function parseArticleBlocks(body: string): ArticleBlock[] {
+  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const blocks: ArticleBlock[] = [];
+
+  let inFence = false;
+  let fenceMarker = "";
+  let codeIndex = 0;
+  let codeLang: string | undefined;
+  let codeBuf: string[] = [];
+  let paraBuf: string[] = [];
+
+  const flushPara = () => {
+    const joined = paraBuf.join(" ").trim();
+    paraBuf = [];
+    if (joined) blocks.push({ kind: "paragraph", runs: parseInlineRuns(joined) });
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const fence = line.match(FENCE_RE);
+
+    if (!inFence && fence) {
+      flushPara();
+      inFence = true;
+      fenceMarker = fence[2];
+      codeIndex += 1;
+      codeLang = fence[3].trim() || undefined;
+      codeBuf = [];
+      continue;
+    }
+    if (inFence) {
+      if (fence && fence[2][0] === fenceMarker[0] && fence[2].length >= fenceMarker.length) {
+        inFence = false;
+        fenceMarker = "";
+        blocks.push({ kind: "code", index: codeIndex, lang: codeLang, text: codeBuf.join("\n") });
+      } else {
+        codeBuf.push(line);
+      }
+      continue;
+    }
+
+    // Blank line ends the current paragraph.
+    if (!line.trim()) {
+      flushPara();
+      continue;
+    }
+
+    // Image-only lines are handled as attachments (hero image), not body text.
+    if (/^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line)) {
+      flushPara();
+      continue;
+    }
+
+    // Heading.
+    const h = line.match(/^(#{1,6})\s+(.+)$/);
+    if (h) {
+      flushPara();
+      const level = mapHeadingLevel(h[1].length);
+      const runs = parseInlineRuns(h[2].trim());
+      if (level) blocks.push({ kind: "heading", level, runs });
+      else blocks.push({ kind: "subheading", runs });
+      continue;
+    }
+
+    // Blockquote.
+    const q = line.match(/^>\s?(.*)$/);
+    if (q) {
+      flushPara();
+      blocks.push({ kind: "quote", runs: parseInlineRuns(q[1].trim()) });
+      continue;
+    }
+
+    // Ordered list item.
+    const ol = line.match(/^\s*\d+[.)]\s+(.+)$/);
+    if (ol) {
+      flushPara();
+      blocks.push({ kind: "ordered", runs: parseInlineRuns(ol[1].trim()) });
+      continue;
+    }
+
+    // Unordered list item.
+    const ul = line.match(/^\s*[-*+]\s+(.+)$/);
+    if (ul) {
+      flushPara();
+      blocks.push({ kind: "bullet", runs: parseInlineRuns(ul[1].trim()) });
+      continue;
+    }
+
+    // Ordinary prose line — accumulate into the current paragraph.
+    paraBuf.push(line.trim());
+  }
+  flushPara();
+  return blocks;
+}
+
+function buildArticle(title: string, body: string): { title: string; markdown: string; blocks: ArticleBlock[] } {
   // Article markdown is the long-form body as-is (title becomes the Article
-  // headline; the Articles composer renders markdown). We keep the body intact
-  // including images/code so the human can adjust in X's Articles editor.
+  // headline). We keep the raw markdown for the --dry-run artifact / audit, and
+  // ALSO parse it into structured blocks so the browser layer can apply REAL
+  // editor formatting (headings/bold/lists/links) instead of literal characters.
   const markdown = body.startsWith("#") ? body : `# ${title}\n\n${body}`;
-  return { title, markdown };
+  const blocks = parseArticleBlocks(body);
+  return { title, markdown, blocks };
 }
 
 /**
