@@ -119,57 +119,10 @@ export const X_COMPOSER_SELECTORS = {
     'div[data-testid="longformRichTextInput"]',
   ],
 
-  // ---- Article rich-formatting controls (ALL NEED LIVE CALIBRATION) ----
-  // X's Articles editor exposes a floating/inline formatting toolbar. The exact
-  // hooks below are BEST-EFFORT guesses and MUST be recalibrated headfully
-  // (`--inspect`): open the editor, select text, and read the toolbar buttons'
-  // real data-testid / aria-label. Where a stable hook is unknown we fall back
-  // to KEYBOARD SHORTCUTS in applyBlockFormat() (bold = Ctrl/Cmd+B), which is
-  // the most drift-resistant path.
-  articleToolbarBold: [
-    '[data-testid="toolBarBold"]',
-    'button[aria-label="Bold"]',
-    '//button[@aria-label="Bold"]',
-  ],
-  // Heading buttons: X Articles has ~2 heading styles. Real testids UNKNOWN —
-  // NEEDS LIVE CALIBRATION. We keep aria-label guesses and otherwise flatten.
-  articleToolbarHeading1: [
-    '[data-testid="toolBarHeading1"]',
-    'button[aria-label="Heading 1"]',
-    'button[aria-label="Big heading"]',
-  ],
-  articleToolbarHeading2: [
-    '[data-testid="toolBarHeading2"]',
-    'button[aria-label="Heading 2"]',
-    'button[aria-label="Small heading"]',
-  ],
-  articleToolbarBullet: [
-    '[data-testid="toolBarBulletedList"]',
-    'button[aria-label="Bulleted list"]',
-  ],
-  articleToolbarOrdered: [
-    '[data-testid="toolBarNumberedList"]',
-    'button[aria-label="Numbered list"]',
-  ],
-  articleToolbarQuote: [
-    '[data-testid="toolBarQuote"]',
-    'button[aria-label="Quote"]',
-  ],
-  // Link: X shows a link button that opens a URL input. testids UNKNOWN.
-  articleToolbarLink: [
-    '[data-testid="toolBarLink"]',
-    'button[aria-label="Link"]',
-  ],
-  articleLinkUrlInput: [
-    'input[data-testid="linkUrlInput"]',
-    'input[aria-label="URL"]',
-    'input[type="url"]',
-  ],
-  articleLinkConfirm: [
-    '[data-testid="linkConfirm"]',
-    '//span[text()="Apply"]/ancestor::*[@role="button"][1]',
-    '//span[text()="Done"]/ancestor::*[@role="button"][1]',
-  ],
+  // NOTE: the old guessed rich-formatting toolbar/link selectors
+  // (articleToolbar* / articleLink*) were REMOVED in the paste-based rewrite
+  // (issue #5). The editor accepts rich HTML paste and converts it natively
+  // (h1/h2/p/ul/ol/blockquote/a/strong/em/s), so we no longer drive a toolbar.
 
   // ---- Article hero / cover image (REQUIRED to publish; 5:2 ratio) ----
   // The cover-image control + hidden file <input>. testids are BEST-EFFORT and
@@ -288,7 +241,7 @@ export async function stageDraft(
   const page = await ctx.newPage();
   try {
     if (content.format === "article") {
-      return await stageArticleDraft(page, content, opts.basePath);
+      return await stageArticleDraft(ctx, page, content, opts.basePath);
     }
     return await stageTweetOrThreadDraft(page, content);
   } finally {
@@ -461,22 +414,28 @@ export async function stageReplyDraft(
 }
 
 /**
- * Article (issue #5): open the Articles editor, set the title field, then build
- * the body from STRUCTURED BLOCKS applying REAL editor formatting (headings /
- * bold / lists / links / quotes) rather than typing literal markdown chars, and
- * attach the REQUIRED 5:2 hero image. Leaves it unsent (Articles autosave).
- * NEVER clicks Publish.
+ * Article (issue #5): PASTE-BASED renderer. The X Articles editor accepts rich
+ * HTML paste and converts it natively (VERIFIED empirically 2026-06):
+ *   <h1>→Heading, <h2>→Subheading, <p>→paragraph, <ul>/<ol><li>→lists,
+ *   <blockquote>→quote, <a href>→link, inline <strong>/<em>/<s>→bold/italic/strike.
+ * The ONLY thing paste does NOT convert is code blocks (they land as plain text),
+ * so those are EXCLUDED from the paste and surfaced in the result note instead.
  *
- * DETERMINISTIC parts (fully implemented, verifiable): block/heading/inline
- * parsing lives in content.ts; hero-image discovery + 5:2 ratio validation here.
+ * Flow: open the hub → click create → wait for the title input → type the title →
+ * build an HTML fragment from the structured blocks → write it to the clipboard
+ * in-page (text/html + text/plain fallback) → focus the body composer → paste
+ * (Meta+V / Ctrl+V) → let the editor convert. Then best-effort attach the 5:2
+ * hero image. Leaves it unsent (Articles autosave). NEVER clicks Publish.
  *
- * BROWSER-INTERACTION parts (BEST-EFFORT, marked "NEEDS LIVE CALIBRATION"):
- * applying toolbar styles and uploading/cropping the cover depend on the live
- * editor DOM, which cannot be exercised at build time. Every such step is
- * centralized in X_COMPOSER_SELECTORS and degrades gracefully (falls back to
- * plain typed text / records a note) instead of clicking anything destructive.
+ * DETERMINISTIC parts (fully implemented, verifiable at build time): block/inline
+ * parsing (content.ts), HTML rendering (htmlFromArticleBlocks), hero-image
+ * discovery + 5:2 ratio validation (resolveHeroImage).
+ *
+ * BROWSER-INTERACTION part still needing live calibration: the 5:2 HERO IMAGE
+ * upload (articleCover* selectors + crop/apply dialog) — degrades gracefully.
  */
 async function stageArticleDraft(
+  ctx: BrowserContext,
   page: Page,
   content: GeneratedContent,
   basePath?: string,
@@ -517,13 +476,52 @@ async function stageArticleDraft(
     X_COMPOSER_SELECTORS.articleBodyInput,
     "Article body input",
   );
+
+  // Build the body as an HTML fragment the editor converts natively on paste
+  // (issue #5). Code blocks are excluded and counted for a human-facing note.
+  const { html, codeBlockCount } = htmlFromArticleBlocks(content.article.blocks);
+  const plainFallback = plainTextFromArticleBlocks(content.article.blocks);
+
+  // Grant clipboard perms so the in-page navigator.clipboard.write() succeeds.
+  await ctx
+    .grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://x.com" })
+    .catch(() => {});
+
   await bodyBox.click();
+  await bodyBox.focus();
 
-  // Build the body block-by-block with REAL formatting (issue #5 req 1 & 2).
-  await typeArticleBlocks(page, bodyBox, content.article.blocks, notes);
+  // Write rich HTML (+ plain-text fallback) to the clipboard from within the page,
+  // then paste it into the focused composer. The editor converts the HTML to its
+  // native blocks (VERIFIED). We keep plain text as a fallback for surfaces that
+  // ignore text/html.
+  await page.evaluate(
+    async ({ html, plain }) => {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([plain], { type: "text/plain" }),
+        }),
+      ]);
+    },
+    { html, plain: plainFallback },
+  );
+  await page.keyboard.press(`${modifier()}+KeyV`);
+  // Let the editor process the paste + convert blocks.
+  await page.waitForTimeout(1_000);
 
-  // Attach the REQUIRED 5:2 hero image (issue #5 req 3).
+  if (codeBlockCount > 0) {
+    notes.push(
+      `${codeBlockCount} code block${codeBlockCount === 1 ? "" : "s"} NOT auto-formatted ` +
+        "(paste does not convert code to a code block on X). Add each via the editor's " +
+        "Insert → Code, or paste a screenshot. The code text was intentionally excluded " +
+        "from the pasted HTML so it doesn't land as broken plain text.",
+    );
+  }
+
+  // Attach the REQUIRED 5:2 hero image (issue #5 req 3). BEST-EFFORT — the cover
+  // upload flow NEEDS LIVE CALIBRATION (a human calibrates it).
   const hero = resolveHeroImage(basePath);
+  let heroAttached = false;
   if (!hero.path) {
     notes.push(
       "HERO IMAGE MISSING: X requires a 5:2 cover image to publish. " +
@@ -540,7 +538,10 @@ async function stageArticleDraft(
     );
   } else {
     const uploaded = await uploadHeroImage(page, hero.path, notes);
-    if (uploaded) notes.push(`Hero image uploaded from ${hero.path} (5:2, ${hero.width}x${hero.height}).`);
+    if (uploaded) {
+      heroAttached = true;
+      notes.push(`Hero image uploaded from ${hero.path} (5:2, ${hero.width}x${hero.height}).`);
+    }
   }
 
   // Articles autosave as drafts; give autosave a moment. Being in the editor with
@@ -553,172 +554,136 @@ async function stageArticleDraft(
     posts: 1,
     verified,
     note:
-      "Article staged in the X Articles editor with structured rich formatting " +
-      "(headings/bold/lists/links applied via editor, not literal markdown). " +
+      "format=article. Body pasted as rich HTML and converted natively by the X " +
+      "Articles editor (headings/subheadings/paragraphs/lists/quotes/links/bold/italic). " +
+      `hero=${heroAttached ? "attached (BEST-EFFORT — verify the crop)" : "not attached"}. ` +
+      `codeBlockCount=${codeBlockCount}. ` +
       "X autosaves Article drafts under Articles → Drafts; review + publish manually. " +
       "NEVER auto-published." +
       (notes.length ? `\n  - ${notes.join("\n  - ")}` : ""),
   };
 }
 
-/**
- * Type the article body block-by-block, applying REAL editor formatting.
- *
- * Strategy per block (BEST-EFFORT; the toolbar hooks NEED LIVE CALIBRATION):
- *   - Type the block's plain text (bold/link marks applied inline where possible).
- *   - Apply a block-level style (heading/list/quote) via the toolbar, else fall
- *     back to a keyboard shortcut, else leave as plain text and record a note.
- *   - Press Enter to start the next block (and reset the style for the next one).
- *
- * We NEVER inject literal `##`/`**` characters. If a formatting control can't be
- * found, the text still lands correctly — only the styling degrades, so the
- * draft is never corrupted. Code blocks are flagged (screenshot), consistent
- * with the tweet/thread handling.
- */
-async function typeArticleBlocks(
-  page: Page,
-  bodyBox: Locator,
-  blocks: ArticleBlock[],
-  notes: string[],
-): Promise<void> {
-  let styleWarned = false;
-  const warnStyle = (what: string) => {
-    if (styleWarned) return;
-    styleWarned = true;
-    notes.push(
-      `RICH FORMATTING (NEEDS LIVE CALIBRATION): could not find the "${what}" toolbar ` +
-        "control; that block was left as plain text. Recalibrate the articleToolbar* " +
-        "selectors headfully (--inspect) — read the editor toolbar's real testids.",
-    );
-  };
+// ---------------------------------------------------------------------------
+// Article HTML rendering (DETERMINISTIC — the X Articles editor converts this
+// HTML fragment to its native blocks on paste, VERIFIED empirically 2026-06).
+// ---------------------------------------------------------------------------
 
-  for (let bi = 0; bi < blocks.length; bi++) {
-    const block = blocks[bi];
-    await bodyBox.focus();
-
-    if (block.kind === "code") {
-      notes.push(
-        `CODE BLOCK #${block.index}${block.lang ? ` [${block.lang}]` : ""}: X can't render ` +
-          "code — a screenshot/image must be pasted here manually (flagged, not typed).",
-      );
-      // Leave a visible placeholder line so the human sees where it goes.
-      await typeRuns(page, [{ text: `[code block #${block.index} → paste screenshot]` }]);
-      await page.keyboard.press("Enter");
-      continue;
-    }
-
-    // Type the inline content with bold/italic/link marks applied as we go.
-    await typeRuns(page, block.runs);
-
-    // Apply a block-level style AFTER the text exists (select the line, click the
-    // toolbar style). Selecting the current line: Home then Shift+End.
-    const selectLine = async () => {
-      await page.keyboard.press("Home");
-      await page.keyboard.press("Shift+End");
-    };
-
-    if (block.kind === "heading") {
-      await selectLine();
-      const sel =
-        block.level === 1
-          ? X_COMPOSER_SELECTORS.articleToolbarHeading1
-          : X_COMPOSER_SELECTORS.articleToolbarHeading2;
-      const btn = await optionalLocator(page, sel, 2_500);
-      if (btn) await btn.click();
-      else warnStyle(`heading ${block.level}`);
-      await page.keyboard.press("End");
-    } else if (block.kind === "subheading") {
-      // H3+ flattened to a BOLD lead-in (issue #5 req 2): bold the whole line.
-      await selectLine();
-      await applyBold(page);
-      await page.keyboard.press("End");
-    } else if (block.kind === "bullet" || block.kind === "ordered") {
-      await selectLine();
-      const sel =
-        block.kind === "bullet"
-          ? X_COMPOSER_SELECTORS.articleToolbarBullet
-          : X_COMPOSER_SELECTORS.articleToolbarOrdered;
-      const btn = await optionalLocator(page, sel, 2_500);
-      if (btn) await btn.click();
-      else warnStyle(block.kind === "bullet" ? "bulleted list" : "numbered list");
-      await page.keyboard.press("End");
-    } else if (block.kind === "quote") {
-      await selectLine();
-      const btn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleToolbarQuote, 2_500);
-      if (btn) await btn.click();
-      else warnStyle("quote");
-      await page.keyboard.press("End");
-    }
-
-    // Next block on a new line (Enter typically also exits a heading/list style).
-    if (bi < blocks.length - 1) await page.keyboard.press("Enter");
-  }
+/** HTML-escape text for safe embedding in an HTML fragment. */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**
- * Type a sequence of inline runs, applying bold (toggle Ctrl/Cmd+B) and real
- * hyperlinks (via the link toolbar) as REAL formatting. Italic maps to Cmd/Ctrl+I.
- * Inline `code` has no X Articles equivalent — typed as plain text.
- *
- * Bold/italic use keyboard shortcuts (drift-resistant). Links use the toolbar
- * (NEEDS LIVE CALIBRATION); if the link control isn't found we type the visible
- * text and record a note rather than inject a raw URL into prose.
+ * Render a sequence of inline runs to escaped HTML with bold/italic/link marks.
+ *   - bold  → <strong>, italic → <em> (X converts these to styled spans).
+ *   - href  → <a href="...">…</a> (X applies a real hyperlink).
+ *   - inline `code` → plain text (X Articles has no inline-code style).
+ * All text is HTML-escaped; hrefs are attribute-escaped.
  */
-async function typeRuns(page: Page, runs: InlineRun[]): Promise<void> {
+function inlineRunsToHtml(runs: InlineRun[]): string {
+  let out = "";
   for (const run of runs) {
     if (!run.text) continue;
-    if (run.href) {
-      // Type the visible label, select it, then apply a real hyperlink.
-      await page.keyboard.insertText(run.text);
-      // Select the just-typed label: Shift+Left * len (code points).
-      const len = [...run.text].length;
-      for (let i = 0; i < len; i++) await page.keyboard.press("Shift+ArrowLeft");
-      await applyLink(page, run.href);
-      // Collapse selection to the end so subsequent text appends after the link.
-      await page.keyboard.press("ArrowRight");
+    let inner = escapeHtml(run.text);
+    // Inline code has no X equivalent — leave as plain (escaped) text.
+    if (run.bold) inner = `<strong>${inner}</strong>`;
+    if (run.italic) inner = `<em>${inner}</em>`;
+    if (run.href) inner = `<a href="${escapeHtml(run.href)}">${inner}</a>`;
+    out += inner;
+  }
+  return out;
+}
+
+/**
+ * Render structured article blocks to an HTML fragment the X Articles editor
+ * converts natively on paste (issue #5).
+ *
+ * Mapping:
+ *   - heading level 1              → <h1>
+ *   - heading level 2 + subheading → <h2>   (X has exactly two heading levels)
+ *   - paragraph                    → <p>
+ *   - quote                        → <blockquote>
+ *   - consecutive bullet blocks    → a single <ul> of <li>
+ *   - consecutive ordered blocks   → a single <ol> of <li>
+ *   - code                         → EXCLUDED (paste won't convert it); counted
+ *
+ * Returns the HTML plus the count of excluded code blocks so the caller can flag
+ * "N code blocks not auto-formatted" and tell the human to add them via
+ * Insert → Code or a screenshot. Deterministic + build-time verifiable.
+ */
+export function htmlFromArticleBlocks(blocks: ArticleBlock[]): {
+  html: string;
+  codeBlockCount: number;
+} {
+  const parts: string[] = [];
+  let codeBlockCount = 0;
+  let i = 0;
+
+  while (i < blocks.length) {
+    const block = blocks[i];
+
+    // Group consecutive bullet / ordered blocks into a single list element.
+    if (block.kind === "bullet" || block.kind === "ordered") {
+      const tag = block.kind === "bullet" ? "ul" : "ol";
+      const items: string[] = [];
+      while (i < blocks.length && blocks[i].kind === block.kind) {
+        const li = blocks[i] as Extract<ArticleBlock, { kind: "bullet" | "ordered" }>;
+        items.push(`<li>${inlineRunsToHtml(li.runs)}</li>`);
+        i++;
+      }
+      parts.push(`<${tag}>${items.join("")}</${tag}>`);
       continue;
     }
-    // Toggle marks ON, type, then toggle them back OFF so they don't bleed into
-    // the next run. Bold = Cmd/Ctrl+B, Italic = Cmd/Ctrl+I (drift-resistant).
-    const toggleMarks = async () => {
-      if (!run.bold && !run.italic) return;
-      await page.keyboard.down(modifier());
-      if (run.bold) await page.keyboard.press("KeyB");
-      if (run.italic) await page.keyboard.press("KeyI");
-      await page.keyboard.up(modifier());
-    };
-    await toggleMarks();
-    await page.keyboard.insertText(run.text);
-    await toggleMarks();
-    await page.waitForTimeout(30);
+
+    switch (block.kind) {
+      case "heading":
+        parts.push(`<h${block.level}>${inlineRunsToHtml(block.runs)}</h${block.level}>`);
+        break;
+      case "subheading":
+        // Subheading maps to the second (and last) X heading level, H2.
+        parts.push(`<h2>${inlineRunsToHtml(block.runs)}</h2>`);
+        break;
+      case "paragraph":
+        parts.push(`<p>${inlineRunsToHtml(block.runs)}</p>`);
+        break;
+      case "quote":
+        parts.push(`<blockquote>${inlineRunsToHtml(block.runs)}</blockquote>`);
+        break;
+      case "code":
+        // Paste does NOT convert code to a code block on X — exclude it and count
+        // it so the caller can surface it (add via Insert → Code / screenshot).
+        codeBlockCount++;
+        break;
+    }
+    i++;
   }
+
+  return { html: parts.join("\n"), codeBlockCount };
+}
+
+/**
+ * Plain-text fallback for the clipboard (used when a surface ignores text/html).
+ * Code blocks are excluded here too (consistent with the HTML), since they are
+ * surfaced separately for manual insertion.
+ */
+function plainTextFromArticleBlocks(blocks: ArticleBlock[]): string {
+  const lines: string[] = [];
+  for (const block of blocks) {
+    if (block.kind === "code") continue;
+    const text = block.runs.map((r) => r.text).join("");
+    lines.push(text);
+  }
+  return lines.join("\n\n");
 }
 
 function modifier(): "Meta" | "Control" {
   return process.platform === "darwin" ? "Meta" : "Control";
-}
-
-/** Bold the current selection via the standard rich-text shortcut. */
-async function applyBold(page: Page): Promise<void> {
-  await page.keyboard.press(`${modifier()}+KeyB`);
-}
-
-/**
- * Apply a real hyperlink to the current selection. Opens the editor's link
- * control, fills the URL, confirms. NEEDS LIVE CALIBRATION (link toolbar +
- * URL-input + confirm testids are unknown). If the control isn't found the
- * label text is left as-is (no raw URL injected).
- */
-async function applyLink(page: Page, href: string): Promise<void> {
-  const linkBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleToolbarLink, 2_000);
-  if (!linkBtn) return; // degrade: keep the label text as plain text
-  await linkBtn.click();
-  const urlInput = await optionalLocator(page, X_COMPOSER_SELECTORS.articleLinkUrlInput, 2_000);
-  if (!urlInput) return;
-  await urlInput.fill(href);
-  const confirm = await optionalLocator(page, X_COMPOSER_SELECTORS.articleLinkConfirm, 2_000);
-  if (confirm) await confirm.click();
-  else await page.keyboard.press("Enter");
 }
 
 // ---------------------------------------------------------------------------

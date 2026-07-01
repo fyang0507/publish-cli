@@ -56,6 +56,15 @@ publish --help
    This drives the persistent logged-in profile, types into X's composer (thread: each post in order; article: the Articles composer), and saves an **unsent draft**. Use `--inspect` on the first staging run to watch the composer interaction.
 5. Report what was staged (format + post/segment count) and hand to the human for the final click.
 
+## Platform constraints — what each surface does NOT support
+
+Author canonical Markdown to the common ceiling; the renderer downgrades for tweets. Full capability matrix + real editor selectors: `docs/PLATFORM_CAPABILITIES.md`.
+
+- **All surfaces:** no headings beyond **H2**; separate paragraphs with a **blank line** (a single newline collapses on Reddit).
+- **X tweet/thread:** NO markdown at all — plain text; links show bare; code/tables/images must become screenshots or attached media.
+- **X Articles:** NO inline `` `code` `` (use a fenced code block instead); NO H3+ (the editor offers only Heading/Subheading). Everything else renders natively — lists, code blocks, tables, strikethrough, dividers, LaTeX, embedded posts, inline images + a required **5:2 hero**.
+- **Reddit self-post:** NO inline images in the body (needs a separate image post); on **old reddit**, fenced code + tables do NOT render (use 4-space-indented code; avoid tables or give a list fallback); must post in **Markdown mode** (the rich editor mangles markdown).
+
 ## Boundaries
 
 - **Never posts.** Both motions stop at "draft on X." The send-gate (headless: Discord approval → wait ~2min → phone escalation, contact-operator pattern) is future scope, not built here.
