@@ -12,7 +12,7 @@ config({ path: resolve(__dirname, "..", ".env"), quiet: true });
 /**
  * Environment config — secrets and infrastructure only.
  *
- * Behavior config (watch queries/accounts/triage criteria) lives in watch.yaml
+ * Behavior config (watch queries/lists/triage criteria) lives in watch.yaml
  * and is loaded separately via loadWatchConfig().
  *
  * X session/auth note: there are NO pasted cookies here. The session module
@@ -108,13 +108,21 @@ export function dataPaths(): DataPaths {
 
 /** Triage rubric, mirrors the `triage:` block of watch.yaml. */
 export interface TriageConfig {
+  /**
+   * Free-text reply-worthiness rubric (who is replying / what's additive). The
+   * scoring dimensions themselves (fit/timeliness/unique_value) are a FIXED,
+   * defined baseline in the triage prompt — not configurable by bare name, since
+   * a bare axis label like "clarity" has no shared definition. Per-run nuance
+   * goes here (or via --persona), where the caller can define its own criteria.
+   */
   persona: string;
-  dimensions: string[];
+  /** Surface candidates at or above this score. Config unit is 0-100. */
   min_score: number;
   /**
    * How many posts to send the model per triage call. Short tweets pack fine at
    * ~25; going much higher risks the low-effort model truncating its JSON array
-   * (the cap is output length). Overridable per-run via `--batch-size`.
+   * (the cap is output length). Config-only — it's perf plumbing, not per-run
+   * editorial judgment.
    */
   batch_size: number;
 }
@@ -123,7 +131,6 @@ export interface TriageConfig {
 export interface WatchConfig {
   triage_model: string;
   queries: string[];
-  accounts: string[];
   /** X List ids whose merged member timeline to read (one fetch covers N accounts). */
   lists: string[];
   per_origin_limit: number;
@@ -133,29 +140,118 @@ export interface WatchConfig {
 const WATCH_DEFAULTS: WatchConfig = {
   triage_model: env.TRIAGE_MODEL,
   queries: [],
-  accounts: [],
   lists: [],
   per_origin_limit: 25,
   triage: {
     persona: "",
-    dimensions: ["fit", "timeliness", "unique_value"],
     min_score: 60,
     batch_size: 25,
   },
 };
 
+const TOP_KEYS = ["triage_model", "queries", "lists", "per_origin_limit", "triage"] as const;
+const TRIAGE_KEYS = ["persona", "min_score", "batch_size"] as const;
+
 /**
- * Load and shallow-merge watch.yaml behavior config over defaults.
+ * Load and VALIDATE watch.yaml behavior config, merged over defaults.
+ *
+ * Unlike a silent shallow-merge, this rejects unknown keys (catches typos like
+ * `dimenions`) and type-checks every field, throwing a single per-field error
+ * list so a bad config fails LOUDLY — the caller (watch command) prints it and
+ * exits before opening the browser, rather than running with silent defaults.
+ *
  * @param path explicit path to a watch.yaml; defaults to ./watch.yaml at the repo root.
  */
 export function loadWatchConfig(path?: string): WatchConfig {
   const file = path ?? resolve(__dirname, "..", "watch.yaml");
-  if (!existsSync(file)) return { ...WATCH_DEFAULTS };
+  // No file = pure defaults (a fully flag-specified run needs no config).
+  if (!existsSync(file)) return { ...WATCH_DEFAULTS, triage: { ...WATCH_DEFAULTS.triage } };
 
-  const parsed = (parseYaml(readFileSync(file, "utf-8")) ?? {}) as Partial<WatchConfig>;
-  return {
-    ...WATCH_DEFAULTS,
-    ...parsed,
-    triage: { ...WATCH_DEFAULTS.triage, ...(parsed.triage ?? {}) },
-  };
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(readFileSync(file, "utf-8")) ?? {};
+  } catch (err) {
+    throw new Error(`watch.yaml is not valid YAML (${file}): ${(err as Error).message}`);
+  }
+  if (!isPlainObject(parsed)) {
+    throw new Error(`watch.yaml must be a YAML mapping (${file}).`);
+  }
+
+  const errors: string[] = [];
+  const out: WatchConfig = { ...WATCH_DEFAULTS, triage: { ...WATCH_DEFAULTS.triage } };
+
+  for (const k of Object.keys(parsed)) {
+    if (!(TOP_KEYS as readonly string[]).includes(k)) {
+      errors.push(`unknown key "${k}" (expected one of: ${TOP_KEYS.join(", ")})`);
+    }
+  }
+
+  if ("triage_model" in parsed) {
+    if (typeof parsed.triage_model === "string" && parsed.triage_model.trim()) out.triage_model = parsed.triage_model;
+    else errors.push(`triage_model: expected a non-empty string, got ${describe(parsed.triage_model)}`);
+  }
+  if ("queries" in parsed) {
+    if (isStringArray(parsed.queries)) out.queries = parsed.queries;
+    else errors.push(`queries: expected a list of strings, got ${describe(parsed.queries)}`);
+  }
+  if ("lists" in parsed) {
+    if (isStringArray(parsed.lists)) out.lists = parsed.lists;
+    else errors.push(`lists: expected a list of strings (X List ids), got ${describe(parsed.lists)}`);
+  }
+  if ("per_origin_limit" in parsed) {
+    if (isPositiveInt(parsed.per_origin_limit)) out.per_origin_limit = parsed.per_origin_limit;
+    else errors.push(`per_origin_limit: expected a positive integer, got ${describe(parsed.per_origin_limit)}`);
+  }
+  if ("triage" in parsed) {
+    if (!isPlainObject(parsed.triage)) {
+      errors.push(`triage: expected a mapping, got ${describe(parsed.triage)}`);
+    } else {
+      const tr = parsed.triage;
+      for (const k of Object.keys(tr)) {
+        if (!(TRIAGE_KEYS as readonly string[]).includes(k)) {
+          errors.push(`triage.${k}: unknown key (expected one of: ${TRIAGE_KEYS.join(", ")})`);
+        }
+      }
+      if ("persona" in tr) {
+        if (typeof tr.persona === "string") out.triage.persona = tr.persona;
+        else errors.push(`triage.persona: expected a string, got ${describe(tr.persona)}`);
+      }
+      if ("min_score" in tr) {
+        if (typeof tr.min_score === "number" && Number.isFinite(tr.min_score) && tr.min_score >= 0 && tr.min_score <= 100) {
+          out.triage.min_score = tr.min_score;
+        } else {
+          errors.push(`triage.min_score: expected a number in 0..100, got ${describe(tr.min_score)}`);
+        }
+      }
+      if ("batch_size" in tr) {
+        if (isPositiveInt(tr.batch_size)) out.triage.batch_size = tr.batch_size;
+        else errors.push(`triage.batch_size: expected a positive integer, got ${describe(tr.batch_size)}`);
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid watch config (${file}):\n` + errors.map((e) => `  - ${e}`).join("\n"));
+  }
+  return out;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function isStringArray(v: unknown): v is string[] {
+  return Array.isArray(v) && v.every((x) => typeof x === "string");
+}
+
+function isPositiveInt(v: unknown): v is number {
+  return typeof v === "number" && Number.isInteger(v) && v > 0;
+}
+
+function describe(v: unknown): string {
+  if (v === null) return "null";
+  if (Array.isArray(v)) return "a list";
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (typeof v === "string") return v.length > 40 ? `a ${v.length}-char string` : JSON.stringify(v);
+  return typeof v;
 }

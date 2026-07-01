@@ -56,13 +56,13 @@ Flags (all optional; sensible defaults shown in `run.ts`):
 
 1. Copy `dataset.sample.json` to `dataset.json` (gitignored-friendly; keep the
    sample as the committed placeholder).
-2. Collect ~50 real posts. Easiest source: run `publish watch x --json --no-triage`
+2. Collect ~50 real posts. Easiest source: run `publish x watch --json --no-triage`
    (issue #6) and copy the emitted `posts[]` — each entry is already the right
    shape (`id`, `url`, `authorHandle`, `text`, `createdAt`, `origin`, `metrics`).
 3. For each post add a boolean **`label`**: `true` if it's genuinely worth a reply
    from the persona, `false` otherwise. Aim for a realistic positive/negative mix.
-4. Set `persona` and `dimensions` at the top of the file to the rubric you want to
-   evaluate (mirrors watch.yaml's `triage:` block / the `--persona` you'd pass).
+4. Set `persona` at the top of the file to the free-text rubric you want to
+   evaluate (mirrors watch.yaml's `triage.persona` / the `--persona` you'd pass).
 5. Run the sweep and pick the batch size with the best F1 that doesn't inflate the
    `miss` column — a rising `miss` (posts the model returned no verdict for) as
    batch size grows is exactly the truncated-JSON failure mode issue #7 warns

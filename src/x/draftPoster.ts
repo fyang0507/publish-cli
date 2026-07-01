@@ -13,7 +13,7 @@
  *   CALIBRATION against the current x.com composer DOM. X's composer (and its
  *   "Drafts" / "Unsent" affordances and the Articles composer) change frequently.
  *   Each field is a list of candidate strategies tried in order with explicit
- *   waits. Run `publish draft x ... --inspect` (headful) to watch the flow and
+ *   waits. Run `publish x draft ... --inspect` (headful) to watch the flow and
  *   recalibrate. Comments below mark exactly which selectors are most fragile.
  *
  * The session module is the SINGLE authenticator — we never log in here; we only

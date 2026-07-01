@@ -43,7 +43,6 @@ interface LabeledPost extends XPost {
 
 interface Dataset {
   persona?: string;
-  dimensions?: string[];
   posts: LabeledPost[];
 }
 
@@ -160,7 +159,6 @@ async function main(): Promise<void> {
 
   const triageConfig: TriageConfig = {
     persona: ds.persona ?? "",
-    dimensions: ds.dimensions ?? ["fit", "timeliness", "unique_value"],
     min_score: args.threshold,
     batch_size: args.batchSizes[0] ?? 25,
   };

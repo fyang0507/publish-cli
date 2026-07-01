@@ -5,104 +5,100 @@ import { BrowserReader, type XPost } from "../x/reader.js";
 import { triagePosts, type TriagedPost } from "../x/triage.js";
 
 /**
- * `publish watch x` — borrowed-reach watch loop for the X channel.
+ * `publish x watch` — borrowed-reach watch loop for the X channel.
  *
  * Flow:
- *   1. Load watch.yaml (loadWatchConfig(--config)) and merge in repeatable
- *      --query / --account flags (flags ADD to config).
- *   2. An AgentTwitterReader reads via the cached harvested cookies (HTTP, no
- *      browser) — fetchSearch(query) per query and fetchUserTimeline(handle) per
- *      account, up to per_origin_limit. A login (headful with --inspect) happens
- *      only if the cookie cache is missing/unusable.
+ *   1. Load + validate watch.yaml (loadWatchConfig(--config)) and merge in
+ *      repeatable --query / --x-list flags (flags ADD to config).
+ *   2. A BrowserReader reads THROUGH the logged-in browser (capturing X's own
+ *      GraphQL responses) — fetchSearch(query) per query and fetchListTimeline(id)
+ *      per List, up to per_origin_limit. A List reads all its members in ONE fetch,
+ *      so it's the scale path for the account side; there is no per-account origin
+ *      (N profile loads don't scale and read as bot traffic — build a List with
+ *      `publish x create-watch-list`). A login (headful with --inspect) happens
+ *      only if the persisted profile isn't authed.
  *   3. Dedupe against the SeenStore (src/db.ts); only NEW post ids proceed.
  *   4. Triage each new post with the cheap Gemini model (config.TRIAGE_MODEL /
  *      watch.yaml triage_model, minimal thinking) -> {postId, score, reason,
- *      suggestedAngle}. The persona/rubric come from watch.yaml but the CALLING
- *      agent owns them — override per-run with --persona / --dimensions, or skip
- *      triage entirely with --no-triage to judge the raw candidates itself.
+ *      suggestedAngle}. The free-text persona/rubric comes from watch.yaml but the
+ *      CALLING agent owns it — supply per-run with --persona, or skip triage
+ *      entirely with --no-triage to judge the raw candidates itself.
  *   5. Emit ranked candidates: human text by default, machine JSON with --json.
  *      Mark surfaced posts as seen.
  */
-export function registerWatchCommand(program: Command): void {
-  const watch = program
+export function registerWatchCommand(x: Command): void {
+  x
     .command("watch")
-    .description("Watch channels for borrowed-reach follow-up opportunities");
-
-  watch
-    .command("x")
-    .description("Watch X: poll queries/accounts/lists, dedupe, triage, rank candidates")
+    .description("Watch X: poll queries/lists, dedupe, triage, rank candidates")
     .option("--query <q...>", "Search query to monitor (repeatable; merges with watch.yaml)")
-    .option("--account <handle...>", "Account handle to monitor (repeatable; merges with watch.yaml)")
-    .option("--list <id...>", "X List id to monitor (repeatable; merges with watch.yaml). One fetch covers all members.")
+    .option("--x-list <id...>", "X List id to monitor (repeatable; merges with watch.yaml). One fetch covers all its members.")
     .option("--config <path>", "Path to watch.yaml (defaults to ./watch.yaml)")
-    // Triage ownership: the calling agent supplies "what's worth replying to" per
-    // run. watch.yaml's persona/dimensions are mere defaults these override.
-    .option("--persona <text>", "Override the triage persona/rubric for this run (defaults to watch.yaml)")
-    .option(
-      "--dimensions <list>",
-      "Override triage dimensions (comma-separated, e.g. fit,timeliness,unique_value)",
-    )
-    .option("--rubric <text>", "Alias for --persona (free-text rubric of what's worth a reply)")
-    .option("--batch-size <n>", "Posts per Gemini triage call (default from watch.yaml, ~25)", parsePositiveInt)
+    // Triage ownership (issue #6): the calling agent supplies the reply-worthiness
+    // RUBRIC per run as FREE TEXT. It can't live as a committed default in this
+    // public repo, so --persona is a caller-supplied input, not an override of a
+    // value the repo ships. The scoring baseline (fit/timeliness/unique_value, each
+    // DEFINED in the prompt) is fixed; nuance goes in the persona prose, where the
+    // caller can define its own criteria unambiguously. Durable infra (model,
+    // min_score, batch_size) lives in config.
+    .option("--persona <text>", "Triage rubric for this run: who is replying / what's worth a reply (falls back to watch.yaml)")
     .option("--no-triage", "Skip Gemini triage; emit the raw deduped posts + metadata for the caller to judge")
     .option("--inspect", "Headful browser if a (re-)login is needed, so a human can calibrate")
     .option("--json", "Emit machine JSON instead of the human-readable summary")
     .action(async (opts: WatchXOptions) => {
-      await runWatchX(opts);
+      try {
+        await runWatchX(opts);
+      } catch (err) {
+        // Config-validation and "nothing to watch" errors are user-actionable —
+        // print the message and exit non-zero rather than dumping a stack trace.
+        console.error((err as Error).message);
+        process.exit(1);
+      }
     });
 }
 
 interface WatchXOptions {
   query?: string[];
-  account?: string[];
-  list?: string[];
+  xList?: string[];
   config?: string;
   persona?: string;
-  dimensions?: string;
-  rubric?: string;
-  batchSize?: number;
   /** commander sets this to `false` when --no-triage is passed (default true). */
   triage?: boolean;
   inspect?: boolean;
   json?: boolean;
 }
 
-/** Commander coercion for a positive-integer flag value. */
-function parsePositiveInt(raw: string): number {
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`expected a positive integer, got "${raw}"`);
-  }
-  return n;
-}
-
 async function runWatchX(opts: WatchXOptions): Promise<void> {
+  // loadWatchConfig validates watch.yaml (when present) and throws a per-field
+  // error on anything malformed — before we open the browser.
   const cfg = loadWatchConfig(opts.config);
 
   // Flags ADD to (don't replace) watch.yaml; dedupe the merged lists.
   const queries = dedupeStrings([...cfg.queries, ...(opts.query ?? [])]);
-  const accounts = dedupeStrings([...cfg.accounts, ...(opts.account ?? [])].map((a) => a.replace(/^@/, "")));
-  const lists = dedupeStrings([...cfg.lists, ...(opts.list ?? [])].map((l) => l.replace(/^@/, "")));
+  const lists = dedupeStrings([...cfg.lists, ...(opts.xList ?? [])].map((l) => l.replace(/^@/, "")));
 
-  if (queries.length === 0 && accounts.length === 0 && lists.length === 0) {
+  if (queries.length === 0 && lists.length === 0) {
     throw new Error(
-      "Nothing to watch: provide --query/--account/--list or populate queries/accounts/lists in watch.yaml.",
+      "Nothing to watch: provide --query/--x-list or populate queries/lists in watch.yaml. " +
+        "To watch accounts, build an X List first with `publish x create-watch-list`.",
     );
   }
 
-  // Triage ownership (issue #6): the CALLER supplies "what's worth replying to"
-  // each run. --persona (or its --rubric alias) and --dimensions override
-  // watch.yaml, which is now just a default. Falls back to cfg.triage otherwise.
+  // Triage ownership (issue #6): the CALLER supplies the reply-worthiness rubric
+  // (free-text persona) each run; batch_size / min_score come from config.
   const triageConfig: TriageConfig = {
     ...cfg.triage,
-    persona: (opts.persona ?? opts.rubric ?? cfg.triage.persona),
-    dimensions: opts.dimensions
-      ? dedupeStrings(opts.dimensions.split(","))
-      : cfg.triage.dimensions,
-    batch_size: opts.batchSize ?? cfg.triage.batch_size,
+    persona: opts.persona ?? cfg.triage.persona,
   };
   // commander's --no-triage sets opts.triage === false (default true/undefined).
   const triageEnabled = opts.triage !== false;
+
+  // Surface a blank rubric so a degraded (generic-persona) triage run is visible
+  // rather than silent — the persona ships empty in the public repo by design.
+  if (triageEnabled && !triageConfig.persona?.trim()) {
+    console.error(
+      "notice: no triage persona/rubric set (flag --persona or watch.yaml triage.persona) — scoring with a generic default.",
+    );
+  }
 
   // Reads run THROUGH the logged-in browser session — X gates HTTP reads behind
   // a per-request transaction-id only its own page JS can mint, so we let the
@@ -123,20 +119,14 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
         errors.push(`search "${q}": ${(err as Error).message}`);
       }
     }
-    // Lists first: one fetch covers all members, the scale path for the account
-    // side. Per-account timelines remain the small-N fallback below.
+    // Lists are the account-side origin: one fetch covers all members, so N
+    // watched accounts cost one page load instead of N (build a List with
+    // `publish x create-watch-list`). There is no per-account origin by design.
     for (const listId of lists) {
       try {
         pulled.push(...(await reader.fetchListTimeline(listId, cfg.per_origin_limit)));
       } catch (err) {
         errors.push(`list ${listId}: ${(err as Error).message}`);
-      }
-    }
-    for (const handle of accounts) {
-      try {
-        pulled.push(...(await reader.fetchUserTimeline(handle, cfg.per_origin_limit)));
-      } catch (err) {
-        errors.push(`timeline @${handle}: ${(err as Error).message}`);
       }
     }
 

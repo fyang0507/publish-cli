@@ -3,7 +3,7 @@
 > A per-channel content distribution toolkit for growing the operator's audience in the AI community.
 > CLI binary: `publish`. This deliverable ships the **X channel only** (session + watcher + publisher).
 >
-> **X auth backbone:** unattended **credential auto-login** through a **persistent Playwright browser profile** — credentials from `.env`, no pasted cookies. **One login event feeds two consumers, and BOTH drive the same logged-in browser:** the watcher reads by navigating X in that browser and **capturing X's own GraphQL responses** (`SearchTimeline` / `UserTweets`) off the wire; the publisher drives the same profile's composer. The publisher creates **native drafts on X** (typed into X's own composer and saved as drafts), never local copy-paste files, and **never clicks Post**. (X gates every authenticated read behind a per-request `x-client-transaction-id` that only X's own page JS can mint, so out-of-band HTTP clients like `agent-twitter-client` / `twikit` were abandoned — driving the real browser is the only reliable read path.)
+> **X auth backbone:** unattended **credential auto-login** through a **persistent Playwright browser profile** — credentials from `.env`, no pasted cookies. **One login event feeds two consumers, and BOTH drive the same logged-in browser:** the watcher reads by navigating X in that browser and **capturing X's own GraphQL responses** (`SearchTimeline` / `ListLatestTweetsTimeline`) off the wire; the publisher drives the same profile's composer. The publisher creates **native drafts on X** (typed into X's own composer and saved as drafts), never local copy-paste files, and **never clicks Post**. (X gates every authenticated read behind a per-request `x-client-transaction-id` that only X's own page JS can mint, so out-of-band HTTP clients like `agent-twitter-client` / `twikit` were abandoned — driving the real browser is the only reliable read path.)
 
 ---
 
@@ -43,7 +43,7 @@ Channels are uniform behind these two capabilities. The **task layer** composes 
 
 | Channel | Publish feasibility | Watch feasibility | Notes |
 |---|---|---|---|
-| **X (Twitter)** | Browser-driven (Playwright, native drafts) | Browser-driven (Playwright, GraphQL-response capture) | No official API key. A persistent Playwright profile auto-logs-in from `.env` credentials; the **publisher drives that profile** to create native drafts, and the **watcher drives the same profile** to read — navigating the search/profile page and **capturing X's own `SearchTimeline` / `UserTweets` GraphQL responses** off the wire (out-of-band cookie clients like `agent-twitter-client` no longer work; see legend). **This deliverable.** |
+| **X (Twitter)** | Browser-driven (Playwright, native drafts) | Browser-driven (Playwright, GraphQL-response capture) | No official API key. A persistent Playwright profile auto-logs-in from `.env` credentials; the **publisher drives that profile** to create native drafts, and the **watcher drives the same profile** to read — navigating the search/List page and **capturing X's own `SearchTimeline` / `ListLatestTweetsTimeline` GraphQL responses** off the wire (out-of-band cookie clients like `agent-twitter-client` no longer work; see legend). **This deliverable.** |
 | **Reddit** | Programmable (API) | Programmable (API) | Official API; subreddit + search monitoring is well-supported. Phase 2. |
 | **微信公众号 (WeChat Official Account)** | Programmable (API) | Limited | Official Account API supports draft + publish. Discovery/watch is weak on-platform. Phase 3. |
 | **LinkedIn** | Browser-driven (Playwright) | Browser-driven | No friendly write API for personal posting; reuse the X pattern — a persistent logged-in browser profile drives publish + watch. Phase 2. |
@@ -84,7 +84,7 @@ draft additive reply  ──▶  human sends  ──▶  measure
         └────────── informs which origins to watch ◀┘
 ```
 
-- **monitor** — pull recent posts from watched accounts and search queries.
+- **monitor** — pull recent posts from watch Lists (accounts grouped into a List) and search queries.
 - **triage** — a cheap LLM scores each item for follow-up fit (timeliness, relevance, whether the operator can add unique value).
 - **draft additive reply** — generate a reply that genuinely adds value (not a drive-by).
 - **human sends** — the send action is gated on human approval (see §5).
@@ -145,7 +145,7 @@ This gate applies uniformly to both loops' send actions (owned publish and watch
 The X module has three parts, layered so a **single login event feeds two consumers** — and **both consumers drive the same logged-in browser**:
 
 1. **Session** (the backbone) — unattended credential auto-login through a persistent Playwright profile; exposes the shared logged-in browser context via `getBrowserContext()`. (It also still harvests `auth_token`/`ct0` cookies to a cache file, but nothing consumes them for reads anymore — see §6.1.)
-2. **Watcher** — drives the shared browser context: navigates the search/profile page and **captures X's own GraphQL responses** (`SearchTimeline` / `UserTweets`) off the wire, then walks the JSON for tweets — dedupes and triages.
+2. **Watcher** — drives the shared browser context: navigates the search/List page and **captures X's own GraphQL responses** (`SearchTimeline` / `ListLatestTweetsTimeline`) off the wire, then walks the JSON for tweets — dedupes and triages.
 3. **Publisher** — drives the same persistent profile's composer to create **native drafts on X**, never posting.
 
 ```
@@ -167,7 +167,7 @@ The X module has three parts, layered so a **single login event feeds two consum
                   navigates X + CAPTURES   types into X composer,
                   GraphQL responses        saves NATIVE DRAFT (no Post)
                   (SearchTimeline /
-                   UserTweets)
+                   ListLatestTweetsTimeline)
 ```
 
 ### 6.1 Session & authentication (the backbone — BUILD FIRST)
@@ -206,30 +206,29 @@ The session module is the foundation everything else depends on. It performs **u
 **Reader / auth (reuse the session — do NOT re-login)**
 - The reader drives the **shared logged-in browser context** from the session module (`getBrowserContext()`). It does **NOT** use `agent-twitter-client`, `twikit`, or any out-of-band cookie-injection HTTP client, and never performs its own login.
 - **Why the browser, not cookies.** X gates every authenticated read behind a per-request **`x-client-transaction-id`** that only X's own page JS can mint. Out-of-band HTTP clients can't generate it: `agent-twitter-client` 401s and `twikit` can't bootstrap the transaction-id. Driving the real logged-in browser sidesteps this — X mints the transaction-ids natively — and unifies the X channel on one mechanism (the same persistent profile the publisher drives).
-- **How it reads (GraphQL-response capture).** Rather than scrape the fragile DOM, the reader (`src/x/reader.ts`, class `BrowserReader`) **navigates** to the search / profile URL and **captures X's own GraphQL responses off the wire** — listening for the `SearchTimeline` / `UserTweets` (and sibling `UserTweetsAndReplies` / `UserMedia`) operations on `/graphql/` — then **walks the JSON** for tweet results (identified by `legacy.full_text` + an id, wherever they nest). It scrolls to lazy-load more until it hits the requested limit or the feed stops growing. The JSON shape is far more stable than the rendered DOM and carries clean metrics.
+- **How it reads (GraphQL-response capture).** Rather than scrape the fragile DOM, the reader (`src/x/reader.ts`, class `BrowserReader`) **navigates** to the search / List URL and **captures X's own GraphQL responses off the wire** — listening for the `SearchTimeline` / `ListLatestTweetsTimeline` operations on `/graphql/` — then **walks the JSON** for tweet results (identified by `legacy.full_text` + an id, wherever they nest). It scrolls to lazy-load more until it hits the requested limit or the feed stops growing. The JSON shape is far more stable than the rendered DOM and carries clean metrics.
 
 **Fetch methods → normalized posts**
 - **`fetchSearch(query)`** — recent posts matching a search query (origin = query).
-- **`fetchUserTimeline(handle)`** — recent posts from a user's timeline (origin = handle, no leading `@`).
+- **`fetchListTimeline(listId)`** — the merged recent timeline of every member of an X List in ONE fetch (origin = `list:<id>`). This is the account-watch path: N accounts in a List cost one page load instead of N profile loads (there is no per-account fetch — that doesn't scale and reads as bot traffic).
 - Both map every result to a **normalized post** shape kept in one place so the rest of the loop stays client-agnostic:
   **`{ id, author, text, createdAt, url, metrics }`** (metrics = likes / reposts / replies / views where available), plus an `origin` for provenance.
 
 **Inputs**
-- A list of search **QUERIES** and a list of X **ACCOUNTS** (handles).
-- Sourced from a **`watch.yaml`** config (ship a committed **`watch.yaml.example`**) and/or CLI flags (`--query`, `--account`). Flags and config merge; flags add to config.
+- A list of search **QUERIES** and a list of X **LISTS** (ids). Accounts are watched via a List, built with `publish x create-watch-list`; there is no per-account origin.
+- Sourced from a **`watch.yaml`** config (ship a committed **`watch.yaml.example`**) and/or CLI flags (`--query`, `--x-list`). Flags and config merge; flags add to config. The config is **schema-validated** on load (unknown keys / wrong types fail loudly before the browser opens).
 
 **`watch.yaml` (example shape)**
 ```yaml
 queries:
   - "agent skills"
   - "context engineering LLM"
-accounts:
-  - swyx
-  - simonw
+lists:
+  - "1700000000000000000"
 ```
 
 **Pull**
-- Fetch **recent posts** from each watched account and each search query.
+- Fetch **recent posts** from each watch List and each search query.
 
 **Dedupe**
 - Store seen posts in a **`better-sqlite3`** store (**`src/db.ts`**) keyed by tweet id (with origin, author, timestamp, captured text). The DB file lives under **`PUBLISH_DATA_DIR`** (off Google Drive).
@@ -294,14 +293,15 @@ All commands live under the **`publish`** binary (built with **commander**).
 
 | Command | Purpose |
 |---|---|
-| `publish watch x [--query <q>...] [--account <handle>...] [--config <watch.yaml>] [--json] [--inspect]` | Read recent posts from watched queries/accounts (by driving the session's shared logged-in browser and capturing X's `SearchTimeline` / `UserTweets` GraphQL responses), dedupe in SQLite, triage with the cheap Gemini model, emit ranked follow-up candidates (human text by default, machine JSON with `--json`). X is anti-headless, so unattended runs currently need `--inspect` (headful). |
-| `publish draft x --from <base.md> --format <tweet\|thread\|article> [--long] [--dry-run] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Never posts. `--dry-run` generates content only (no browser); `--inspect` runs headful for calibration. |
+| `publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private\|--public] [--limit <n>] [--dry-run] [--json] [--inspect]` | Build/populate the account-watch List from the accounts `--handle` follows (default: logged-in `X_USERNAME`), then read `member_count` back to verify. Precursor to `watch --x-list`. Never posts (writes List membership only). |
+| `publish x watch [--query <q>...] [--x-list <id>...] [--persona <text>] [--config <watch.yaml>] [--no-triage] [--json] [--inspect]` | Read recent posts from watched queries/Lists (by driving the session's shared logged-in browser and capturing X's `SearchTimeline` / `ListLatestTweetsTimeline` GraphQL responses), dedupe in SQLite, triage with the cheap Gemini model, emit ranked follow-up candidates (human text by default, machine JSON with `--json`). Accounts are watched via a List, not one-by-one. X is anti-headless, so unattended runs currently need `--inspect` (headful). |
+| `publish x draft --from <base.md> --format <tweet\|thread\|article> [--long] [--dry-run] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Never posts. `--dry-run` generates content only (no browser); `--inspect` runs headful for calibration. |
 | `publish --help` | Must work and list the above commands and options. |
 
 **Flag notes**
-- `--query` / `--account` are repeatable and merge with `watch.yaml`.
+- `--query` / `--x-list` are repeatable and merge with `watch.yaml`.
 - `--config` overrides the default `watch.yaml` path.
-- `--json` switches `watch x` output to machine JSON.
+- `--json` switches `watch` output to machine JSON.
 - `--long` raises the tweet limit to the configurable Premium long-post cap.
 - `--dry-run` (`draft x`) generates content without touching the browser; reports where content was written.
 - `--inspect` (both commands' browser paths) runs headful so a human can watch/calibrate drift-prone selectors.

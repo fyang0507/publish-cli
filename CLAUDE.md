@@ -10,9 +10,12 @@ The publisher stops at a **native draft staged on X**. It MUST NOT click Post / 
 
 ## What it is
 
-- `publish watch x` — poll queries / accounts / lists → dedupe → cheap-LLM triage (Gemini, low reasoning effort) → ranked reply candidates.
-- `publish draft x` — canonical markdown → tweet / thread / article → **native X draft**.
-- `publish reply x --to <id|url> --from <md>` — stage a native reply draft (overflow → thread); never posts.
+The CLI is **channel-first**: `publish <channel> <action>` (each channel has its own action space; X is the only channel today).
+
+- `publish x create-watch-list` — build/populate the account-watch List from who you follow → prints the id for `watch --x-list`. Never posts (writes List membership only).
+- `publish x watch` — poll queries / Lists → dedupe → cheap-LLM triage (Gemini, low reasoning effort) → ranked reply candidates. Accounts are watched via a List (`--x-list`), never one-by-one. The `x-list` spelling is unified across `watch` and `create-watch-list`.
+- `publish x draft` — canonical markdown → tweet / thread / article → **native X draft**.
+- `publish x reply --to <id|url> --from <md>` — stage a native reply draft (overflow → thread); never posts.
 
 ## Stack
 
@@ -22,7 +25,7 @@ TypeScript + Node **ESM** (`"type": "module"`, `module`/`moduleResolution` = `No
 
 A single Playwright **persistent-profile** browser (one unattended credential login, `src/session.ts`) backs BOTH reads and writes:
 
-- **Reads** = browser **GraphQL response capture** — drive the logged-in UI and capture `/graphql/` responses, matched by **operation NAME** (`SearchTimeline`, `UserTweets`/`UserTweetsAndReplies`/`UserMedia`, `ListLatestTweetsTimeline`); query-id hashes drift, names don't.
+- **Reads** = browser **GraphQL response capture** — drive the logged-in UI and capture `/graphql/` responses, matched by **operation NAME** (`SearchTimeline`, `ListLatestTweetsTimeline`); query-id hashes drift, names don't. (Per-account timelines aren't read — accounts are watched via a List.)
 - **Writes** = composer automation (tweet/thread/article/reply drafts).
 - **Do not reintroduce out-of-band HTTP read libs** (`agent-twitter-client`, `twikit`). 2026 X's anti-automation (`x-client-transaction-id`) blocks them; the browser path is the deliberate, verified choice.
 - X blocks **headless login** — first login must be headful (`--inspect`). Login/composer selectors need occasional live re-calibration.
@@ -54,11 +57,11 @@ Source of truth = caller-supplied local markdown via `--from`; artifacts write b
 | `src/session.ts` | Playwright persistent-profile login; `ensureSession`/`getCookies`/`getBrowserContext` |
 | `src/gemini.ts` | `@google/genai` client: `generate()` + `triage()` |
 | `src/db.ts` | `better-sqlite3` `SeenStore` (dedupe), db in the data repo |
-| `src/x/reader.ts` | `BrowserReader` — GraphQL response capture (search / user / list timelines) |
+| `src/x/reader.ts` | `BrowserReader` — GraphQL response capture (search / list timelines) |
 | `src/x/triage.ts` | cheap-LLM triage → ranked candidates |
 | `src/x/content.ts` | canonical-markdown parser → tweet / thread / article blocks |
 | `src/x/draftPoster.ts` | composer automation: stage native tweet/thread/article/reply drafts |
-| `src/commands/{watch,draft,reply}.ts` | command bodies |
+| `src/commands/{create-watch-list,watch,draft,reply}.ts` | command bodies |
 | `scripts/install-agent-skill-symlinks.js` | post-build: chmod bin + symlink skill into `<data_repo>/.agents/skills` |
 | `skills/publish/` | agent-facing capability layer (SKILL.md router + SETUP.md + calibration.md) |
 
