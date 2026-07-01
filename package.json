@@ -12,7 +12,8 @@
     "AGENTS.md",
     "CLAUDE.md",
     ".env.example",
-    "watch.yaml.example"
+    "watch.yaml.example",
+    "publish.config.dev.yaml.example"
   ],
   "scripts": {
     "build": "rm -rf dist && tsc && node scripts/install-agent-skill-symlinks.js"

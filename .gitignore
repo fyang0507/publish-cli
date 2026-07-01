@@ -10,3 +10,6 @@ dist/
 
 # User-specific watch config (commit watch.yaml.example instead).
 watch.yaml
+
+# Dev-only data-repo override (personal path; commit the .example instead).
+publish.config.dev.yaml

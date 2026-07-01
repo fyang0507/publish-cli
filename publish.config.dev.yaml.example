@@ -1,0 +1,9 @@
+# Copy to `publish.config.dev.yaml` (gitignored) and set your agent workspace path.
+#
+# publish-cli writes its durable dedupe DB to `<data_repo_path>/.publish-cli/` and
+# symlinks the `publish` skill into `<data_repo_path>/.agents/skills/`.
+#
+# Resolution order (see src/dataRepo.ts): PUBLISH_DATA_REPO env var → this file →
+# walk up from cwd for `.agents/workspace.yaml`. Alternatively just set
+# PUBLISH_DATA_REPO, or run the CLI from a workspace containing that marker.
+data_repo_path: ~/path/to/agent-workspace

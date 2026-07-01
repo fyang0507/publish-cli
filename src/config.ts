@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
+import { tryResolveDataRepo } from "./dataRepo.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 config({ path: resolve(__dirname, "..", ".env"), quiet: true });
@@ -42,15 +43,18 @@ export const env: PublishEnv = {
 };
 
 /**
- * Runtime data directory. MUST live OFF Google Drive — the browser profile,
- * cookie cache, and sqlite db all churn constantly and would thrash Drive sync
- * (and the browser profile must never sit inside the repo).
+ * Runtime paths. Two homes with different lifetimes:
+ *   - baseDir (PUBLISH_DATA_DIR, default ~/.publish-cli): MACHINE-LOCAL session
+ *     artifacts — the browser profile + cookie cache. Off any synced drive; the
+ *     profile must never sit inside the repo.
+ *   - dbFile: DURABLE dedupe state, placed in the DATA REPO (agent workspace, via
+ *     dataRepo.ts) so it travels with the workspace; falls back to baseDir.
  *
- * Resolution:
+ * baseDir resolution:
  *   1. PUBLISH_DATA_DIR env var, if set.
  *   2. Default: `${HOME || os.homedir()}/.publish-cli`.
  *
- * The directory (and its known subpaths) is created on first access.
+ * The directories are created on first access.
  */
 export interface DataPaths {
   /** Base runtime dir, e.g. ~/.publish-cli. */
@@ -59,7 +63,7 @@ export interface DataPaths {
   xProfileDir: string;
   /** Harvested cookie cache (auth_token + ct0, ...) as JSON. */
   xCookieCache: string;
-  /** better-sqlite3 dedupe store. */
+  /** better-sqlite3 dedupe store — in the data repo (`<dataRepo>/.publish-cli/`) when resolvable, else baseDir. */
   dbFile: string;
 }
 
@@ -81,16 +85,23 @@ export function dataPaths(): DataPaths {
   const baseDir = resolveBaseDir();
   const xProfileDir = join(baseDir, "x-profile");
 
-  // Ensure the dirs exist. Cookie cache + db are files created lazily by their
-  // owning modules (session.ts / db.ts).
+  // Machine-local SESSION/secret artifacts (browser profile + cookie cache) live
+  // under baseDir (~/.publish-cli), off any synced drive.
   mkdirSync(baseDir, { recursive: true });
   mkdirSync(xProfileDir, { recursive: true });
+
+  // DURABLE state (the dedupe DB) lives in the DATA REPO (the agent workspace) so
+  // it travels with the workspace rather than the machine. Falls back to baseDir
+  // when no data repo is resolvable (ad-hoc use, no workspace/env/dev-config).
+  const dataRepo = tryResolveDataRepo();
+  const dbDir = dataRepo ? join(dataRepo, ".publish-cli") : baseDir;
+  mkdirSync(dbDir, { recursive: true });
 
   cachedPaths = {
     baseDir,
     xProfileDir,
     xCookieCache: join(baseDir, "x-cookies.json"),
-    dbFile: join(baseDir, "publish.db"),
+    dbFile: join(dbDir, "publish.db"),
   };
   return cachedPaths;
 }

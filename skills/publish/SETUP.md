@@ -30,11 +30,25 @@ Copy `watch.yaml.example` → `watch.yaml` and set `queries`, `accounts`, `lists
 `batch_size`). CLI flags (`--query`, `--account`, `--list`, `--persona`, …) merge
 with / override this file.
 
-## Runtime data — off-repo
+## Where state lives (two homes)
 
-`PUBLISH_DATA_DIR` (default `~/.publish-cli`) holds the **persistent browser
-profile**, the cookie cache, and the SQLite dedupe store. Keep it OFF any synced
-drive, and never place the browser profile inside the repo.
+- **Machine-local session artifacts** — the persistent browser profile + cookie
+  cache — live under `PUBLISH_DATA_DIR` (default `~/.publish-cli`). Keep this OFF
+  any cloud-synced path and out of the repo.
+- **Durable state** — the SQLite dedupe store — lives in the **data repo** (the
+  agent workspace) at `<data_repo>/.publish-cli/`, so it travels with the
+  workspace. The **agent-skill symlink** also targets `<data_repo>/.agents/skills/`.
+
+**Data-repo resolution** (see `src/dataRepo.ts`), in order:
+1. `PUBLISH_DATA_REPO` env var.
+2. `publish.config.dev.yaml` next to the CLI, with `data_repo_path:` (copy from
+   `publish.config.dev.yaml.example`). This is what lets `npm run build` install
+   the skill symlink, since the build's cwd is the CLI repo, not the workspace.
+3. Walk up from the current directory for `.agents/workspace.yaml`.
+
+If none resolves, the dedupe DB falls back to `PUBLISH_DATA_DIR` and the skill
+symlink step is skipped (the build still succeeds). `PUBLISH_SKILLS_DIR` can
+override the symlink target directly.
 
 ## First login (headful)
 
