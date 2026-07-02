@@ -1,6 +1,6 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **This deliverable is the X channel only.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH) **and LinkedIn** (PUBLISH — `linkedin draft`). Every PUBLISH path is **draft-only and never posts.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
 
 ## What it does (X channel)
 

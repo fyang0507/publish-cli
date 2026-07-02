@@ -21,6 +21,10 @@ Copy `.env.example` → `.env` (gitignored) and set:
 - `X_USERNAME`, `X_PASSWORD`, `X_EMAIL` — unattended credential login. The login
   answers X's "confirm your email/phone" interstitial with `X_EMAIL`. **No 2FA is
   supported** — the account must not require a second factor at login.
+- `LI_USERNAME`, `LI_PASSWORD`, `LI_EMAIL` — LinkedIn credential login (same
+  persistent-profile model as X; `LI_EMAIL` answers LinkedIn's identifier
+  checkpoint). **Only needed for `publish linkedin draft`.** No 2FA/CAPTCHA is
+  automated — if LinkedIn raises one, complete it in the headful `--inspect` window.
 - `TRIAGE_MODEL` (optional) — cheap model id; default `gemini-3.5-flash`.
 
 ## Watch config — `watch.yaml`
@@ -55,16 +59,20 @@ override the symlink target directly.
 
 ## First login (headful)
 
-The browser paths (`watch`, `draft`, `reply`) auto-log-in on first use into a
-persistent profile, then reuse it. **X blocks headless login**, so run the first
-login with `--inspect` (headful):
+The browser paths (`watch`, `draft`, `reply`, `linkedin draft`) auto-log-in on
+first use into a persistent profile, then reuse it. **X blocks headless login**,
+so run the first login with `--inspect` (headful):
 
 ```bash
-node dist/cli.js watch x --query "some topic" --inspect
+node dist/cli.js x watch --query "some topic" --inspect      # X profile
+node dist/cli.js linkedin draft --text "hello 👋" --inspect  # LinkedIn profile
 ```
 
-Watch the login complete; the warm profile persists for subsequent (including
-headless) runs. If a step stalls, see [calibration.md](./calibration.md).
+Each channel has its own profile, so log in to each once. LinkedIn may raise a
+security checkpoint (CAPTCHA / "verify it's you") on the first automated login —
+complete it in the headful window. Watch the login complete; the warm profile
+persists for subsequent (including headless) runs. If a step stalls, see
+[calibration.md](./calibration.md).
 
 ## Browser
 
