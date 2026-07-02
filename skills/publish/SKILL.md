@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Capability layer for the `publish` CLI — grow an X (Twitter) audience by building an account-watch List from who you follow, finding posts worth replying to, and staging native X drafts (single tweet, thread, or long-form Article) and replies from a Markdown file. Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, or turn Markdown into X-ready drafts.
+description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts) from inline text or a Markdown file. Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, or turn Markdown into X-ready or LinkedIn-ready drafts.
 ---
 
 `publish` is a CLI that turns Markdown into X (Twitter) drafts and surfaces reply
@@ -20,6 +20,8 @@ send/approval flow are the caller's concern, not this CLI's.
 - **draft** — turn a Markdown file into a native X draft: a single **tweet**, a
   numbered **thread**, or a long-form **Article**.
 - **reply** — stage a native **reply** draft targeted at a specific tweet.
+- **linkedin draft** — turn inline text (or a Markdown file) into a native
+  **LinkedIn post** draft (single post, 3000-char cap, optional attached media).
 
 ## When to use
 
@@ -33,6 +35,12 @@ send/approval flow are the caller's concern, not this CLI's.
 - Publish owned content to X from Markdown → `publish x draft`.
 - Long-form → `publish x draft --format article`. Note: **an X Article requires a
   5:2 aspect-ratio hero image to publish.**
+- Publish owned content to LinkedIn → `publish linkedin draft --text "…"` (or
+  `--from <file.md>`). Single post, **3000-char cap**, deterministic
+  markdown→plain-text (headings→plain, bullets→"• ", emoji passthrough); links are
+  advised into the **first comment**, not the body; `--media <path>` (repeatable)
+  attaches images; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility
+  caveat). Stages a native draft and **never posts**.
 
 Do **not** use it to post/publish (it only drafts), and do not use it to *decide*
 content — supply the Markdown (and, for triage, the free-text persona/rubric) yourself.
@@ -50,11 +58,12 @@ between:
    --out <file>` instead when a human wants a readable digest to review). Supply the
    self-contained rubric with `--persona-from <rubric.md>` for long rubrics.
 2. Agent selects only a small number of high-confidence candidates.
-3. Agent writes one Markdown reply source per target tweet.
+3. Agent writes the reply per target tweet — inline via `--text "…"` for short
+   replies, or a Markdown source (`--from <reply.md>`) for longer ones.
 4. Agent dry-runs each reply:
-   `publish x reply --to <tweet-url> --from <reply.md> --dry-run`
+   `publish x reply --to <tweet-url> --text "…" --dry-run`
 5. Agent stages accepted drafts:
-   `publish x reply --to <tweet-url> --from <reply.md>`
+   `publish x reply --to <tweet-url> --text "…"`
 6. Human reviews/sends from X Unsent/Drafts.
 
 Keep campaign-specific choices outside this CLI skill: selection criteria,
@@ -99,8 +108,9 @@ publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--de
 publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] \
                  [--config <watch.yaml>] [--validate-config] [--no-triage] \
                  [--format text|json|markdown] [--json] [--out <file>] [--inspect]
-publish x draft  --from <file.md> --format tweet|thread|article [--long] [--dry-run] [--inspect]
-publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--force] [--inspect]
+publish x draft  --format tweet|thread|article (--text <content> | --from <file.md>) [--long] [--dry-run] [--inspect]
+publish x reply  --to <id|url> (--text <content> | --from <file.md>) [--long] [--dry-run] [--force] [--inspect]
+publish linkedin draft (--text <content> | --from <file.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
 ```
 
 - **create-watch-list** — seeds a List from the accounts `--handle` (default: the
@@ -141,6 +151,12 @@ publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--force] [
 - Content generation is **deterministic** (character-fit, thread splitting, code/link
   advisories). An Article body is pasted as rich HTML the editor converts natively;
   a tweet/thread/reply is typed into the composer and saved as an unsent draft.
+- **linkedin draft** — inline `--text` (primary) or `--from <file.md>` (`-` = stdin);
+  single post, **3000-char cap** (over cap → leading segment + warning, never silent
+  truncation); deterministic markdown→plain-text with emoji passthrough; `--media`
+  (repeatable) attaches images in order; `--bold` opts into Unicode bold; `--dry-run`
+  generates + prints without a browser; `--inspect` runs headful. It surfaces an
+  above-the-fold hook advisory and advises links into the first comment. Never posts.
 
 ## Platform constraints (what each surface does NOT support)
 

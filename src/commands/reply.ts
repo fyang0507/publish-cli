@@ -1,7 +1,6 @@
 import { Command } from "commander";
-import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { generateContent, renderForInspection } from "../x/content.js";
+import { resolveContentInput } from "./contentInput.js";
 import { ReplyLedger } from "../db.js";
 
 /**
@@ -17,7 +16,8 @@ import { ReplyLedger } from "../db.js";
  *
  * Flow:
  *   1. Resolve --to (a status URL or a raw tweet id) to a numeric tweet id.
- *   2. Read the canonical base markdown (--from) and DETERMINISTICALLY generate a
+ *   2. Resolve the reply content — inline via --text, or from a canonical
+ *      markdown file via --from (exactly one) — and DETERMINISTICALLY generate a
  *      tweet (default; --long raises the cap) — reusing src/x/content.ts.
  *   3. --dry-run: generate + print ONLY; do NOT touch the browser.
  *   4. Otherwise: drive the persistent logged-in profile to stage the reply draft.
@@ -25,7 +25,8 @@ import { ReplyLedger } from "../db.js";
 
 interface ReplyXOptions {
   to: string;
-  from: string;
+  from?: string;
+  text?: string;
   long?: boolean;
   dryRun?: boolean;
   inspect?: boolean;
@@ -37,17 +38,16 @@ export function registerReplyCommand(x: Command): void {
     .command("reply")
     .description("Stage a NATIVE X reply draft targeted at a tweet — never posts")
     .requiredOption("--to <id|url>", "Target tweet: a status URL or a raw numeric id")
-    .requiredOption("--from <base.md>", "Path to the canonical base markdown for the reply")
+    .option("--text <content>", "Reply content inline (exactly one of --text / --from)")
+    .option("--from <base.md>", "Path to the canonical base markdown ('-' = stdin)")
     .option("--long", "Raise the reply limit to the Premium long-post cap (default up to 25000)")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .option("--force", "Re-stage even if a reply to this tweet was already recorded in the ledger")
     .action(async (opts: ReplyXOptions) => {
-      const fromPath = resolve(opts.from);
-      if (!existsSync(fromPath)) {
-        console.error(`Base markdown not found: ${fromPath}`);
-        process.exit(2);
-      }
+      // Resolve content (inline --text or --from file/stdin) up front so a usage
+      // error fails fast before we touch the browser or the ledger.
+      const md = resolveContentInput(opts);
 
       // Resolve/validate the target id up front so a bad --to fails fast (even in
       // --dry-run). Import lazily so --dry-run/--help don't pull in Playwright.
@@ -83,8 +83,6 @@ export function registerReplyCommand(x: Command): void {
           return;
         }
       }
-
-      const md = readFileSync(fromPath, "utf-8");
 
       // DETERMINISTIC generation. A reply is a single tweet by default; if the
       // content overflows the limit, fall back to a thread so nothing is dropped.

@@ -30,6 +30,11 @@ export interface PublishEnv {
   X_PASSWORD: string;
   /** Used to answer X's "confirm your email/phone" identifier challenge. */
   X_EMAIL: string;
+  /** LinkedIn login identifier (email or member handle). */
+  LI_USERNAME: string;
+  LI_PASSWORD: string;
+  /** Used to answer LinkedIn's email/identifier confirmation challenge. */
+  LI_EMAIL: string;
 }
 
 const DEFAULT_TRIAGE_MODEL = "gemini-3.5-flash";
@@ -40,6 +45,9 @@ export const env: PublishEnv = {
   X_USERNAME: process.env.X_USERNAME ?? "",
   X_PASSWORD: process.env.X_PASSWORD ?? "",
   X_EMAIL: process.env.X_EMAIL ?? "",
+  LI_USERNAME: process.env.LI_USERNAME ?? "",
+  LI_PASSWORD: process.env.LI_PASSWORD ?? "",
+  LI_EMAIL: process.env.LI_EMAIL ?? "",
 };
 
 /**
@@ -63,6 +71,10 @@ export interface DataPaths {
   xProfileDir: string;
   /** Harvested cookie cache (auth_token + ct0, ...) as JSON. */
   xCookieCache: string;
+  /** Persistent Playwright user-data-dir for the logged-in LinkedIn profile. */
+  liProfileDir: string;
+  /** Harvested LinkedIn cookie cache as JSON. */
+  liCookieCache: string;
   /** better-sqlite3 dedupe store — in the data repo (`<dataRepo>/.publish-cli/`) when resolvable, else baseDir. */
   dbFile: string;
 }
@@ -84,11 +96,14 @@ export function dataPaths(): DataPaths {
 
   const baseDir = resolveBaseDir();
   const xProfileDir = join(baseDir, "x-profile");
+  const liProfileDir = join(baseDir, "li-profile");
 
   // Machine-local SESSION/secret artifacts (browser profile + cookie cache) live
-  // under baseDir (~/.publish-cli), off any synced drive.
+  // under baseDir (~/.publish-cli), off any synced drive. One persistent profile
+  // per browser-driven channel (X, LinkedIn).
   mkdirSync(baseDir, { recursive: true });
   mkdirSync(xProfileDir, { recursive: true });
+  mkdirSync(liProfileDir, { recursive: true });
 
   // DURABLE state (the dedupe DB) lives in the DATA REPO (the agent workspace) so
   // it travels with the workspace rather than the machine. Falls back to baseDir
@@ -101,6 +116,8 @@ export function dataPaths(): DataPaths {
     baseDir,
     xProfileDir,
     xCookieCache: join(baseDir, "x-cookies.json"),
+    liProfileDir,
+    liCookieCache: join(baseDir, "li-cookies.json"),
     dbFile: join(dbDir, "publish.db"),
   };
   return cachedPaths;

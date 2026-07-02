@@ -32,3 +32,30 @@ operations by op **name** (query-id hashes drift), not by full path. Capture whi
 step stalled and the current on-screen DOM, update the relevant selector list, and
 rebuild. In unattended runs, route the failure through your environment's
 error-reporting path rather than retrying blindly.
+
+## LinkedIn (`publish linkedin draft`)
+
+The LinkedIn channel drifts the same way and is calibrated the same way — re-run
+with `--inspect` and update selectors. Its selectors live in `LI_LOGIN_SELECTORS`
+(`src/linkedin/session.ts`) and `LI_COMPOSER_SELECTORS` (`src/linkedin/draftPoster.ts`);
+the profile is `~/.publish-cli/li-profile`.
+
+Gotchas found during live calibration (2026-07) — the likely drift points:
+
+- **Login**: LinkedIn renders DYNAMIC input ids **and a duplicate HIDDEN copy of
+  the login form**, so selectors MUST filter to `:visible` (a bare attribute
+  selector matches the hidden copy and `waitFor(visible)` times out). The sign-in
+  control is a `<button type="button">` (not `submit`); the flow falls back to
+  pressing Enter on the password field. LinkedIn may inject a CAPTCHA / "verify
+  it's you" checkpoint — complete it in the headful window.
+- **Feed logged-in signal**: feed CSS classes are hashed/unstable; use durable
+  markers (the search box placeholder, the top-nav Home button).
+- **Composer**: open via `feed/?shareActive=true` (the direct `/sharing/compose`
+  URL 404s). The editor is TipTap `div.ProseMirror[contenteditable]`. LinkedIn
+  **auto-restores the last saved draft into the composer**, so the poster
+  select-all-clears before typing.
+- **Save/verify**: closing a non-empty composer (`aria-label="Dismiss"`) raises a
+  dialog with TEXT-only buttons **"Save as draft"** and **"Discard"** (no
+  aria-labels — match by text). NEVER click "Discard" or the "Post" button; both
+  are documented FORBIDDEN selectors. Verification reopens the composer and matches
+  the staged text in the auto-restored editor.

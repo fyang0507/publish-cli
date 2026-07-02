@@ -1,12 +1,16 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **This deliverable is the X channel only.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH) **and LinkedIn** (PUBLISH — `linkedin draft`). Every PUBLISH path is **draft-only and never posts.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
 
 ## What it does (X channel)
 
 - **`publish x watch`** — borrowed-reach loop. Polls search queries and watch Lists (accounts are watched via a List, not one-by-one), dedupes seen posts, triages each new post with a cheap Gemini model for follow-up worthiness, and emits ranked candidates (human-readable, or `--json`).
 - **`publish x create-watch-list`** — builds the account-watch List from the accounts you follow (a List reads all its members in one fetch, so it's the scalable account path). Precursor to `watch --x-list`.
 - **`publish x draft`** — owned-content publisher. Turns a canonical base markdown into an X-ready **tweet / thread / article** and stages it as a **native draft on X**. It **never posts** — the send action is human-gated and out of scope here.
+
+## What it does (LinkedIn channel)
+
+- **`publish linkedin draft`** — owned-content publisher. Turns inline text (`--text`, the primary path) or a markdown file (`--from`) into a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) and stages it as a **native draft on LinkedIn** via "Save as draft". Same boundary as X — it **never posts**. Surfaces an above-the-fold hook advisory and a first-comment-link advisory; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility caveat). Selectors are best-effort — calibrate live with `--inspect`.
 
 ## Install
 
@@ -29,6 +33,7 @@ npx playwright install chromium
   - `GOOGLE_GENERATIVE_AI_API_KEY` — Gemini (triage + optional tailoring).
   - `TRIAGE_MODEL` — cheap triage model id (default `gemini-3.5-flash`).
   - `X_USERNAME` / `X_PASSWORD` / `X_EMAIL` — X credential login. No 2FA; `X_EMAIL` answers X's email/identifier confirmation challenge.
+  - `LI_USERNAME` / `LI_PASSWORD` / `LI_EMAIL` — LinkedIn credential login (same persistent-profile model as X); `LI_EMAIL` answers LinkedIn's identifier confirmation checkpoint. Only needed for `publish linkedin draft`.
   - `PUBLISH_DATA_DIR` (optional) — runtime data dir, default `~/.publish-cli`.
 - **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, and the triage rubric. The triage rubric (`triage.persona`, or `--persona` / `--persona-from <file>`) **must be self-contained** — the classifier sees only the rubric plus each candidate post, never the source essay, campaign brief, or surrounding agent context, so spell out the actual selection criteria inline. Validate a config cheaply (no browser) with `publish x watch --validate-config`.
 
@@ -52,7 +57,7 @@ One unattended credential login (Playwright over a **persistent** profile) backs
 
 ## Canonical content
 
-The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from`. The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/SETUP.md](./skills/publish/SETUP.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
+The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from` (or, for short tweets/replies, inline via `--text` — no scratch file; `--from -` reads stdin). The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/SETUP.md](./skills/publish/SETUP.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
 
 ## Usage
 
@@ -61,8 +66,10 @@ publish --help
 
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
 publish x watch [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
-publish x draft --from <base.md> --format tweet|thread|article [--inspect]
-publish x reply --to <id|url> --from <base.md> [--long] [--dry-run] [--force] [--inspect]
+publish x draft --format tweet|thread|article (--text <content> | --from <base.md>) [--inspect]
+publish x reply --to <id|url> (--text <content> | --from <base.md>) [--long] [--dry-run] [--force] [--inspect]
+
+publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.

@@ -4,6 +4,7 @@ import { registerWatchCommand } from "./commands/watch.js";
 import { registerDraftCommand } from "./commands/draft.js";
 import { registerReplyCommand } from "./commands/reply.js";
 import { registerCreateWatchListCommand } from "./commands/create-watch-list.js";
+import { registerLinkedInDraftCommand } from "./commands/linkedin-draft.js";
 
 const program = new Command();
 
@@ -30,5 +31,14 @@ registerDraftCommand(x);
 
 // --- reply: targeted reply drafts (watcher -> publisher loop; never posts) ---
 registerReplyCommand(x);
+
+// LinkedIn channel: PUBLISH only today (native post drafts, never posts). Watch
+// (borrowed-reach) is a separate, future design.
+const linkedin = program
+  .command("linkedin")
+  .description("LinkedIn channel: draft (native post drafts, never posts)");
+
+// --- draft: owned-content publisher (native LinkedIn post drafts, never posts) ---
+registerLinkedInDraftCommand(linkedin);
 
 program.parse();
