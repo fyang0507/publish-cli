@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Capability layer for the `publish` CLI — grow an X (Twitter) audience by building an account-watch List from who you follow, finding posts worth replying to, and staging native X drafts (single tweet, thread, or long-form Article) and replies from a Markdown file. Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, or turn Markdown into X-ready drafts.
+description: Capability layer for the `publish` CLI — grow an X (Twitter) audience by building an account-watch List from who you follow, finding posts worth replying to, and staging native X drafts (single tweet, thread, or long-form Article) and replies from inline text or a Markdown file. Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, or turn text/Markdown into X-ready drafts.
 ---
 
 `publish` is a CLI that turns Markdown into X (Twitter) drafts and surfaces reply
@@ -17,9 +17,11 @@ send/approval flow are the caller's concern, not this CLI's.
 - **watch** — poll X search queries and Lists for recent posts; dedupe across runs
   (persistent store); optionally triage with a cheap LLM; emit ranked candidates
   worth a follow-up reply. (Watch accounts via a List, not one-by-one — see below.)
-- **draft** — turn a Markdown file into a native X draft: a single **tweet**, a
-  numbered **thread**, or a long-form **Article**.
-- **reply** — stage a native **reply** draft targeted at a specific tweet.
+- **draft** — turn inline text (`--text`, tweet/thread) or a Markdown file
+  (`--from`) into a native X draft: a single **tweet**, a numbered **thread**, or
+  a long-form **Article** (Article is file-only).
+- **reply** — stage a native **reply** draft targeted at a specific tweet, from
+  inline `--text` or a Markdown file.
 
 ## When to use
 
