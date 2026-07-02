@@ -83,17 +83,39 @@ Two actions. `discover` (read-only facts) precedes `draft` (write) — the agent
 bridges them.
 
 ```
-publish reddit discover <subreddit>...             # report each named subreddit's posting contract
-                        [--search "<query>"]       # instead of/alongside names: list candidate subreddits (mechanical, no ranking)
-                        [--json]                    # machine-readable facts for the agent to parse
+publish reddit discover [<subreddit>...]           # DEPTH: full posting contract for each named sub
+                        [--search "<query>"]       # BREADTH: list candidate subreddits matching a query
+                        [--limit <n>]              # cap --search results (default 25)
+                        [--include-nsfw]           # include over-18 subs in --search (default: excluded)
+                        [--json]                   # machine-readable output (default: human report)
 ```
 
-`discover` is **facts only** — for each subreddit it fetches `about`
-(subscribers, `submission_type`, `over18`), `post_requirements`, flair templates,
-and rules text, and prints them (human table or `--json`). `--search` runs
-Reddit's subreddit search and lists candidate names + subscriber counts — again
-mechanical, **no LLM ranking** (the agent proposes and decides; §1.1). Read-only:
-no draft, no dedupe state.
+`discover` is **facts only, no LLM ranking** — read-only, no draft, no dedupe
+state. It has **two input modes** (the agent proposes and decides; §1.1):
+
+**Mode A — named / deep-inspect** (the core). For each `<subreddit>` it merges
+four read endpoints into the full posting contract:
+
+| Group | Facts | Endpoint |
+|---|---|---|
+| Reach & type | subscribers, active users, `subreddit_type` (public/restricted/private), `submission_type` (any/self/link), `over18`, quarantined | `GET /r/{sub}/about` |
+| Posting contract | `is_flair_required`, `is_title_required`, `title_regexes`, title required/blacklisted strings, `body_restriction_policy`, body min/max length, `guidelines_text` | `GET /api/v1/{sub}/post_requirements` |
+| Flairs | `{id, text, mod_only, editable}[]` | `GET /r/{sub}/api/link_flair_v2` |
+| Rules | `{short_name, description}[]` | `GET /r/{sub}/about/rules` |
+
+Plus a one-line **verdict** per sub: self-posts allowed? flair required (which)?
+would a draft pass the title regex? Private/quarantined subs degrade to a note,
+not a hard error (§9).
+
+**Mode B — `--search` / breadth** (optional aid). Runs Reddit's subreddit search
+(`GET /subreddits/search`, capped by `--limit`, over-18 excluded unless
+`--include-nsfw`) and returns a **shallow** candidate list —
+`{name, subscribers, over18, submission_type, public_description}` per hit. No
+contract detail; it exists to feed Mode A when the agent can't name candidates.
+
+The modes compose: `discover --search "…"` → agent picks names →
+`discover Name1 Name2` for full contracts → agent decides → `draft`. `--json`
+(either mode) emits a structured array for the agent to parse.
 
 ```
 publish reddit draft --subreddit <name>            # target community (or from --from frontmatter)
@@ -293,8 +315,8 @@ Post selector — but stronger, because there is no affordance to mis-fire.
 | Path | Purpose |
 |---|---|
 | `src/reddit/auth.ts` | OAuth: `--login` consent (loopback capture), token store, auto-refresh, authorized `fetch` client (UA + rate-limit aware) |
-| `src/reddit/rules.ts` | subreddit facts + preflight: fetch `about` / `post_requirements` / flair templates / rules; validate a post; resolve flair text → id. **Shared by `discover` and `draft`** |
-| `src/commands/reddit-discover.ts` | `registerRedditDiscoverCommand`; read-only facts report (`--search` / `--json`) over `rules.ts` |
+| `src/reddit/rules.ts` | subreddit facts + preflight: deep-inspect (`about` / `post_requirements` / flair templates / rules), subreddit search (`subreddits/search`), validate a post, resolve flair text → id. **Shared by `discover` and `draft`** |
+| `src/commands/reddit-discover.ts` | `registerRedditDiscoverCommand`; read-only report — Mode A (named deep-inspect) + Mode B (`--search`/`--limit`/`--include-nsfw`), human or `--json`, over `rules.ts` |
 | `src/reddit/content.ts` | `generateSelfPost` — title + Markdown body (kept verbatim), caps, old-reddit/link advisories (reuses `../x/content.ts`) |
 | `src/reddit/draft.ts` | `stageDraft` — `POST /api/draft` + verify; **no submit** |
 | `src/commands/reddit-draft.ts` | `registerRedditDraftCommand`; reuses `resolveContentInput`; lazy-imports auth/draft |
