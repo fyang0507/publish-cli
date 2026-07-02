@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { loadWatchConfig, type TriageConfig } from "../config.js";
 import { SeenStore } from "../db.js";
 import { BrowserReader, type XPost } from "../x/reader.js";
+import { collapseThreads } from "../x/thread.js";
 import { triagePosts, type TriagedPost } from "../x/triage.js";
 
 /**
@@ -130,12 +131,19 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
       }
     }
 
-    // Dedupe within this poll (a post can match multiple origins) and against
-    // the persistent seen-store; only NEW posts proceed to triage.
+    // Collapse threads BEFORE dedupe (issue: replies were landing mid-thread).
+    // One (conversation, author) -> one candidate whose id is the right reply
+    // target (thread ROOT for a self-thread) and whose text is the truncated
+    // thread. This runs pre-dedupe so the seen-key is the root, not a mid-thread
+    // id, and so a thread surfaces once. Zero extra reads — see collapseThreads.
+    const collapsed = collapseThreads(pulled, { maxThreadChars: cfg.max_thread_chars });
+
+    // Dedupe within this poll (a candidate can match multiple origins) and against
+    // the persistent seen-store; only NEW candidates proceed to triage.
     const store = new SeenStore();
     try {
       const seenThisPoll = new Set<string>();
-      const newPosts = pulled.filter((p) => {
+      const newPosts = collapsed.filter((p) => {
         if (seenThisPoll.has(p.id)) return false;
         seenThisPoll.add(p.id);
         return !store.hasSeen(p.id);
@@ -194,12 +202,16 @@ function emit(candidates: TriagedPost[], stats: PollStats, asJson: boolean): voi
       new: stats.newCount,
       candidates: candidates.map((c) => ({
         id: c.post.id,
+        // `id` IS the reply target (root for a self-thread); surface it explicitly
+        // so the caller passes the right id to `publish x reply --to`.
+        replyTargetId: c.post.id,
         url: c.post.url,
         author: c.post.authorHandle,
         text: c.post.text,
         createdAt: c.post.createdAt,
         origin: c.post.origin,
         metrics: c.post.metrics,
+        thread: c.post.thread,
         score: c.triage.score,
         reason: c.triage.reason,
         suggestedAngle: c.triage.suggestedAngle,
@@ -230,6 +242,8 @@ function emit(candidates: TriagedPost[], stats: PollStats, asJson: boolean): voi
       lines.push(`${i + 1}. [${score}/100] @${c.post.authorHandle}  (${c.post.origin})`);
       lines.push(`   ${truncate(c.post.text, 200)}`);
       lines.push(`   ${c.post.url}`);
+      const threadNote = describeThread(c.post);
+      if (threadNote) lines.push(`   ${threadNote}`);
       if (c.triage.reason) lines.push(`   why: ${c.triage.reason}`);
       if (c.triage.suggestedAngle) lines.push(`   angle: ${c.triage.suggestedAngle}`);
     });
@@ -251,12 +265,14 @@ function emitRaw(posts: XPost[], stats: PollStats, asJson: boolean): void {
       triaged: false,
       posts: posts.map((p) => ({
         id: p.id,
+        replyTargetId: p.id,
         url: p.url,
         author: p.authorHandle,
         text: p.text,
         createdAt: p.createdAt,
         origin: p.origin,
         metrics: p.metrics,
+        thread: p.thread,
       })),
       errors: stats.errors,
     };
@@ -283,10 +299,28 @@ function emitRaw(posts: XPost[], stats: PollStats, asJson: boolean): void {
       lines.push(`${i + 1}. @${p.authorHandle}  (${p.origin})`);
       lines.push(`   ${truncate(p.text, 200)}`);
       lines.push(`   ${p.url}`);
+      const threadNote = describeThread(p);
+      if (threadNote) lines.push(`   ${threadNote}`);
     });
   }
 
   process.stdout.write(lines.join("\n") + "\n");
+}
+
+/**
+ * One-line human note for a collapsed-thread candidate (omitted for plain
+ * standalone tweets, which carry no `thread` block). Makes the reply target
+ * explicit: a self-thread points at the root/head, otherwise at this tweet.
+ */
+function describeThread(p: XPost): string | undefined {
+  const t = p.thread;
+  if (!t) return undefined;
+  const target = t.isSelfThread ? "reply targets thread root" : "reply targets this tweet";
+  const parts = [`thread: ${t.size} tweet(s) captured`];
+  if (t.truncated) parts.push("text truncated");
+  if (t.isSelfThread) parts.push("self-thread");
+  parts.push(target);
+  return `[${parts.join(" · ")}]`;
 }
 
 function dedupeStrings(items: string[]): string[] {
