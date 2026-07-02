@@ -37,6 +37,26 @@ send/approval flow are the caller's concern, not this CLI's.
 Do **not** use it to post/publish (it only drafts), and do not use it to *decide*
 content — supply the Markdown (and, for triage, the free-text persona/rubric) yourself.
 
+## Automation pattern: watch → prepare reply drafts
+
+For an end-to-end borrowed-reach workflow, run `watch` as the discovery primitive
+and `reply` as the native-draft primitive, with an agent-owned editorial layer in
+between:
+
+1. `publish x watch --config <campaign-watch.yaml> --json`
+2. Agent selects only a small number of high-confidence candidates.
+3. Agent writes one Markdown reply source per target tweet.
+4. Agent dry-runs each reply:
+   `publish x reply --to <tweet-url> --from <reply.md> --dry-run`
+5. Agent stages accepted drafts:
+   `publish x reply --to <tweet-url> --from <reply.md>`
+6. Human reviews/sends from X Unsent/Drafts.
+
+Keep campaign-specific choices outside this CLI skill: selection criteria,
+operator voice, notifications, approval policy, and destinations such as Discord
+belong to the consuming workspace's workflow skill. The `publish` CLI remains the
+mechanical layer and never posts.
+
 ## Workflow: watch a set of accounts via a List
 
 Account-watching is **List-based** — there is no per-account origin. To watch a set
