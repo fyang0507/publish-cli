@@ -37,6 +37,35 @@ send/approval flow are the caller's concern, not this CLI's.
 Do **not** use it to post/publish (it only drafts), and do not use it to *decide*
 content — supply the Markdown (and, for triage, the free-text persona/rubric) yourself.
 
+## Workflow: watch a set of accounts via a List
+
+Account-watching is **List-based** — there is no per-account origin. To watch a set
+of people, build a List once, then keep it fresh:
+
+1. **Create the List from who you follow** (once):
+   `publish x create-watch-list --name "AI & Tech Follows" --private`
+   → enumerates your Following, creates a private List, adds every account, prints
+   the list id and the ready `watch --x-list` line.
+2. **Register it:** add the id under `lists:` in `watch.yaml`, or pass
+   `--x-list <id>` at call time.
+3. **Refresh after you follow new people:** just **rerun with the same id** — it is
+   an idempotent top-up (re-enumerates Following, adds only what's missing):
+   `publish x create-watch-list --x-list <id>`
+4. **Watch it:** `publish x watch --x-list <id>`
+
+> **⚠️ Rate-limit warning — do NOT bulk-add List members fast.** X applies an
+> **account-level** anti-automation lock when List member-adds come too rapidly.
+> Symptom: every add fails with *"You aren't allowed to add members to this list"*
+> — and once locked it blocks adds in the **native UI too**, on **every** list, not
+> just the one you were building. (Confirmed 2026-07-01: a 72-member bulk build with
+> ~350ms between adds locked the whole account; recovery is ~24h.) Reads and the
+> `watch` path are unaffected, and if you see the lock, **stop and wait ~24h** —
+> retrying makes it worse. `create-watch-list` now defends against this: refreshes
+> add only the delta (accounts not already in the List), each add is throttled
+> (~3s apart), and it aborts immediately on the lock error instead of hammering — so
+> **refreshes are safe**. The only real risk left is the *initial* build of a large
+> List (many first-time adds): expect it to be slow, or seed a big List by hand.
+
 ## Commands (complements `publish --help`)
 
 ```bash

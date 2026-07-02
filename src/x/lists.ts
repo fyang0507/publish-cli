@@ -46,6 +46,10 @@ export interface AddMemberResult {
   userId: string;
   ok: boolean;
   error?: string;
+  /** Set on the add that tripped X's account-level anti-automation lock. */
+  rateLimited?: boolean;
+  /** Set on trailing users we never attempted (loop stopped after a rate lock). */
+  skipped?: boolean;
 }
 
 /** List metadata read back for verification. */
@@ -71,6 +75,16 @@ const FALLBACK_BEARER =
   "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 
 const HOME_URL = "https://x.com/home";
+
+// Multi-second spacing between member adds. A rapid bulk of adds trips X's
+// account-level anti-automation lock (blocks member-adds everywhere ~24h), so
+// we pace deliberately rather than the old ~350ms.
+const ADD_DELAY_MS = 3000;
+
+// A failed add matching this pattern means X's account-level add lock, NOT an
+// ordinary per-user failure — the caller should treat the run as rate-locked.
+const RATE_LOCK_RE =
+  /you aren'?t allowed to add members|not allowed to add|unauthoriz|not authorized|authenticat|automat|forbidden/i;
 
 /** Raw shape returned by the in-page fetch helper. */
 interface GqlResult {
@@ -252,6 +266,126 @@ export class XListManager {
   }
 
   /**
+   * Read a List's FULL current membership. Used to diff against Following so a
+   * refresh adds only genuinely-new accounts. Read-only (a GraphQL GET), so it
+   * uses NO mutation query id.
+   *
+   * WHY NOT SCROLL (the reason this was reworked): the enumerateFollowing trick
+   * — scroll the page and passively capture X's own GraphQL responses off the
+   * wire — does NOT work on the members view. X's `ListMembers` timeline only
+   * requests count=20 per page and relies on an in-page infinite-scroll observer
+   * to fetch the next cursor; in the driven/warm browser that observer fires
+   * exactly ONCE (first page, 20 members) and never re-arms, regardless of
+   * page.mouse.wheel / window.scrollTo / scrollIntoView on the last row (all
+   * observed: window scrolls, but no second ListMembers request is ever made).
+   * So a scroll-and-capture read tops out at ~20 members on any List, which made
+   * the create-watch-list delta wildly wrong (it saw 53 "missing" already-members
+   * and re-added them, tripping X's add rate lock).
+   *
+   * Instead we PAGINATE DETERMINISTICALLY: load the members page once so X mints
+   * a bearer and reveals the live `ListMembers` query id + feature flags on its
+   * own first request, then replay that query IN-PAGE (same logged-in-origin
+   * fetch() as gql()) following the response's Bottom cursor until it stops
+   * yielding new users. This walks every page (20 at a time) with no scrolling.
+   */
+  async getMembers(listId: string): Promise<XFollowedUser[]> {
+    const page = this.requirePage();
+    const clean = String(listId).replace(/^@/, "").trim();
+    const out: XFollowedUser[] = [];
+    const seen = new Set<string>();
+
+    // Sniff the live ListMembers query id + feature blob (both rotate, so we
+    // read them off X's OWN first request rather than hardcoding) plus a fresh
+    // authorization header if init() didn't already capture one.
+    let qid: string | null = null;
+    let features: string | null = null;
+    const onRequest = (req: Request): void => {
+      const url = req.url();
+      if (url.includes("/graphql/") && !this.auth) {
+        const a = req.headers()["authorization"];
+        if (a) this.auth = a;
+      }
+      if (url.includes("ListMembers") && !qid) {
+        qid = url.split("/graphql/")[1]?.split("/")[0] ?? null;
+        try {
+          features = new URL(url).searchParams.get("features");
+        } catch {
+          // leave features null; the fetch below tolerates a missing blob
+        }
+      }
+    };
+
+    page.on("request", onRequest);
+    try {
+      await page.goto(`https://x.com/i/lists/${clean}/members`, {
+        waitUntil: "domcontentloaded",
+        timeout: 45_000,
+      });
+      // Wait for X to issue its own first ListMembers request so we learn the
+      // query id + features (and seed the first page from the captured cursor).
+      await page.waitForRequest((r) => r.url().includes("ListMembers"), { timeout: 30_000 }).catch(() => {});
+      await page.waitForTimeout(500);
+    } finally {
+      page.off("request", onRequest);
+    }
+
+    if (!qid) {
+      // Never saw a ListMembers request (e.g. empty List / DOM drift). Nothing
+      // to page through — return empty rather than a misleading partial.
+      return out;
+    }
+
+    // Replay ListMembers in-page, following the Bottom cursor until a page adds
+    // no new users (or the cursor stops advancing). count=20 mirrors X's own web
+    // request; the guard cap is a safety net for a pathological non-terminating
+    // cursor, sized well above any realistic List.
+    let cursor: string | null = null;
+    for (let pageNum = 0; pageNum < 500; pageNum++) {
+      const variables: Record<string, unknown> = { listId: clean, count: 20 };
+      if (cursor) variables.cursor = cursor;
+      const res = await page.evaluate(
+        async ({ qid, variables, features, auth }) => {
+          const ct0 =
+            document.cookie
+              .split("; ")
+              .find((c) => c.startsWith("ct0="))
+              ?.slice(4) || "";
+          const qs =
+            `variables=${encodeURIComponent(JSON.stringify(variables))}` +
+            (features ? `&features=${encodeURIComponent(features)}` : "");
+          const r = await fetch(`https://x.com/i/api/graphql/${qid}/ListMembers?${qs}`, {
+            headers: {
+              authorization: auth,
+              "x-csrf-token": ct0,
+              "x-twitter-active-user": "yes",
+              "x-twitter-auth-type": "OAuth2Session",
+            },
+            credentials: "include",
+          });
+          let json: any = null;
+          try {
+            json = JSON.parse(await r.text());
+          } catch {
+            // leave json null
+          }
+          return { status: r.status, json };
+        },
+        { qid, variables, features, auth: this.auth as string },
+      );
+      if (res.status !== 200 || !res.json) break;
+      const before = out.length;
+      extractUsers(res.json, out, seen);
+      const next = findBottomCursor(res.json);
+      // Terminal page: no new users this round, or the cursor didn't advance.
+      if (out.length === before || !next || next === cursor) break;
+      cursor = next;
+    }
+
+    // Return every captured member — this is exactly the set to diff against.
+    return out;
+  }
+
+  /**
    * Create a List and return its numeric id_str. Privacy is enforced separately
    * via setPrivacy() (UpdateList) — the reliable path across X builds.
    */
@@ -289,15 +423,32 @@ export class XListManager {
    * Add members to a List one id at a time (X has no bulk add). Tolerant: a lone
    * DecodeException or "already a member" counts as success; real errors are
    * recorded per-member so the caller can retry the failures.
+   *
+   * Paced by ADD_DELAY_MS between adds. CIRCUIT BREAKER: if an add fails with an
+   * authorization / "not allowed to add members" style error (X's account-level
+   * anti-automation lock), we STOP immediately — flag that add rateLimited and
+   * report every remaining un-attempted user as skipped (never silent success).
    */
   async addMembers(listId: string, users: XFollowedUser[]): Promise<AddMemberResult[]> {
+    const page = this.requirePage();
     const results: AddMemberResult[] = [];
-    for (const u of users) {
+    for (let i = 0; i < users.length; i++) {
+      const u = users[i];
+      // Pace before each add except the first, so the run isn't needlessly slow.
+      if (i > 0) await page.waitForTimeout(ADD_DELAY_MS);
+
       let res: GqlResult;
       try {
         res = await this.gql("ListAddMember", { listId: String(listId), userId: String(u.id) });
       } catch (err) {
-        results.push({ handle: u.handle, userId: u.id, ok: false, error: (err as Error).message });
+        const msg = (err as Error).message;
+        // A rate-lock message even on the thrown path halts the whole run.
+        if (RATE_LOCK_RE.test(msg)) {
+          results.push({ handle: u.handle, userId: u.id, ok: false, rateLimited: true, error: msg });
+          markSkipped(results, users, i + 1);
+          break;
+        }
+        results.push({ handle: u.handle, userId: u.id, ok: false, error: msg });
         continue;
       }
       const errs: string[] = Array.isArray(res.json?.errors)
@@ -307,14 +458,28 @@ export class XListManager {
       const already = errs.some((m) => /already a member/i.test(m));
       const onlyDecode = errs.length > 0 && errs.every((m) => /DecodeException/i.test(m));
       const ok = res.status === 200 && (hasList || already || onlyDecode || errs.length === 0);
+      if (!ok) {
+        // Circuit breaker: an authorization / add-lock error blocks adds account
+        // -wide, so stop rather than burning through the rest and worsening it.
+        const rateLocked = res.status === 403 || errs.some((m) => RATE_LOCK_RE.test(m));
+        if (rateLocked) {
+          results.push({
+            handle: u.handle,
+            userId: u.id,
+            ok: false,
+            rateLimited: true,
+            error: errs.join("; ") || `status ${res.status}`,
+          });
+          markSkipped(results, users, i + 1);
+          break;
+        }
+      }
       results.push({
         handle: u.handle,
         userId: u.id,
         ok,
         error: ok ? undefined : errs.join("; ") || `status ${res.status}`,
       });
-      // Gentle pacing to avoid tripping write rate limits.
-      await this.requirePage().waitForTimeout(350);
     }
     return results;
   }
@@ -355,6 +520,19 @@ export class XListManager {
   }
 }
 
+/** Mark users[from..] as un-attempted (skipped) after a rate-lock break. */
+function markSkipped(results: AddMemberResult[], users: XFollowedUser[], from: number): void {
+  for (let j = from; j < users.length; j++) {
+    results.push({
+      handle: users[j].handle,
+      userId: users[j].id,
+      ok: false,
+      skipped: true,
+      error: "skipped: list add rate-locked",
+    });
+  }
+}
+
 /** Recursively pull user objects out of a `Following` GraphQL payload. */
 function extractUsers(root: unknown, out: XFollowedUser[], seen: Set<string>): void {
   const visit = (node: unknown): void => {
@@ -376,6 +554,26 @@ function extractUsers(root: unknown, out: XFollowedUser[], seen: Set<string>): v
     for (const k of Object.keys(obj)) visit(obj[k]);
   };
   visit(root);
+}
+
+/** Find the `Bottom` (next-page) cursor value in a ListMembers payload. */
+function findBottomCursor(root: unknown): string | null {
+  let found: string | null = null;
+  const visit = (node: unknown): void => {
+    if (found || !node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const i of node) visit(i);
+      return;
+    }
+    const obj = node as Record<string, any>;
+    if (obj.cursorType === "Bottom" && obj.value) {
+      found = String(obj.value);
+      return;
+    }
+    for (const k of Object.keys(obj)) visit(obj[k]);
+  };
+  visit(root);
+  return found;
 }
 
 /** Find a List's numeric id_str anywhere in a GraphQL payload. */
