@@ -46,11 +46,12 @@ between:
 1. `publish x watch --config <campaign-watch.yaml> --json` (use `--format markdown
    --out <file>` instead when a human wants a readable digest to review).
 2. Agent selects only a small number of high-confidence candidates.
-3. Agent writes one Markdown reply source per target tweet.
+3. Agent writes the reply per target tweet — inline via `--text "…"` for short
+   replies, or a Markdown source (`--from <reply.md>`) for longer ones.
 4. Agent dry-runs each reply:
-   `publish x reply --to <tweet-url> --from <reply.md> --dry-run`
+   `publish x reply --to <tweet-url> --text "…" --dry-run`
 5. Agent stages accepted drafts:
-   `publish x reply --to <tweet-url> --from <reply.md>`
+   `publish x reply --to <tweet-url> --text "…"`
 6. Human reviews/sends from X Unsent/Drafts.
 
 Keep campaign-specific choices outside this CLI skill: selection criteria,
@@ -95,8 +96,8 @@ publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--de
 publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] \
                  [--config <watch.yaml>] [--validate-config] [--no-triage] \
                  [--format text|json|markdown] [--json] [--out <file>] [--inspect]
-publish x draft  --from <file.md> --format tweet|thread|article [--long] [--dry-run] [--inspect]
-publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--force] [--inspect]
+publish x draft  --format tweet|thread|article (--text <content> | --from <file.md>) [--long] [--dry-run] [--inspect]
+publish x reply  --to <id|url> (--text <content> | --from <file.md>) [--long] [--dry-run] [--force] [--inspect]
 ```
 
 - **create-watch-list** — seeds a List from the accounts `--handle` (default: the

@@ -52,7 +52,7 @@ One unattended credential login (Playwright over a **persistent** profile) backs
 
 ## Canonical content
 
-The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from`. The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/SETUP.md](./skills/publish/SETUP.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
+The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from` (or, for short tweets/replies, inline via `--text` — no scratch file; `--from -` reads stdin). The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/SETUP.md](./skills/publish/SETUP.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
 
 ## Usage
 
@@ -61,8 +61,8 @@ publish --help
 
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
 publish x watch [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
-publish x draft --from <base.md> --format tweet|thread|article [--inspect]
-publish x reply --to <id|url> --from <base.md> [--long] [--dry-run] [--force] [--inspect]
+publish x draft --format tweet|thread|article (--text <content> | --from <base.md>) [--inspect]
+publish x reply --to <id|url> (--text <content> | --from <base.md>) [--long] [--dry-run] [--force] [--inspect]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.
