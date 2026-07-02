@@ -32,10 +32,20 @@ Copy `.env.example` → `.env` (gitignored) and set:
 Copy `watch.yaml.example` → `watch.yaml` and set `queries`, `lists`,
 `per_origin_limit`, and the triage block (`persona`, `min_score`, `batch_size`).
 The file is schema-validated on load — unknown keys / wrong types fail loudly
-before the browser opens. CLI flags (`--query`, `--x-list`, `--persona`) ADD to /
-supply values over this file. (Accounts are watched via a `List` built with
-`publish x create-watch-list`, not a per-account origin. The triage `persona`
-ships blank — supply it per run with `--persona`.)
+before the browser opens, with **migration hints** for removed keys (e.g. a stale
+`accounts:` points you to build a List). CLI flags (`--query`, `--x-list`,
+`--persona`) ADD to / supply values over this file. (Accounts are watched via a
+`List` built with `publish x create-watch-list`, not a per-account origin.)
+
+- **Validate cheaply, no browser:** `publish x watch --validate-config` parses the
+  config + merged flags, prints the resolved settings, and exits before any read —
+  the safe pre-flight for a scheduled job or after editing `watch.yaml`.
+- **Triage rubric ships blank** — supply it per run with `--persona <text>` or
+  `--persona-from <file>`. It **must be self-contained**: the classifier sees only
+  the rubric + each candidate post, never the source essay/brief/context. Keep long
+  rubrics in a file and use `--persona-from` (avoids shell-quoting breakage).
+- **Output shape:** `--format text` (default) | `json` | `markdown` (a reviewable
+  digest); `--json` aliases `--format json`; `--out <file>` writes to a file.
 
 ## Where state lives (two homes)
 
