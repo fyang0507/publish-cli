@@ -79,54 +79,62 @@ export const LI_LOGIN_SELECTORS = {
   loginUrl: "https://www.linkedin.com/login",
   homeUrl: "https://www.linkedin.com/feed/",
 
-  // Username / email field. CALIBRATE: LinkedIn's classic login uses id="username".
+  // Username / email field. CALIBRATED LIVE 2026-07: LinkedIn now renders DYNAMIC
+  // React ids (e.g. «Refvd3ksopa55j6», not id="username") AND a duplicate HIDDEN
+  // copy of the form. The `:visible` filter is REQUIRED — without it .first()
+  // grabs the hidden duplicate and waitFor(visible) times out (the original bug).
+  // The visible field is type=email autocomplete="username webauthn".
   usernameInput: [
-    "input#username",
-    'input[name="session_key"]',
-    'input[autocomplete="username"]',
-    'input[type="email"]',
+    'input[autocomplete*="username"]:visible',
+    'input[type="email"]:visible',
+    "input#username", // legacy fallback
+    'input[name="session_key"]', // legacy fallback
   ],
-  // Password field. CALIBRATE: classic login uses id="password".
+  // Password field. CALIBRATED LIVE 2026-07: same hidden-duplicate issue — the
+  // `:visible` filter is required.
   passwordInput: [
-    "input#password",
-    'input[name="session_password"]',
-    'input[autocomplete="current-password"]',
-    'input[type="password"]',
+    'input[type="password"]:visible',
+    'input[autocomplete="current-password"]:visible',
+    "input#password", // legacy fallback
+    'input[name="session_password"]', // legacy fallback
   ],
-  // Submit button. CALIBRATE: the sign-in button is usually a real
-  // <button type="submit">; keep text/aria fallbacks.
+  // Submit button. CALIBRATED LIVE 2026-07: the sign-in control is a
+  // <button type="button"> with text "Sign in" (NOT type=submit), and there is a
+  // decoy "Sign in with Apple". In practice advance() SUBMITS BY PRESSING ENTER on
+  // the focused password field (verified to log in), so these are best-effort — a
+  // miss safely falls through to the Enter submit.
   submitButton: [
-    'button[type="submit"]',
-    'button[aria-label="Sign in"]',
+    'button[aria-label="Sign in"]:visible',
+    'button[type="submit"]:visible',
     '//button[normalize-space()="Sign in"]',
-    'button:has-text("Sign in")',
   ],
 
   // CONDITIONAL email/identifier confirmation ("enter the email associated with
   // your account" / checkpoint). Answered with LI_EMAIL. BEST-EFFORT — LinkedIn
   // injects checkpoints unpredictably; gated on CHALLENGE_PROMPT_HINTS below.
   identifierChallengeInput: [
-    'input[name="email-address"]',
-    'input[name="emailAddress"]',
-    'input[autocomplete="email"]',
-    'input[type="email"]',
+    'input[name="email-address"]:visible',
+    'input[name="emailAddress"]:visible',
+    'input[autocomplete="email"]:visible',
+    'input[type="email"]:visible',
   ],
   identifierChallengeSubmit: [
-    'button[type="submit"]',
+    'button[type="submit"]:visible',
     '//button[normalize-space()="Submit"]',
     '//button[normalize-space()="Verify"]',
-    'button:has-text("Submit")',
+    'button:has-text("Submit"):visible',
   ],
 
-  // Logged-in signal (used by isLoggedIn()/ensureSession()). CALIBRATE: the global
-  // nav search box and the "Start a post" feed control are reliable post-login
-  // markers; the /feed URL is a last-resort fallback.
+  // Logged-in signal (used by isLoggedIn()/ensureSession()). CALIBRATED LIVE
+  // 2026-07: LinkedIn's feed uses HASHED, unstable class names, so the old
+  // search-typeahead class / combobox role no longer match. The durable markers
+  // now are the global search input's placeholder and the top-nav Home button.
+  // LOCALE NOTE: placeholder + Home aria-label are English-UI text (best-effort).
   loggedInSignal: [
-    'input[role="combobox"][aria-label*="Search"]',
-    "input.search-global-typeahead__input",
-    'button[aria-label*="Start a post"]',
-    'div.share-box-feed-entry__trigger',
-    'a[href*="/feed/"]',
+    'input[placeholder*="looking for"]',
+    'button[aria-label^="Home"]',
+    "input.search-global-typeahead__input", // legacy fallback
+    'button[aria-label*="Start a post"]', // legacy fallback
   ],
 } as const;
 

@@ -53,23 +53,27 @@ export const LI_COMPOSER_SELECTORS = {
     '//span[normalize-space()="Start a post"]/ancestor::*[@role="button"][1]',
   ],
 
-  // The composer's contenteditable text area. data-placeholder is a fairly stable
-  // hook; keep role/aria fallbacks. BEST-EFFORT / NEEDS LIVE CALIBRATION.
+  // The composer's contenteditable text area. CALIBRATED LIVE 2026-07: LinkedIn's
+  // composer is now a TipTap/ProseMirror editor — div.ProseMirror[contenteditable]
+  // with role="textbox". (The old Quill `div.ql-editor` is gone.) Reached by
+  // navigating to shareUrl (feed/?shareActive=true), which opens the composer
+  // overlay; NOTE /sharing/compose is a 404 as a direct URL.
   editor: [
-    'div.ql-editor[contenteditable="true"]',
+    'div.ProseMirror[contenteditable="true"]',
     'div[role="textbox"][contenteditable="true"]',
     'div[data-placeholder][contenteditable="true"]',
-    'div[aria-label*="Text editor for creating content"]',
   ],
 
   // ---- Media (optional; images, ratio-flexible — NO 5:2 gate) ----
-  // The "add media/photo" control that reveals the hidden file input. We prefer
-  // driving the hidden input[type=file] directly (works for styled labels).
+  // CALIBRATED LIVE 2026-07: the media control is button[aria-label="Photo"]
+  // (capital P — CSS attribute matching is case-sensitive, so the old
+  // [aria-label*="photo"] missed it). Clicking it opens the OS file chooser (there
+  // is NO visible input[type=file] in the composer), so attachMedia's filechooser
+  // path is the primary one; the hidden-input path is a fallback.
   mediaButton: [
+    'button[aria-label="Photo"]',
     'button[aria-label*="Add media"]',
-    'button[aria-label*="Add a photo"]',
-    'button[aria-label*="photo"]',
-    '//span[normalize-space()="Add media"]/ancestor::*[@role="button"][1]',
+    'button[aria-label*="photo" i]',
   ],
   mediaFileInput: [
     'input[type="file"][accept*="image"]',
@@ -97,37 +101,34 @@ export const LI_COMPOSER_SELECTORS = {
   // centralized. HIGHEST-RISK selectors — a mis-click must NEVER fall through to
   // Post (mirror X's saveAsDraft safeguard: if the Save affordance doesn't
   // resolve, do NOT guess another button — bail and leave it to a human).
+  // CALIBRATED LIVE 2026-07: the composer close control is button[aria-label="Dismiss"].
   closeComposerButton: [
     'button[aria-label="Dismiss"]',
     'button[aria-label="Close"]',
-    "button.share-box_close",
     '//button[@aria-label="Dismiss"]',
   ],
+  // CALIBRATED LIVE 2026-07: closing a non-empty composer raises a dialog with two
+  // TEXT buttons — "Save as draft" and "Discard" (NO aria-labels), so match by
+  // text. The old aria-label="Save as draft" never matched.
   saveDraftButton: [
-    'button[aria-label="Save as draft"]',
+    'button:has-text("Save as draft"):visible',
     '//button[normalize-space()="Save as draft"]',
     '//span[normalize-space()="Save as draft"]/ancestor::button[1]',
-    '//div[@role="button"][.//span[normalize-space()="Save as draft"]]',
   ],
-  // The "Discard" affordance in the same dialog — listed so we are explicit about
-  // what we must NEVER click (it throws the post away).
-  // discard (FORBIDDEN): 'button[aria-label="Discard"]' / //button[normalize-space()="Discard"]
+  // The "Discard" affordance in the SAME dialog — listed so we are explicit about
+  // what we must NEVER click (it throws the post away). CALIBRATED: text-only button.
+  // discard (FORBIDDEN): 'button:has-text("Discard")' / //button[normalize-space()="Discard"]
 
   // ---- Draft verification ----
-  // LinkedIn has no stable public drafts URL; drafts are reached from the share
-  // composer's "drafts" affordance. Open the composer, click it, and match the
-  // staged prefix. BEST-EFFORT.
-  draftsTrigger: [
-    'button[aria-label*="drafts"]',
-    'button[aria-label*="Drafts"]',
-    '//span[contains(normalize-space(),"draft")]/ancestor::*[@role="button"][1]',
-    'a[href*="drafts"]',
-  ],
+  // CALIBRATED LIVE 2026-07: LinkedIn has no drafts-list URL or labelled "drafts"
+  // control. Instead, REOPENING the share composer (shareUrl) AUTO-RESTORES the
+  // most recent saved draft into the editor — so verification just reopens the
+  // composer and matches the staged text inside the editor (see verifyDraftSaved).
 
   // The PUBLISH/POST button — listed ONLY so we are explicit about what we must
-  // NEVER click. Nothing in this module ever locates+clicks it.
-  // post (FORBIDDEN): 'button.share-actions__primary-action' /
-  //                   'button[aria-label="Post"]' / //button[normalize-space()="Post"]
+  // NEVER click. Nothing in this module ever locates+clicks it. CALIBRATED LIVE
+  // 2026-07: it is a text button matched by //button[normalize-space()="Post"].
+  // post (FORBIDDEN): //button[normalize-space()="Post"] / 'button[aria-label="Post"]'
 } as const;
 
 export interface StagePostOptions extends EnsureSessionOptions {
@@ -148,6 +149,11 @@ export interface StagePostResult {
 }
 
 const OPEN_TIMEOUT = 15_000;
+
+/** Platform select-all modifier for keyboard shortcuts (Cmd on macOS, Ctrl else). */
+function modifier(): "Meta" | "Control" {
+  return process.platform === "darwin" ? "Meta" : "Control";
+}
 
 /**
  * Open the LinkedIn share composer and return the focused editor locator. Tries
@@ -285,30 +291,29 @@ function normalizeForMatch(s: string): string {
 
 /**
  * Verify a draft was ACTUALLY saved by matching the staged text's leading ~40
- * chars in the drafts list (ports verifyDraftSaved's "match the staged prefix,
- * don't trust any row" hardening from X — the same false-positive trap).
+ * chars (ports X verifyDraftSaved's "match the staged prefix, don't trust any
+ * row" hardening — the same false-positive trap).
  *
- * LinkedIn has no stable drafts URL, so we reopen the share composer and click its
- * "drafts" affordance, then match the needle against the page text. Non-fatal —
- * returns false (unconfirmed) if inconclusive; never throws.
+ * CALIBRATED LIVE 2026-07: LinkedIn has no drafts-list URL, but REOPENING the
+ * share composer (shareUrl) AUTO-RESTORES the most recent saved draft into the
+ * editor. So we reopen the composer, read the editor's own text, and require the
+ * staged prefix to appear there (scoped to the editor, not the whole page, so the
+ * feed behind the modal can't false-positive). Non-fatal — returns false
+ * (unconfirmed) if inconclusive; never throws.
  */
 async function verifyDraftSaved(page: Page, expectedText: string): Promise<boolean> {
   const needle = normalizeForMatch(expectedText).slice(0, 40);
   if (!needle) return false;
   try {
     await page.goto(LI_COMPOSER_SELECTORS.shareUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1_000);
+    const editor = await optionalLocator(page, LI_COMPOSER_SELECTORS.editor, 15_000);
+    if (!editor) return false;
 
-    const draftsTrigger = await optionalLocator(page, LI_COMPOSER_SELECTORS.draftsTrigger, 5_000);
-    if (draftsTrigger) {
-      await draftsTrigger.click().catch(() => {});
-      await page.waitForTimeout(1_000);
-    }
-
+    // The composer restores the draft asynchronously — poll the editor text.
     const deadline = Date.now() + 6_000;
     while (Date.now() < deadline) {
-      const body = normalizeForMatch((await page.locator("body").innerText().catch(() => "")) || "");
-      if (body.includes(needle)) return true;
+      const txt = normalizeForMatch((await editor.innerText().catch(() => "")) || "");
+      if (txt.includes(needle)) return true;
       await page.waitForTimeout(500);
     }
     return false;
@@ -335,6 +340,12 @@ export async function stagePost(
   try {
     const editor = await openComposer(page);
     await editor.click();
+    // LinkedIn AUTO-RESTORES the most recent saved draft into the composer editor
+    // (verified live). typeText inserts at the cursor, so without clearing we would
+    // APPEND this post to a previously-restored draft. Select-all + delete first so
+    // every run types a CLEAN post. (On an empty composer this is a harmless no-op.)
+    await editor.press(`${modifier()}+a`);
+    await editor.press("Backspace");
     await typeText(page, editor, text);
 
     const mediaAttached = await attachMedia(page, media);
