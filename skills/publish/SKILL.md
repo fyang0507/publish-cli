@@ -43,8 +43,12 @@ For an end-to-end borrowed-reach workflow, run `watch` as the discovery primitiv
 and `reply` as the native-draft primitive, with an agent-owned editorial layer in
 between:
 
+0. (Scheduled/unattended) Pre-flight the config without a browser:
+   `publish x watch --config <campaign-watch.yaml> --validate-config` — confirms the
+   config + flags resolve and the persona is non-blank before the real run.
 1. `publish x watch --config <campaign-watch.yaml> --json` (use `--format markdown
-   --out <file>` instead when a human wants a readable digest to review).
+   --out <file>` instead when a human wants a readable digest to review). Supply the
+   self-contained rubric with `--persona-from <rubric.md>` for long rubrics.
 2. Agent selects only a small number of high-confidence candidates.
 3. Agent writes one Markdown reply source per target tweet.
 4. Agent dry-runs each reply:
