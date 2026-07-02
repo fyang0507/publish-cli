@@ -1,12 +1,15 @@
-# Design: Reddit self-post channel (`publish reddit draft`)
+# Design: Reddit self-post channel (`publish reddit discover` / `draft`)
 
 > **Status:** design proposal (Phase 2, per [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) §8;
 > the API-channel divergence this doc builds on was called in
 > [LINKEDIN_DESIGN.md](./LINKEDIN_DESIGN.md) §3.1).
 > **Scope:** the Reddit **PUBLISH** capability only, and within it **text /
-> self-posts only** — staging a native Reddit **draft** (subreddit + title +
-> Markdown body + optional flair). Link/image/gallery posts, crossposts, and
-> Reddit **WATCH** (subreddit/search monitoring) are separate designs (§8).
+> self-posts only**. Two actions: a read-only **`discover`** (report a
+> subreddit's posting contract — subscribers, allowed types, rules,
+> `post_requirements`, flairs) and **`draft`** — staging a native Reddit **draft**
+> (subreddit + title + Markdown body + optional flair). Link/image/gallery posts,
+> multi-subreddit repost in one command, and Reddit **WATCH** (monitoring →
+> reply candidates) are separate designs (§8).
 >
 > **Hard boundary (unchanged):** the publisher stops at a **native draft staged
 > on the platform**. It MUST NOT publish. Reddit's official API has a first-class
@@ -40,6 +43,26 @@ Two things make Reddit unlike either channel we ship:
    Reddit exposes these rules **programmatically** (§4), so we can validate a
    draft against the target subreddit's contract before staging it.
 
+### 1.1 The workflow: discover → decide → draft
+
+Because the subreddit is a contract, publishing is a **two-phase** flow, and the
+judgment of *where* to post stays with the **consuming agent**, not this repo
+(CLAUDE.md public-repo posture — editorial judgment lives in the agent
+workspace):
+
+1. **Agent proposes** candidate subreddits for a piece of content (its own
+   knowledge / a `--search` query).
+2. **`publish reddit discover <sub…>`** returns the **mechanical facts** for each
+   candidate — subscribers, `submission_type` (any/self/link), `over18`, the
+   `post_requirements` (flair required?, title regex, body limits), the flair
+   templates, and the rules text. **No ranking, no LLM** — deliberately unlike
+   `x watch`'s Gemini triage. The CLI reports; the agent judges.
+3. **Agent decides** the target (and, for a repost, the *set* of targets and any
+   per-subreddit tailoring).
+4. **`publish reddit draft --subreddit <one>`** stages the native draft, enforcing
+   that subreddit's contract (§4). **Repost = the agent loops step 4** over each
+   chosen subreddit; the CLI stays single-target (§8).
+
 How it differs from the X channel we already ship:
 
 | Dimension | X (existing) | Reddit self-post (this design) |
@@ -56,6 +79,22 @@ How it differs from the X channel we already ship:
 
 ## 2. CLI surface
 
+Two actions. `discover` (read-only facts) precedes `draft` (write) — the agent
+bridges them.
+
+```
+publish reddit discover <subreddit>...             # report each named subreddit's posting contract
+                        [--search "<query>"]       # instead of/alongside names: list candidate subreddits (mechanical, no ranking)
+                        [--json]                    # machine-readable facts for the agent to parse
+```
+
+`discover` is **facts only** — for each subreddit it fetches `about`
+(subscribers, `submission_type`, `over18`), `post_requirements`, flair templates,
+and rules text, and prints them (human table or `--json`). `--search` runs
+Reddit's subreddit search and lists candidate names + subscriber counts — again
+mechanical, **no LLM ranking** (the agent proposes and decides; §1.1). Read-only:
+no draft, no dedupe state.
+
 ```
 publish reddit draft --subreddit <name>            # target community (or from --from frontmatter)
                      --title "<title>"             # ≤300 chars (or derived from markdown H1)
@@ -70,7 +109,8 @@ New channel group in `src/cli.ts`, mirroring `x` / `linkedin`:
 
 ```ts
 const reddit = program.command("reddit")
-  .description("Reddit channel: draft (native self-post drafts via API, never posts)");
+  .description("Reddit channel: discover (subreddit facts) + draft (native self-post drafts via API, never posts)");
+registerRedditDiscoverCommand(reddit);
 registerRedditDraftCommand(reddit);
 ```
 
@@ -200,6 +240,11 @@ enforce the target subreddit's contract:
 - Flair templates: `GET /r/{subreddit}/api/link_flair_v2` → resolve `--flair`
   text to a `flair_template_id` (or list valid choices on miss).
 
+> **`discover` and `draft` share this fetch.** `discover` reports these facts for
+> agent-proposed candidate subreddits (read-only, §1.1); `draft` re-runs the same
+> fetch to *enforce* the contract on the chosen target. One `src/reddit/rules.ts`,
+> two consumers.
+
 Validate the generated post against these and **fail early with an actionable
 message** — e.g. *"r/MachineLearning requires a flair; valid: Discussion,
 Research, Project…"* or *"title must match `^\[D\]|\[R\]|\[P\]` "* — rather than
@@ -248,7 +293,8 @@ Post selector — but stronger, because there is no affordance to mis-fire.
 | Path | Purpose |
 |---|---|
 | `src/reddit/auth.ts` | OAuth: `--login` consent (loopback capture), token store, auto-refresh, authorized `fetch` client (UA + rate-limit aware) |
-| `src/reddit/rules.ts` | subreddit preflight: fetch `post_requirements` + flair templates, validate a post, resolve flair text → id |
+| `src/reddit/rules.ts` | subreddit facts + preflight: fetch `about` / `post_requirements` / flair templates / rules; validate a post; resolve flair text → id. **Shared by `discover` and `draft`** |
+| `src/commands/reddit-discover.ts` | `registerRedditDiscoverCommand`; read-only facts report (`--search` / `--json`) over `rules.ts` |
 | `src/reddit/content.ts` | `generateSelfPost` — title + Markdown body (kept verbatim), caps, old-reddit/link advisories (reuses `../x/content.ts`) |
 | `src/reddit/draft.ts` | `stageDraft` — `POST /api/draft` + verify; **no submit** |
 | `src/commands/reddit-draft.ts` | `registerRedditDraftCommand`; reuses `resolveContentInput`; lazy-imports auth/draft |
@@ -268,7 +314,12 @@ CLAUDE.md "reuse by import."
   read API + OAuth client built here is the foundation.
 - **Link / image / gallery / video posts** — self-post first; the draft call
   generalizes (`kind: link`, media upload via `POST /api/media/asset.json`).
-- **Crossposts / multi-subreddit staging** — one subreddit per draft this phase.
+- **Multi-subreddit repost in one command / crossposts** — one subreddit per
+  `draft` this phase; the agent orchestrates a repost by looping `draft` over the
+  targets it chose from `discover` (§1.1). Native crosspost (`kind: crosspost`)
+  is a later add.
+- **LLM subreddit ranking** — `discover` stays facts-only by design; ranking
+  "which subreddit fits best" is the consuming agent's job, not the CLI's.
 - **Scheduled posts & the human send-gate** (`submit`) — future scope for the
   whole toolkit (PRODUCT_SPEC §5), explicitly not built here.
 - **AutoMod-rule prediction** — preflight covers the API-declared contract only.
@@ -284,7 +335,13 @@ Do a live round-trip (a throwaway subreddit / your profile) before locking:
   names for flair/nsfw/spoiler. This is the highest-risk item.
 - **`post_requirements` coverage.** Confirm the response fields and that
   preflight failures match what the composer would actually reject; document that
-  AutoMod filters are *not* covered.
+  AutoMod filters are *not* covered — so `discover` reports the API-declared
+  contract, not every mod filter, and the agent should treat it as necessary-not-
+  sufficient.
+- **`discover` fact endpoints.** Confirm `GET /r/{sub}/about`, subreddit search
+  (`/subreddits/search` or `subreddit_autocomplete_v2`), and `about/rules` return
+  the fields the report promises, and that private/quarantined subreddits degrade
+  gracefully rather than erroring the whole run.
 - **Markdown fidelity.** Round-trip the body on both new and old Reddit
   (fenced code, tables, headings) to confirm the "keep verbatim, Markdown mode"
   assumption and validate the PLATFORM_CAPABILITIES render profile empirically.
