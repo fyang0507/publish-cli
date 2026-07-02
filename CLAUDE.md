@@ -37,7 +37,7 @@ A single Playwright **persistent-profile** browser (one unattended credential lo
 - **Data-repo resolution** (`src/dataRepo.ts`): `PUBLISH_DATA_REPO` env → `publish.config.dev.yaml` (`data_repo_path`) → walk up for `.agents/workspace.yaml`. If unresolved, the dedupe DB falls back to `PUBLISH_DATA_DIR` and the symlink step is skipped. **Never hardcode a personal path.**
 - **This repo sits on Google Drive** — churny runtime data off-repo is a correctness requirement, not a preference.
 
-Dedupe policy: **seen ⇒ never resurface** (by design). Idempotent reply-ledger dedup is tracked separately (issue #10).
+Dedupe policy: **seen ⇒ never resurface** (by design). Reply writes get their own idempotency guarantee: a **reply ledger** (`ReplyLedger`, `src/db.ts`, same sqlite file, separate `reply_ledger` table) keyed on the target tweet id. `publish x reply` refuses to re-stage a reply to a tweet already in the ledger (records only after a successful stage) unless `--force`. Read-dedup (SeenStore) and write-dedup (ReplyLedger) are deliberately decoupled — different risk tiers.
 
 ## Public-repo posture
 

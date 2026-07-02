@@ -74,7 +74,7 @@ publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--de
 publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text>] \
                  [--config <watch.yaml>] [--no-triage] [--json] [--inspect]
 publish x draft  --from <file.md> --format tweet|thread|article [--long] [--dry-run] [--inspect]
-publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--inspect]
+publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--force] [--inspect]
 ```
 
 - **create-watch-list** — seeds a List from the accounts `--handle` (default: the
@@ -97,7 +97,9 @@ publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--inspect]
   machine output; otherwise a ranked human summary.
 - **draft / reply** — `--dry-run` generates + prints content without a browser;
   `--long` raises the single-post cap to the Premium limit; `--inspect` runs headful.
-  `--to` accepts a tweet id or status URL.
+  `--to` accepts a tweet id or status URL. **reply** is write-deduped by a reply
+  ledger keyed on the target tweet id: it refuses to re-stage a reply to a tweet
+  it has already staged (records only after a successful stage) unless `--force`.
 - Content generation is **deterministic** (character-fit, thread splitting, code/link
   advisories). An Article body is pasted as rich HTML the editor converts natively;
   a tweet/thread/reply is typed into the composer and saved as an unsent draft.

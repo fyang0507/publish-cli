@@ -62,7 +62,7 @@ publish --help
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
 publish x watch [--query <q>...] [--x-list <id>...] [--persona <text>] [--config <watch.yaml>] [--no-triage] [--json]
 publish x draft --from <base.md> --format tweet|thread|article [--inspect]
-publish x reply --to <id|url> --from <base.md> [--inspect]
+publish x reply --to <id|url> --from <base.md> [--long] [--dry-run] [--force] [--inspect]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.
