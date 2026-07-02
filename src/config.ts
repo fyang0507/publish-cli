@@ -162,6 +162,20 @@ const TOP_KEYS = ["triage_model", "queries", "lists", "per_origin_limit", "max_t
 const TRIAGE_KEYS = ["persona", "min_score", "batch_size"] as const;
 
 /**
+ * Migration hints for keys that USED to be valid and were removed in a schema
+ * change. A bare "unknown key" error is accurate but leaves an agent repairing an
+ * older config guessing at the replacement; these point at it (issue #19).
+ */
+const REMOVED_TOP_KEY_HINTS: Record<string, string> = {
+  accounts:
+    "per-account watching is no longer supported — build an X List with `publish x create-watch-list` and put its id under `lists`.",
+};
+const REMOVED_TRIAGE_KEY_HINTS: Record<string, string> = {
+  dimensions:
+    "scoring dimensions are fixed in the classifier prompt — express campaign-specific criteria in `triage.persona`.",
+};
+
+/**
  * Load and VALIDATE watch.yaml behavior config, merged over defaults.
  *
  * Unlike a silent shallow-merge, this rejects unknown keys (catches typos like
@@ -191,7 +205,10 @@ export function loadWatchConfig(path?: string): WatchConfig {
 
   for (const k of Object.keys(parsed)) {
     if (!(TOP_KEYS as readonly string[]).includes(k)) {
-      errors.push(`unknown key "${k}" (expected one of: ${TOP_KEYS.join(", ")})`);
+      const hint = REMOVED_TOP_KEY_HINTS[k];
+      errors.push(
+        `unknown key "${k}" (expected one of: ${TOP_KEYS.join(", ")})` + (hint ? ` — ${hint}` : ""),
+      );
     }
   }
 
@@ -222,7 +239,10 @@ export function loadWatchConfig(path?: string): WatchConfig {
       const tr = parsed.triage;
       for (const k of Object.keys(tr)) {
         if (!(TRIAGE_KEYS as readonly string[]).includes(k)) {
-          errors.push(`triage.${k}: unknown key (expected one of: ${TRIAGE_KEYS.join(", ")})`);
+          const hint = REMOVED_TRIAGE_KEY_HINTS[k];
+          errors.push(
+            `triage.${k}: unknown key (expected one of: ${TRIAGE_KEYS.join(", ")})` + (hint ? ` — ${hint}` : ""),
+          );
         }
       }
       if ("persona" in tr) {

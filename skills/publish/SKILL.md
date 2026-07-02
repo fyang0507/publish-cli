@@ -43,7 +43,8 @@ For an end-to-end borrowed-reach workflow, run `watch` as the discovery primitiv
 and `reply` as the native-draft primitive, with an agent-owned editorial layer in
 between:
 
-1. `publish x watch --config <campaign-watch.yaml> --json`
+1. `publish x watch --config <campaign-watch.yaml> --json` (use `--format markdown
+   --out <file>` instead when a human wants a readable digest to review).
 2. Agent selects only a small number of high-confidence candidates.
 3. Agent writes one Markdown reply source per target tweet.
 4. Agent dry-runs each reply:
@@ -91,8 +92,9 @@ of people, build a List once, then keep it fresh:
 ```bash
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--description <t>] \
                  [--x-list <id>] [--private|--public] [--limit <n>] [--dry-run] [--json] [--inspect]
-publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text>] \
-                 [--config <watch.yaml>] [--no-triage] [--json] [--inspect]
+publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] \
+                 [--config <watch.yaml>] [--validate-config] [--no-triage] \
+                 [--format text|json|markdown] [--json] [--out <file>] [--inspect]
 publish x draft  --from <file.md> --format tweet|thread|article [--long] [--dry-run] [--inspect]
 publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--force] [--inspect]
 ```
@@ -109,12 +111,24 @@ publish x reply  --to <id|url> --from <file.md> [--long] [--dry-run] [--force] [
 - **watch** — `--query`/`--x-list` merge with `watch.yaml` (both repeatable; each
   `--x-list` takes one X List id). Accounts are watched via a List, never one-by-one.
   `--no-triage` skips the LLM and emits raw deduped posts (the caller judges them).
-  `--persona` supplies the free-text reply-worthiness rubric at call time (define
-  your own criteria in prose; the scoring dimensions fit/timeliness/unique_value are
-  a fixed, defined baseline, not a knob). `watch.yaml` holds durable infra
-  (`triage_model`, `min_score`, `batch_size`) and is schema-validated on load —
-  unknown keys / wrong types fail loudly before the browser opens. `--json` for
-  machine output; otherwise a ranked human summary.
+  `--persona` supplies the free-text reply-worthiness rubric at call time, or
+  `--persona-from <file>` loads it from a file (mutually exclusive with `--persona`);
+  either overrides `watch.yaml`. **The rubric MUST be self-contained** — the
+  classifier sees ONLY the rubric plus each candidate post, never the source essay,
+  campaign brief, workspace files, or other agent context. A vague persona ("replies
+  for my agent-enablement essay") scores against a campaign name, not real editorial
+  judgment, so results look plausible but misaligned; spell out the actual selection
+  criteria inline. Long self-contained rubrics are the right shape → keep them in a
+  file and pass `--persona-from` (avoids shell-quoting breakage). Define your own
+  criteria in prose; the scoring dimensions fit/timeliness/unique_value are a fixed,
+  defined baseline, not a knob. `watch.yaml` holds durable infra (`triage_model`,
+  `min_score`, `batch_size`) and is schema-validated on load — unknown keys / wrong
+  types fail loudly (with migration hints for removed keys) before the browser opens.
+  `--validate-config` runs that validation and prints the resolved settings **without
+  opening the browser or touching the seen store** — cheap pre-flight for scheduled
+  jobs. Output shape: `--format text` (default ranked summary) | `json` | `markdown`
+  (reviewable digest with links/scores/reasons/angles); `--json` is an alias for
+  `--format json`; `--out <file>` writes to a file instead of stdout.
 - **draft / reply** — `--dry-run` generates + prints content without a browser;
   `--long` raises the single-post cap to the Premium limit; `--inspect` runs headful.
   `--to` accepts a tweet id or status URL. **reply** is write-deduped by a reply

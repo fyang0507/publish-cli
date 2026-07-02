@@ -30,7 +30,7 @@ npx playwright install chromium
   - `TRIAGE_MODEL` — cheap triage model id (default `gemini-3.5-flash`).
   - `X_USERNAME` / `X_PASSWORD` / `X_EMAIL` — X credential login. No 2FA; `X_EMAIL` answers X's email/identifier confirmation challenge.
   - `PUBLISH_DATA_DIR` (optional) — runtime data dir, default `~/.publish-cli`.
-- **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, and the triage rubric.
+- **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, and the triage rubric. The triage rubric (`triage.persona`, or `--persona` / `--persona-from <file>`) **must be self-contained** — the classifier sees only the rubric plus each candidate post, never the source essay, campaign brief, or surrounding agent context, so spell out the actual selection criteria inline. Validate a config cheaply (no browser) with `publish x watch --validate-config`.
 
 ### Session model
 
@@ -60,7 +60,7 @@ The source of truth for content is caller-supplied local markdown, passed to the
 publish --help
 
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
-publish x watch [--query <q>...] [--x-list <id>...] [--persona <text>] [--config <watch.yaml>] [--no-triage] [--json]
+publish x watch [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
 publish x draft --from <base.md> --format tweet|thread|article [--inspect]
 publish x reply --to <id|url> --from <base.md> [--long] [--dry-run] [--force] [--inspect]
 ```
