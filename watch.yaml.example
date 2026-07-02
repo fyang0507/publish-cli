@@ -40,10 +40,19 @@ triage:
   # Free-text reply-worthiness rubric: WHO is replying and what unique value they
   # add, so the model can judge fit and whether a reply would be additive (not
   # noise). Ships BLANK in this public repo — the calling agent owns triage and
-  # supplies this per run via --persona (issue #6). A blank persona falls back to
-  # a generic default and prints a notice. Define your own criteria in prose here;
-  # the scoring dimensions (fit / timeliness / unique_value) are a fixed, DEFINED
-  # baseline in the prompt and are intentionally not configurable by bare name.
+  # supplies this per run via --persona / --persona-from (issue #6). A blank
+  # persona falls back to a generic default and prints a notice. Define your own
+  # criteria in prose here; the scoring dimensions (fit / timeliness /
+  # unique_value) are a fixed, DEFINED baseline in the prompt and are
+  # intentionally not configurable by bare name.
+  #
+  # MUST BE SELF-CONTAINED. The classifier sees ONLY this rubric + the candidate
+  # post — never the source essay, campaign brief, workspace files, or any other
+  # agent context. A persona like "find replies for my agent-enablement essay" is
+  # too implicit: it scores against a vague campaign name, not real editorial
+  # judgment, so results look plausible but misaligned. Spell out the actual
+  # selection criteria inline. Long rubrics are the right shape — keep them in a
+  # file and pass `--persona-from ./rubric.md` rather than fighting shell quoting.
   persona: ""
   # Only surface candidates at or above this score (0-100) in the ranked output.
   min_score: 60

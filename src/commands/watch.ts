@@ -1,5 +1,7 @@
 import { Command } from "commander";
-import { loadWatchConfig, type TriageConfig } from "../config.js";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { loadWatchConfig, type TriageConfig, type WatchConfig } from "../config.js";
 import { SeenStore } from "../db.js";
 import { BrowserReader, type XPost } from "../x/reader.js";
 import { collapseThreads } from "../x/thread.js";
@@ -42,9 +44,19 @@ export function registerWatchCommand(x: Command): void {
     // caller can define its own criteria unambiguously. Durable infra (model,
     // min_score, batch_size) lives in config.
     .option("--persona <text>", "Triage rubric for this run: who is replying / what's worth a reply (falls back to watch.yaml)")
+    // Long self-contained rubrics (issue #15) don't survive shell quoting; load
+    // from a file instead (issue #17). Mutually exclusive with --persona.
+    .option("--persona-from <path>", "Load the triage rubric from a file (mutually exclusive with --persona)")
     .option("--no-triage", "Skip Gemini triage; emit the raw deduped posts + metadata for the caller to judge")
+    // Cheap, browser-free config check for scheduled jobs (issue #16): validate
+    // watch.yaml + merged flags, print the resolved settings, exit before any read.
+    .option("--validate-config", "Validate config + flags, print the resolved watch settings, then exit (no browser, no reads)")
     .option("--inspect", "Headful browser if a (re-)login is needed, so a human can calibrate")
-    .option("--json", "Emit machine JSON instead of the human-readable summary")
+    // Output shape (issue #18): text (default human summary), json (machine), or
+    // markdown (reviewable digest). --json is kept as an alias for --format json.
+    .option("--format <fmt>", "Output format: text | json | markdown (md). Default text")
+    .option("--json", "Alias for --format json (machine JSON)")
+    .option("--out <file>", "Write output to a file instead of stdout")
     .action(async (opts: WatchXOptions) => {
       try {
         await runWatchX(opts);
@@ -62,13 +74,70 @@ interface WatchXOptions {
   xList?: string[];
   config?: string;
   persona?: string;
+  personaFrom?: string;
   /** commander sets this to `false` when --no-triage is passed (default true). */
   triage?: boolean;
+  validateConfig?: boolean;
   inspect?: boolean;
+  format?: string;
   json?: boolean;
+  out?: string;
+}
+
+type OutputFormat = "text" | "json" | "markdown";
+
+/**
+ * Resolve the output shape from --format (text|json|markdown|md) with --json as a
+ * back-compat alias for `json`. --format wins if both are given; unknown values
+ * throw a user-actionable error.
+ */
+function resolveFormat(opts: WatchXOptions): OutputFormat {
+  const raw = opts.format?.trim().toLowerCase();
+  if (raw) {
+    if (raw === "text") return "text";
+    if (raw === "json") return "json";
+    if (raw === "markdown" || raw === "md") return "markdown";
+    throw new Error(`Unknown --format "${opts.format}" (expected: text | json | markdown).`);
+  }
+  return opts.json === true ? "json" : "text";
+}
+
+/**
+ * The final triage rubric: --persona-from <file> OR --persona <text> OR the
+ * watch.yaml value. The two flags are mutually exclusive (issue #17) — passing
+ * both is a caller error, not a silent precedence rule.
+ */
+function resolvePersona(opts: WatchXOptions, cfg: WatchConfig): string {
+  if (opts.persona !== undefined && opts.personaFrom !== undefined) {
+    throw new Error("Pass only one of --persona or --persona-from, not both.");
+  }
+  if (opts.personaFrom !== undefined) {
+    const file = resolve(opts.personaFrom);
+    try {
+      return readFileSync(file, "utf-8").trim();
+    } catch (err) {
+      throw new Error(`Could not read --persona-from file (${file}): ${(err as Error).message}`);
+    }
+  }
+  return opts.persona ?? cfg.triage.persona;
+}
+
+/** Write emitted output to --out <file> when set, else stdout. */
+function writeOutput(text: string, opts: WatchXOptions): void {
+  const body = text.endsWith("\n") ? text : text + "\n";
+  if (opts.out) {
+    const file = resolve(opts.out);
+    writeFileSync(file, body, "utf-8");
+    console.error(`Wrote ${file}`);
+    return;
+  }
+  process.stdout.write(body);
 }
 
 async function runWatchX(opts: WatchXOptions): Promise<void> {
+  // Resolve the output shape up front so a bad --format fails before any work.
+  const format = resolveFormat(opts);
+
   // loadWatchConfig validates watch.yaml (when present) and throws a per-field
   // error on anything malformed — before we open the browser.
   const cfg = loadWatchConfig(opts.config);
@@ -77,21 +146,33 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
   const queries = dedupeStrings([...cfg.queries, ...(opts.query ?? [])]);
   const lists = dedupeStrings([...cfg.lists, ...(opts.xList ?? [])].map((l) => l.replace(/^@/, "")));
 
+  // Triage ownership (issue #6): the CALLER supplies the reply-worthiness rubric
+  // (free-text persona) each run; batch_size / min_score come from config. The
+  // rubric can come inline (--persona), from a file (--persona-from, issue #17),
+  // or from watch.yaml.
+  const triageConfig: TriageConfig = {
+    ...cfg.triage,
+    persona: resolvePersona(opts, cfg),
+  };
+  // commander's --no-triage sets opts.triage === false (default true/undefined).
+  const triageEnabled = opts.triage !== false;
+
+  // Validation-only path (issue #16): everything above already parsed + validated
+  // config and merged flags. Print the resolved settings and exit BEFORE opening
+  // the browser or touching the seen store, so scheduled jobs can vet a config
+  // change cheaply. Run this before the "nothing to watch" guard so an empty
+  // origin set still reports (and flags it as a warning).
+  if (opts.validateConfig === true) {
+    writeOutput(formatResolvedConfig(cfg, queries, lists, triageConfig, triageEnabled, format), opts);
+    return;
+  }
+
   if (queries.length === 0 && lists.length === 0) {
     throw new Error(
       "Nothing to watch: provide --query/--x-list or populate queries/lists in watch.yaml. " +
         "To watch accounts, build an X List first with `publish x create-watch-list`.",
     );
   }
-
-  // Triage ownership (issue #6): the CALLER supplies the reply-worthiness rubric
-  // (free-text persona) each run; batch_size / min_score come from config.
-  const triageConfig: TriageConfig = {
-    ...cfg.triage,
-    persona: opts.persona ?? cfg.triage.persona,
-  };
-  // commander's --no-triage sets opts.triage === false (default true/undefined).
-  const triageEnabled = opts.triage !== false;
 
   // Surface a blank rubric so a degraded (generic-persona) triage run is visible
   // rather than silent — the persona ships empty in the public repo by design.
@@ -162,7 +243,7 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
         // --no-triage (issue #6): hand the raw deduped posts to the caller so it
         // can judge them itself with full context. No score/ranking.
         markAllSeen();
-        emitRaw(newPosts, stats, opts.json === true);
+        writeOutput(emitRaw(newPosts, stats, format), opts);
         return;
       }
 
@@ -180,7 +261,7 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
 
       markAllSeen();
 
-      emit(candidates, stats, opts.json === true);
+      writeOutput(emit(candidates, stats, format), opts);
     } finally {
       store.close();
     }
@@ -195,8 +276,8 @@ interface PollStats {
   errors: string[];
 }
 
-function emit(candidates: TriagedPost[], stats: PollStats, asJson: boolean): void {
-  if (asJson) {
+function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat): string {
+  if (format === "json") {
     const payload = {
       pulled: stats.pulledCount,
       new: stats.newCount,
@@ -218,8 +299,40 @@ function emit(candidates: TriagedPost[], stats: PollStats, asJson: boolean): voi
       })),
       errors: stats.errors,
     };
-    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
-    return;
+    return JSON.stringify(payload, null, 2);
+  }
+
+  if (format === "markdown") {
+    const md: string[] = [];
+    md.push("# X watch — reply candidates");
+    md.push("");
+    md.push(
+      `**Pulled:** ${stats.pulledCount} · **New:** ${stats.newCount} · **Candidates:** ${candidates.length}`,
+    );
+    if (stats.errors.length > 0) {
+      md.push("");
+      md.push("## Warnings");
+      for (const e of stats.errors) md.push(`- ⚠️ ${e}`);
+    }
+    if (candidates.length === 0) {
+      md.push("");
+      md.push("_No follow-up candidates this poll._");
+    } else {
+      candidates.forEach((c, i) => {
+        const score = Math.round(c.triage.score * 100);
+        md.push("");
+        md.push(`## ${i + 1}. [${score}/100] [@${c.post.authorHandle}](${c.post.url}) · \`${c.post.origin}\``);
+        md.push("");
+        md.push(quoteBlock(c.post.text));
+        md.push("");
+        md.push(`- **Reply target:** \`${c.post.id}\` — ${c.post.url}`);
+        const threadNote = describeThread(c.post);
+        if (threadNote) md.push(`- **Thread:** ${stripBrackets(threadNote)}`);
+        if (c.triage.reason) md.push(`- **Why:** ${c.triage.reason}`);
+        if (c.triage.suggestedAngle) md.push(`- **Angle:** ${c.triage.suggestedAngle}`);
+      });
+    }
+    return md.join("\n");
   }
 
   const lines: string[] = [];
@@ -249,7 +362,7 @@ function emit(candidates: TriagedPost[], stats: PollStats, asJson: boolean): voi
     });
   }
 
-  process.stdout.write(lines.join("\n") + "\n");
+  return lines.join("\n");
 }
 
 /**
@@ -257,8 +370,8 @@ function emit(candidates: TriagedPost[], stats: PollStats, asJson: boolean): voi
  * just the posts + metadata so the calling agent judges them itself. Mirrors
  * emit()'s human/JSON split but omits score/ranking/reason/angle.
  */
-function emitRaw(posts: XPost[], stats: PollStats, asJson: boolean): void {
-  if (asJson) {
+function emitRaw(posts: XPost[], stats: PollStats, format: OutputFormat): string {
+  if (format === "json") {
     const payload = {
       pulled: stats.pulledCount,
       new: stats.newCount,
@@ -276,8 +389,35 @@ function emitRaw(posts: XPost[], stats: PollStats, asJson: boolean): void {
       })),
       errors: stats.errors,
     };
-    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
-    return;
+    return JSON.stringify(payload, null, 2);
+  }
+
+  if (format === "markdown") {
+    const md: string[] = [];
+    md.push("# X watch — new posts (triage skipped)");
+    md.push("");
+    md.push(`**Pulled:** ${stats.pulledCount} · **New:** ${stats.newCount}`);
+    if (stats.errors.length > 0) {
+      md.push("");
+      md.push("## Warnings");
+      for (const e of stats.errors) md.push(`- ⚠️ ${e}`);
+    }
+    if (posts.length === 0) {
+      md.push("");
+      md.push("_No new posts this poll._");
+    } else {
+      posts.forEach((p, i) => {
+        md.push("");
+        md.push(`## ${i + 1}. [@${p.authorHandle}](${p.url}) · \`${p.origin}\``);
+        md.push("");
+        md.push(quoteBlock(p.text));
+        md.push("");
+        md.push(`- **Reply target:** \`${p.id}\` — ${p.url}`);
+        const threadNote = describeThread(p);
+        if (threadNote) md.push(`- **Thread:** ${stripBrackets(threadNote)}`);
+      });
+    }
+    return md.join("\n");
   }
 
   const lines: string[] = [];
@@ -304,7 +444,7 @@ function emitRaw(posts: XPost[], stats: PollStats, asJson: boolean): void {
     });
   }
 
-  process.stdout.write(lines.join("\n") + "\n");
+  return lines.join("\n");
 }
 
 /**
@@ -321,6 +461,89 @@ function describeThread(p: XPost): string | undefined {
   if (t.isSelfThread) parts.push("self-thread");
   parts.push(target);
   return `[${parts.join(" · ")}]`;
+}
+
+/**
+ * Render the resolved watch settings for --validate-config (issue #16): config
+ * merged with flags, so the caller sees EXACTLY what a real run would use. Flags
+ * a config that resolves to zero origins (the "nothing to watch" case) instead of
+ * erroring, since validation should report the shape, not refuse it.
+ */
+function formatResolvedConfig(
+  cfg: WatchConfig,
+  queries: string[],
+  lists: string[],
+  triage: TriageConfig,
+  triageEnabled: boolean,
+  format: OutputFormat,
+): string {
+  const warnings: string[] = [];
+  if (queries.length === 0 && lists.length === 0) {
+    warnings.push("no queries or lists resolved — a real run would exit with \"nothing to watch\".");
+  }
+  if (triageEnabled && !triage.persona.trim()) {
+    warnings.push("no triage persona/rubric — a real run would score with a generic default.");
+  }
+
+  if (format === "json") {
+    return JSON.stringify(
+      {
+        valid: true,
+        resolved: {
+          triage_model: cfg.triage_model,
+          queries,
+          lists,
+          per_origin_limit: cfg.per_origin_limit,
+          max_thread_chars: cfg.max_thread_chars,
+          triage_enabled: triageEnabled,
+          triage: {
+            persona: triage.persona,
+            min_score: triage.min_score,
+            batch_size: triage.batch_size,
+          },
+        },
+        warnings,
+      },
+      null,
+      2,
+    );
+  }
+
+  const personaLine = triage.persona.trim()
+    ? `${triage.persona.trim().length}-char rubric set`
+    : "(blank — generic default)";
+  const lines = [
+    "Watch config OK. Resolved settings:",
+    `  triage_model:     ${cfg.triage_model}`,
+    `  queries (${queries.length}):     ${queries.length ? queries.map((q) => JSON.stringify(q)).join(", ") : "(none)"}`,
+    `  lists (${lists.length}):       ${lists.length ? lists.join(", ") : "(none)"}`,
+    `  per_origin_limit: ${cfg.per_origin_limit}`,
+    `  max_thread_chars: ${cfg.max_thread_chars}`,
+    `  triage:           ${triageEnabled ? "enabled" : "disabled (--no-triage)"}`,
+    `    persona:        ${personaLine}`,
+    `    min_score:      ${triage.min_score}`,
+    `    batch_size:     ${triage.batch_size}`,
+  ];
+  if (warnings.length > 0) {
+    lines.push("");
+    lines.push("Warnings:");
+    for (const w of warnings) lines.push(`  ! ${w}`);
+  }
+  return lines.join("\n");
+}
+
+/** Render text as a markdown blockquote (each line prefixed with `> `). */
+function quoteBlock(s: string): string {
+  const flat = s.replace(/\r/g, "").trim() || "(no text)";
+  return flat
+    .split("\n")
+    .map((l) => `> ${l}`)
+    .join("\n");
+}
+
+/** Strip the surrounding `[...]` from describeThread()'s note for markdown reuse. */
+function stripBrackets(note: string): string {
+  return note.replace(/^\[/, "").replace(/\]$/, "");
 }
 
 function dedupeStrings(items: string[]): string[] {
