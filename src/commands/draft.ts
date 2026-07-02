@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { dirname, basename, extname, join, resolve } from "node:path";
 import {
   generateContent,
@@ -7,6 +7,7 @@ import {
   type GeneratedContent,
   type XFormat,
 } from "../x/content.js";
+import { resolveContentInput } from "./contentInput.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -14,13 +15,14 @@ import {
  * documented as future scope, PRODUCT_SPEC §5, and is not built here).
  *
  * Flow:
- *   1. Read the canonical base markdown (--from) under publish/<date>-<slug>/.
+ *   1. Resolve the content — inline via --text (tweet/thread only), or from a
+ *      canonical base markdown file via --from under publish/<date>-<slug>/.
  *   2. DETERMINISTIC content generation (src/x/content.ts; plain code, no LLM for
  *      formatting): tweet (char-validated; default 280, --long up to 25000),
  *      thread (hook-first numbered split each within limit), or article markdown.
  *      Code blocks are flagged (screenshot on X) and links surfaced with notes.
- *   3. --dry-run: generate content ONLY, write an artifact next to --from, print
- *      it, and DO NOT touch the browser.
+ *   3. --dry-run: generate content ONLY, write an artifact next to --from (only
+ *      when --from was given; --text has no file), print it, no browser.
  *   4. Otherwise: session.getBrowserContext() (the persistent logged-in profile),
  *      open the X composer, type the content (thread: add each post; article: use
  *      the Articles composer), and SAVE AS A NATIVE DRAFT — never Post.
@@ -30,7 +32,8 @@ import {
 const VALID_FORMATS: readonly XFormat[] = ["tweet", "thread", "article"];
 
 interface DraftXOptions {
-  from: string;
+  from?: string;
+  text?: string;
   format: string;
   long?: boolean;
   dryRun?: boolean;
@@ -73,8 +76,9 @@ export function registerDraftCommand(x: Command): void {
   x
     .command("draft")
     .description("Stage a NATIVE X draft (tweet/thread/article) from a canonical base markdown — never posts")
-    .requiredOption("--from <base.md>", "Path to the canonical base markdown")
     .requiredOption("--format <format>", "tweet | thread | article")
+    .option("--text <content>", "Content inline (tweet/thread only; exactly one of --text / --from)")
+    .option("--from <base.md>", "Path to the canonical base markdown ('-' = stdin)")
     .option("--long", "Raise the tweet limit to the Premium long-post cap (default up to 25000)")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
@@ -85,13 +89,17 @@ export function registerDraftCommand(x: Command): void {
         process.exit(2);
       }
 
-      const fromPath = resolve(opts.from);
-      if (!existsSync(fromPath)) {
-        console.error(`Base markdown not found: ${fromPath}`);
+      // Articles are long-form structured markdown (headings, blocks, inline
+      // runs) — no business on a command line. Require a file for that format.
+      if (format === "article" && opts.text !== undefined) {
+        console.error("--text is for tweet/thread only. Use --from <base.md> for --format article.");
         process.exit(2);
       }
 
-      const md = readFileSync(fromPath, "utf-8");
+      const md = resolveContentInput(opts);
+      // A real file base path (not stdin) — used to locate an article's hero
+      // asset and to place the --dry-run artifact. Undefined for --text/stdin.
+      const basePath = opts.from && opts.from !== "-" ? resolve(opts.from) : undefined;
 
       // DETERMINISTIC generation. No LLM voice pass by default (formatting,
       // splitting, and char-fit must stay reproducible).
@@ -101,9 +109,15 @@ export function registerDraftCommand(x: Command): void {
       console.log(renderForInspection(content));
 
       if (opts.dryRun) {
-        const outPath = artifactPath(fromPath, format);
-        writeFileSync(outPath, artifactBody(content), "utf-8");
-        console.log(`\n[dry-run] No browser touched. Content written to:\n  ${outPath}`);
+        // Write an artifact only when there's a base file to write beside it;
+        // inline --text (and stdin) have nowhere to anchor, so print-only.
+        if (basePath) {
+          const outPath = artifactPath(basePath, format);
+          writeFileSync(outPath, artifactBody(content), "utf-8");
+          console.log(`\n[dry-run] No browser touched. Content written to:\n  ${outPath}`);
+        } else {
+          console.log("\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)");
+        }
         process.exit(0);
       }
 
@@ -112,7 +126,7 @@ export function registerDraftCommand(x: Command): void {
       const { stageDraft } = await import("../x/draftPoster.js");
 
       try {
-        const result = await stageDraft(content, { inspect: opts.inspect, basePath: fromPath });
+        const result = await stageDraft(content, { inspect: opts.inspect, basePath });
         const count =
           result.format === "thread"
             ? `${result.posts} posts`
