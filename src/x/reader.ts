@@ -2,6 +2,28 @@ import { getBrowserContext, closeSession } from "../session.js";
 import type { BrowserContext, Page, Response } from "playwright";
 
 /**
+ * Thread metadata attached to a candidate that represents a collapsed thread
+ * (set by collapseThreads in thread.ts). Absent on plain standalone tweets.
+ */
+export interface ThreadInfo {
+  /**
+   * How many tweets of this conversation+author we captured and merged. This is
+   * whatever THIS poll happened to surface — it may be a subset of the true
+   * thread (we never fetch the rest; that would cost extra reads).
+   */
+  size: number;
+  /** Whether the concatenated thread text was truncated to the char cap. */
+  truncated: boolean;
+  /**
+   * The author's own thread (so the reply target is the thread ROOT) vs a reply
+   * living inside someone else's conversation (target = this author's tweet).
+   */
+  isSelfThread: boolean;
+  /** Conversation root id (= the reply target for a self-thread). */
+  rootId: string;
+}
+
+/**
  * A single post pulled from X, normalized across origins (search vs timeline).
  */
 export interface XPost {
@@ -9,16 +31,30 @@ export interface XPost {
   url: string;
   authorHandle: string;
   authorName?: string;
+  /** Author's numeric user id (rest_id) — used to detect self-threads. */
+  authorId?: string;
   text: string;
   createdAt: string; // ISO timestamp
   /** The query or handle that surfaced this post, for provenance/dedupe. */
   origin: string;
+  /**
+   * Thread root id (legacy.conversation_id_str); falls back to the post's own id
+   * for a standalone tweet. Already on the wire — used to collapse threads and
+   * pick the right reply target without any extra fetch.
+   */
+  conversationId: string;
+  /** Parent tweet id, if this post is a reply (legacy.in_reply_to_status_id_str). */
+  replyToStatusId?: string;
+  /** Parent tweet's author id, if a reply (legacy.in_reply_to_user_id_str). */
+  replyToUserId?: string;
   metrics?: {
     likes?: number;
     reposts?: number;
     replies?: number;
     views?: number;
   };
+  /** Present when this candidate is a collapsed thread (see collapseThreads). */
+  thread?: ThreadInfo;
 }
 
 export interface XReader {
@@ -186,12 +222,21 @@ function extractTweets(root: unknown, origin: string): XPost[] {
         userResult?.core?.screen_name ?? userResult?.legacy?.screen_name ?? "";
       const authorName: string | undefined =
         userResult?.core?.name ?? userResult?.legacy?.name;
+      const authorId: string | undefined =
+        userResult?.rest_id != null ? String(userResult.rest_id) : undefined;
       const createdRaw: string | undefined = legacy.created_at;
       let createdAt = "";
       if (createdRaw) {
         const d = new Date(createdRaw);
         createdAt = Number.isNaN(d.getTime()) ? createdRaw : d.toISOString();
       }
+      // Thread wiring — all present in the payload we already captured, so
+      // knowing a post is mid-thread (and its root) costs no extra request.
+      const conversationId = String(legacy.conversation_id_str ?? id);
+      const replyToStatusId =
+        legacy.in_reply_to_status_id_str != null ? String(legacy.in_reply_to_status_id_str) : undefined;
+      const replyToUserId =
+        legacy.in_reply_to_user_id_str != null ? String(legacy.in_reply_to_user_id_str) : undefined;
       out.push({
         id,
         url: handle
@@ -199,9 +244,13 @@ function extractTweets(root: unknown, origin: string): XPost[] {
           : `https://x.com/i/status/${id}`,
         authorHandle: handle,
         authorName,
+        authorId,
         text: legacy.full_text,
         createdAt,
         origin,
+        conversationId,
+        replyToStatusId,
+        replyToUserId,
         metrics: {
           likes: legacy.favorite_count,
           reposts: legacy.retweet_count,

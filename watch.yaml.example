@@ -27,6 +27,13 @@ lists: []
 # How many recent posts to pull per origin (query / list) on each poll.
 per_origin_limit: 25
 
+# Max characters of a thread's text kept per candidate. A watched account's thread
+# is collapsed into ONE candidate (reply target = the thread root, not a mid-thread
+# tweet) and its tweets are concatenated; this caps how much of that lands in the
+# triage classifier's context. Over the cap, the head and tail are kept and the
+# middle is elided. Applies to --no-triage runs too (it governs candidate assembly).
+max_thread_chars: 1500
+
 # Triage criteria — passed to the cheap model as the rubric for scoring each post on
 # whether it's worth a follow-up reply. Higher score = stronger follow-up candidate.
 triage:

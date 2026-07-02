@@ -99,6 +99,10 @@ function buildTriagePrompt(batch: XPost[], cfg: TriageConfig): string {
     text: p.text,
     createdAt: p.createdAt,
     metrics: p.metrics,
+    // Thread hint: when a candidate is a collapsed thread, `text` is the whole
+    // (possibly truncated) thread, not one tweet. Flag it so the model judges the
+    // argument as a unit and doesn't read the extra length as noise.
+    ...(p.thread ? { isThread: true, threadTweets: p.thread.size, threadTruncated: p.thread.truncated } : {}),
   }));
 
   return [
@@ -113,6 +117,7 @@ function buildTriagePrompt(batch: XPost[], cfg: TriageConfig): string {
     "- unique_value: can the person add a concrete, non-obvious insight others can't.",
     "Let the WHO IS REPLYING description above refine what 'fit' and 'unique_value' mean for this person.",
     "A post that is off-topic, stale, or where a reply would just be noise should score low.",
+    "Items with \"isThread\": true carry a whole thread in `text` (multiple tweets joined; possibly truncated) — judge the full argument as one unit, and don't treat the extra length as noise.",
     "",
     "POSTS (JSON):",
     JSON.stringify(items),

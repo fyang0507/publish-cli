@@ -134,6 +134,14 @@ export interface WatchConfig {
   /** X List ids whose merged member timeline to read (one fetch covers N accounts). */
   lists: string[];
   per_origin_limit: number;
+  /**
+   * Max characters of a collapsed thread's text kept per candidate. Threads are
+   * merged into one candidate (see collapseThreads) and can be arbitrarily long;
+   * this caps how much lands in the triage classifier's context. Over the cap the
+   * head and tail are kept and the middle is elided. Governs candidate assembly,
+   * so it applies to --no-triage runs too.
+   */
+  max_thread_chars: number;
   triage: TriageConfig;
 }
 
@@ -142,6 +150,7 @@ const WATCH_DEFAULTS: WatchConfig = {
   queries: [],
   lists: [],
   per_origin_limit: 25,
+  max_thread_chars: 1500,
   triage: {
     persona: "",
     min_score: 60,
@@ -149,7 +158,7 @@ const WATCH_DEFAULTS: WatchConfig = {
   },
 };
 
-const TOP_KEYS = ["triage_model", "queries", "lists", "per_origin_limit", "triage"] as const;
+const TOP_KEYS = ["triage_model", "queries", "lists", "per_origin_limit", "max_thread_chars", "triage"] as const;
 const TRIAGE_KEYS = ["persona", "min_score", "batch_size"] as const;
 
 /**
@@ -201,6 +210,10 @@ export function loadWatchConfig(path?: string): WatchConfig {
   if ("per_origin_limit" in parsed) {
     if (isPositiveInt(parsed.per_origin_limit)) out.per_origin_limit = parsed.per_origin_limit;
     else errors.push(`per_origin_limit: expected a positive integer, got ${describe(parsed.per_origin_limit)}`);
+  }
+  if ("max_thread_chars" in parsed) {
+    if (isPositiveInt(parsed.max_thread_chars)) out.max_thread_chars = parsed.max_thread_chars;
+    else errors.push(`max_thread_chars: expected a positive integer, got ${describe(parsed.max_thread_chars)}`);
   }
   if ("triage" in parsed) {
     if (!isPlainObject(parsed.triage)) {
