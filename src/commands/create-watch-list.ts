@@ -103,7 +103,15 @@ async function runCreateWatchList(opts: CreateWatchListOptions): Promise<void> {
     const following = await mgr.enumerateFollowing(handle, opts.limit ?? 5000);
 
     if (opts.dryRun) {
-      emitDryRun(handle, following, opts.json === true);
+      // Honest dry-run: when reusing a List, show the REAL delta (only new
+      // follows would be added), not the full follow dump. No-list create case:
+      // the delta is all follows (nothing is a member yet).
+      if (opts.xList) {
+        const current = await mgr.getMembers(opts.xList);
+        emitDryRun(handle, following, computeDelta(following, current), current.length, opts.json === true);
+      } else {
+        emitDryRun(handle, following, following, 0, opts.json === true);
+      }
       return;
     }
 
@@ -122,8 +130,23 @@ async function runCreateWatchList(opts: CreateWatchListOptions): Promise<void> {
       created = true;
     }
 
-    // 3. Add every followed account as a member.
-    const results = await mgr.addMembers(listId, following);
+    // 3. Compute the delta and add ONLY new accounts. A freshly created List is
+    //    empty (skip the read); a reused List is diffed so we never re-add
+    //    existing members (which is what tripped X's account-level add lock).
+    const current = created ? [] : await mgr.getMembers(listId);
+    const toAdd = computeDelta(following, current);
+    if (!created && current.length === 0) {
+      process.stderr.write(
+        `[create-watch-list] Warning: existing List ${listId} read back 0 members — ` +
+          `if it isn't genuinely empty, the members read may have been blocked; all follows would be re-added.\n`,
+      );
+    }
+    if (toAdd.length > 20) {
+      process.stderr.write(
+        `[create-watch-list] Warning: ${toAdd.length} accounts to add are throttled (~${Math.round((toAdd.length * 3) / 60)}min) and a large bulk risks X's account-level add rate lock.\n`,
+      );
+    }
+    const results: AddMemberResult[] = toAdd.length ? await mgr.addMembers(listId, toAdd) : [];
 
     // 4. Enforce privacy + name (UpdateList is the reliable privacy path). Only
     //    set name on update when we know it (create path, or explicit --name).
@@ -134,7 +157,18 @@ async function runCreateWatchList(opts: CreateWatchListOptions): Promise<void> {
     const meta = await mgr.getMeta(listId);
 
     emit(
-      { handle, listId, created, name: updateName, isPrivate, following, results, meta },
+      {
+        handle,
+        listId,
+        created,
+        name: updateName,
+        isPrivate,
+        following,
+        alreadyMembers: current.length,
+        toAdd,
+        results,
+        meta,
+      },
       opts.json === true,
     );
   } finally {
@@ -149,30 +183,68 @@ interface ListRunSummary {
   name: string;
   isPrivate: boolean;
   following: XFollowedUser[];
+  alreadyMembers: number;
+  toAdd: XFollowedUser[];
   results: AddMemberResult[];
   meta: { memberCount?: number; mode?: string; name?: string };
 }
 
-function emitDryRun(handle: string, following: XFollowedUser[], asJson: boolean): void {
+/**
+ * Diff Following against current List members: return only the accounts NOT yet
+ * in the List. Match primarily by numeric user id; fall back to lowercased
+ * handle when an id is missing. An empty `current` yields all of `following`.
+ */
+function computeDelta(following: XFollowedUser[], current: XFollowedUser[]): XFollowedUser[] {
+  const currentIds = new Set(current.map((u) => u.id));
+  const currentHandles = new Set(current.map((u) => u.handle.toLowerCase()));
+  return following.filter((f) =>
+    f.id ? !currentIds.has(f.id) : !currentHandles.has(f.handle.toLowerCase()),
+  );
+}
+
+function emitDryRun(
+  handle: string,
+  following: XFollowedUser[],
+  toAdd: XFollowedUser[],
+  alreadyMembers: number,
+  asJson: boolean,
+): void {
   if (asJson) {
     process.stdout.write(
       JSON.stringify(
-        { handle, dryRun: true, count: following.length, members: following },
+        {
+          handle,
+          dryRun: true,
+          followingCount: following.length,
+          alreadyMembers,
+          toAdd: toAdd.length,
+          members: toAdd,
+        },
         null,
         2,
       ) + "\n",
     );
     return;
   }
-  const lines = [`Dry run: @${handle} follows ${following.length} account(s) that WOULD be added:`];
-  following.forEach((u, i) => lines.push(`  ${i + 1}. @${u.handle}${u.name ? `  (${u.name})` : ""}`));
+  const lines = [
+    `Dry run: @${handle} follows ${following.length} account(s); ${alreadyMembers} already in the List; ${toAdd.length} would be added:`,
+  ];
+  toAdd.forEach((u, i) => lines.push(`  ${i + 1}. @${u.handle}${u.name ? `  (${u.name})` : ""}`));
   lines.push("");
-  lines.push("Re-run without --dry-run to create the List and add them.");
+  lines.push(
+    toAdd.length
+      ? "Re-run without --dry-run to add them."
+      : "Already in sync — nothing to add.",
+  );
   process.stdout.write(lines.join("\n") + "\n");
 }
 
 function emit(s: ListRunSummary, asJson: boolean): void {
-  const failed = s.results.filter((r) => !r.ok);
+  // Distinguish genuine per-user failures from un-attempted (skipped) users.
+  const failed = s.results.filter((r) => !r.ok && !r.skipped);
+  const skipped = s.results.filter((r) => r.skipped);
+  const rateLimited = s.results.some((r) => r.rateLimited);
+  const ok = s.results.filter((r) => r.ok).length;
   if (asJson) {
     process.stdout.write(
       JSON.stringify(
@@ -184,7 +256,11 @@ function emit(s: ListRunSummary, asJson: boolean): void {
           name: s.name,
           requestedPrivate: s.isPrivate,
           followingCount: s.following.length,
-          added: s.results.filter((r) => r.ok).length,
+          alreadyMembers: s.alreadyMembers,
+          toAdd: s.toAdd.length,
+          added: ok,
+          skipped: skipped.length,
+          rateLimited,
           failed: failed.map((r) => ({ handle: r.handle, error: r.error })),
           verified: { memberCount: s.meta.memberCount, mode: s.meta.mode, name: s.meta.name },
           watchHint: `publish x watch --x-list ${s.listId}`,
@@ -195,7 +271,6 @@ function emit(s: ListRunSummary, asJson: boolean): void {
     );
     return;
   }
-  const ok = s.results.filter((r) => r.ok).length;
   const lines: string[] = [];
   lines.push(
     `${s.created ? "Created" : "Updated"} X List "${s.meta.name ?? s.name}" (${s.meta.mode ?? (s.isPrivate ? "Private" : "Public")})`,
@@ -203,8 +278,22 @@ function emit(s: ListRunSummary, asJson: boolean): void {
   lines.push(`  id:      ${s.listId}`);
   lines.push(`  url:     https://x.com/i/lists/${s.listId}`);
   lines.push(`  source:  @${s.handle} Following (${s.following.length} account(s))`);
-  lines.push(`  added:   ${ok}/${s.following.length}` + (failed.length ? `  (${failed.length} failed)` : ""));
+  lines.push(`  already members: ${s.alreadyMembers}`);
+  if (s.toAdd.length === 0) {
+    lines.push(`  added:   already in sync — nothing to add`);
+  } else {
+    lines.push(
+      `  added:   ${ok}/${s.toAdd.length}` + (failed.length ? `  (${failed.length} failed)` : ""),
+    );
+  }
   if (s.meta.memberCount != null) lines.push(`  members: ${s.meta.memberCount} (verified)`);
+  if (rateLimited) {
+    lines.push("");
+    lines.push(
+      `! X account-level add lock hit — stopped early; ${skipped.length} un-attempted account(s) skipped.`,
+    );
+    lines.push("  Wait for the lock to clear (~24h) before re-running.");
+  }
   if (failed.length) {
     lines.push("");
     lines.push("Failed adds (retry-able):");
