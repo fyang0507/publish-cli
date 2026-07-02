@@ -199,6 +199,40 @@ export class BrowserReader implements XReader {
  * user timeline, quoted/retweeted nestings), so X reshuffling the envelope
  * doesn't break extraction.
  */
+/**
+ * Named HTML entities X escapes into tweet text. X serves `legacy.full_text`
+ * HTML-escaped (at minimum `&`, `<`, `>`); this is the small set worth handling.
+ */
+const NAMED_ENTITIES: Record<string, string> = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: " ",
+};
+
+/**
+ * Decode the HTML entities in X's tweet text (`&amp;` → `&`, `&gt;` → `>`, plus
+ * numeric `&#39;` / `&#x27;`). Without this, every output format (text / json /
+ * markdown) shows raw `-&gt;` and `&amp;`. Single regex pass, so a decoded `&`
+ * can't be re-scanned as the start of another entity (X doesn't double-encode).
+ */
+function decodeHtmlEntities(s: string): string {
+  return s.replace(/&(#x?[0-9a-fA-F]+|[a-zA-Z]+);/g, (match, body: string) => {
+    if (body[0] === "#") {
+      const code = /^#x/i.test(body) ? parseInt(body.slice(2), 16) : parseInt(body.slice(1), 10);
+      if (!Number.isFinite(code) || code < 1 || code > 0x10ffff) return match;
+      try {
+        return String.fromCodePoint(code);
+      } catch {
+        return match;
+      }
+    }
+    return NAMED_ENTITIES[body.toLowerCase()] ?? match;
+  });
+}
+
 function extractTweets(root: unknown, origin: string): XPost[] {
   const out: XPost[] = [];
   const seen = new Set<string>();
@@ -245,7 +279,7 @@ function extractTweets(root: unknown, origin: string): XPost[] {
         authorHandle: handle,
         authorName,
         authorId,
-        text: legacy.full_text,
+        text: decodeHtmlEntities(legacy.full_text),
         createdAt,
         origin,
         conversationId,
