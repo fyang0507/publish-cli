@@ -77,7 +77,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/commands/contentInput.ts` | shared `--text` / `--from` / stdin resolution (exactly-one-of) for `draft` / `reply` / `linkedin draft` |
 | `src/commands/{create-watch-list,watch,draft,reply,linkedin-draft}.ts` | command bodies |
 | `scripts/install-agent-skill-symlinks.js` | post-build: chmod bin + symlink skill into `<data_repo>/.agents/skills` |
-| `skills/publish/` | agent-facing capability layer (SKILL.md router + SETUP.md + calibration.md) |
+| `skills/publish/` | agent-facing capability layer, shipped as a whole dir (SKILL.md router + SETUP.md + calibration.md + PLATFORM_CAPABILITIES.md). Symlinked into other workspaces, so intra-skill links MUST be `./`-relative — never escape the folder (e.g. `../../docs/…`). |
 
 ## Build & checks
 

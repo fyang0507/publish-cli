@@ -161,7 +161,7 @@ publish linkedin draft (--text <content> | --from <file.md>) [--media <path>...]
 ## Platform constraints (what each surface does NOT support)
 
 Author Markdown to the common ceiling; the CLI downgrades per surface. Full
-capability matrix + editor selectors: [`docs/PLATFORM_CAPABILITIES.md`](../../docs/PLATFORM_CAPABILITIES.md).
+capability matrix + editor selectors: [`PLATFORM_CAPABILITIES.md`](./PLATFORM_CAPABILITIES.md).
 
 - **All surfaces:** no headings beyond **H2**; separate paragraphs with a **blank line**.
 - **X tweet/thread:** NO Markdown — plain text; links show bare; code/tables/images
@@ -176,7 +176,7 @@ capability matrix + editor selectors: [`docs/PLATFORM_CAPABILITIES.md`](../../do
 
 - **Setup & auth** (install, credentials, first login, data dir): [SETUP.md](./SETUP.md)
 - **A browser step hangs / times out** (selector drift): [calibration.md](./calibration.md)
-- **Full render capability matrix**: [`docs/PLATFORM_CAPABILITIES.md`](../../docs/PLATFORM_CAPABILITIES.md)
+- **Full render capability matrix**: [`PLATFORM_CAPABILITIES.md`](./PLATFORM_CAPABILITIES.md)
 
 ## Boundaries
 
