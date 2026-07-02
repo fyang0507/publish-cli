@@ -8,6 +8,10 @@ A per-channel content-distribution toolkit for growing the operator's audience i
 - **`publish x create-watch-list`** — builds the account-watch List from the accounts you follow (a List reads all its members in one fetch, so it's the scalable account path). Precursor to `watch --x-list`.
 - **`publish x draft`** — owned-content publisher. Turns a canonical base markdown into an X-ready **tweet / thread / article** and stages it as a **native draft on X**. It **never posts** — the send action is human-gated and out of scope here.
 
+## What it does (LinkedIn channel)
+
+- **`publish linkedin draft`** — owned-content publisher. Turns inline text (`--text`, the primary path) or a markdown file (`--from`) into a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) and stages it as a **native draft on LinkedIn** via "Save as draft". Same boundary as X — it **never posts**. Surfaces an above-the-fold hook advisory and a first-comment-link advisory; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility caveat). Selectors are best-effort — calibrate live with `--inspect`.
+
 ## Install
 
 ```bash
@@ -29,6 +33,7 @@ npx playwright install chromium
   - `GOOGLE_GENERATIVE_AI_API_KEY` — Gemini (triage + optional tailoring).
   - `TRIAGE_MODEL` — cheap triage model id (default `gemini-3.5-flash`).
   - `X_USERNAME` / `X_PASSWORD` / `X_EMAIL` — X credential login. No 2FA; `X_EMAIL` answers X's email/identifier confirmation challenge.
+  - `LI_USERNAME` / `LI_PASSWORD` / `LI_EMAIL` — LinkedIn credential login (same persistent-profile model as X); `LI_EMAIL` answers LinkedIn's identifier confirmation checkpoint. Only needed for `publish linkedin draft`.
   - `PUBLISH_DATA_DIR` (optional) — runtime data dir, default `~/.publish-cli`.
 - **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, and the triage rubric. The triage rubric (`triage.persona`, or `--persona` / `--persona-from <file>`) **must be self-contained** — the classifier sees only the rubric plus each candidate post, never the source essay, campaign brief, or surrounding agent context, so spell out the actual selection criteria inline. Validate a config cheaply (no browser) with `publish x watch --validate-config`.
 
@@ -63,6 +68,8 @@ publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-
 publish x watch [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
 publish x draft --format tweet|thread|article (--text <content> | --from <base.md>) [--inspect]
 publish x reply --to <id|url> (--text <content> | --from <base.md>) [--long] [--dry-run] [--force] [--inspect]
+
+publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.
