@@ -67,6 +67,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/session.ts` | X Playwright persistent-profile login; `ensureSession`/`getCookies`/`getBrowserContext` |
 | `src/gemini.ts` | `@google/genai` client: `generate()` + `triage()` |
 | `src/db.ts` | `better-sqlite3` `SeenStore` (dedupe), db in the data repo |
+| `src/langFilter.ts` | channel-agnostic language allow-list filter for watch pipelines (operates on a minimal `{lang?}` shape; reused by import, like `db.ts`/`config.ts`) |
 | `src/x/reader.ts` | `BrowserReader` — GraphQL response capture (search / list timelines) |
 | `src/x/triage.ts` | cheap-LLM triage → ranked candidates |
 | `src/x/content.ts` | canonical-markdown parser → tweet / thread / article blocks (shared by LinkedIn) |

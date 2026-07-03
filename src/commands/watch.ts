@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadWatchConfig, type TriageConfig, type WatchConfig } from "../config.js";
 import { SeenStore } from "../db.js";
+import { filterByLanguage, parseAllowedLanguages } from "../langFilter.js";
 import { BrowserReader, type XPost } from "../x/reader.js";
 import { collapseThreads } from "../x/thread.js";
 import { triagePosts, type TriagedPost } from "../x/triage.js";
@@ -36,6 +37,13 @@ export function registerWatchCommand(x: Command): void {
     .option("--query <q...>", "Search query to monitor (repeatable; merges with watch.yaml)")
     .option("--x-list <id...>", "X List id to monitor (repeatable; merges with watch.yaml). One fetch covers all its members.")
     .option("--config <path>", "Path to watch.yaml (defaults to ./watch.yaml)")
+    // Language allow-list (issue #28): drop wrong-audience posts BEFORE triage so
+    // they don't burn classifier/drafting tokens. Overrides watch.yaml
+    // allowed_languages for this run; `--languages all` disables a configured filter.
+    .option(
+      "--languages <codes>",
+      "Restrict candidates to these languages (comma-separated, e.g. en,zh). Overrides watch.yaml allowed_languages; use 'all' to disable filtering.",
+    )
     // Triage ownership (issue #6): the calling agent supplies the reply-worthiness
     // RUBRIC per run as FREE TEXT. It can't live as a committed default in this
     // public repo, so --persona is a caller-supplied input, not an override of a
@@ -73,6 +81,7 @@ interface WatchXOptions {
   query?: string[];
   xList?: string[];
   config?: string;
+  languages?: string;
   persona?: string;
   personaFrom?: string;
   /** commander sets this to `false` when --no-triage is passed (default true). */
@@ -157,13 +166,22 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
   // commander's --no-triage sets opts.triage === false (default true/undefined).
   const triageEnabled = opts.triage !== false;
 
+  // Language filter (issue #28): a per-run --languages OVERRIDES watch.yaml
+  // allowed_languages (not additive — it's a constraint, like --persona), and
+  // `--languages all` clears it. Empty = no filter. Normalized once here so both
+  // the filter and --validate-config report the same resolved set.
+  const allowedLanguages =
+    opts.languages !== undefined
+      ? parseAllowedLanguages(opts.languages)
+      : parseAllowedLanguages(cfg.allowed_languages);
+
   // Validation-only path (issue #16): everything above already parsed + validated
   // config and merged flags. Print the resolved settings and exit BEFORE opening
   // the browser or touching the seen store, so scheduled jobs can vet a config
   // change cheaply. Run this before the "nothing to watch" guard so an empty
   // origin set still reports (and flags it as a warning).
   if (opts.validateConfig === true) {
-    writeOutput(formatResolvedConfig(cfg, queries, lists, triageConfig, triageEnabled, format), opts);
+    writeOutput(formatResolvedConfig(cfg, queries, lists, allowedLanguages, triageConfig, triageEnabled, format), opts);
     return;
   }
 
@@ -230,25 +248,52 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
         return !store.hasSeen(p.id);
       });
 
-      const stats: PollStats = { newCount: newPosts.length, pulledCount: pulled.length, errors };
+      // Language filter (issue #28): drop candidates KNOWN to be outside the
+      // allow-list BEFORE triage, so wrong-audience posts never reach the
+      // classifier/drafting models. Runs after thread-collapse, so a self-thread
+      // is judged by its ROOT/reply-target language (base.lang); untagged posts
+      // are kept (see langFilter.ts). Empty allow-list = pass-through.
+      const { kept, filtered: langFiltered } = filterByLanguage(newPosts, allowedLanguages);
 
-      // Mark everything we surfaced (the full new set) as seen so the next poll
-      // only shows fresh items, even for posts that fell below min_score /
-      // regardless of whether triage ran.
+      // Drift guard: `legacy.lang` is where X puts the tweet language TODAY, but X
+      // does migrate fields out of `legacy` over time (it already moved the
+      // author's screen_name/name into `core`). If a filter is active yet NOT ONE
+      // pulled post carried a language code, the field has almost certainly moved —
+      // the filter is silently inert (fails open → everything kept, wrong-language
+      // posts return). Surface that loudly rather than pass them through in silence.
+      if (allowedLanguages.length > 0 && pulled.length > 0 && pulled.every((p) => !p.lang?.trim())) {
+        errors.push(
+          "language filter active but NO pulled post carried a language code — X likely moved the `lang` field; the filter is currently INERT (all posts kept). Re-calibrate the lang extraction in src/x/reader.ts.",
+        );
+      }
+
+      const stats: PollStats = {
+        newCount: newPosts.length,
+        pulledCount: pulled.length,
+        langFilteredCount: langFiltered.length,
+        allowedLanguages,
+        errors,
+      };
+
+      // Mark everything we surfaced (the full new set — including language-filtered
+      // and below-min_score) as seen so the next poll only shows fresh items. A
+      // language-filtered post is a DECIDED post (not a candidate), same tier as a
+      // below-threshold one, so it must not resurface.
       const markAllSeen = () => {
         for (const p of newPosts) store.markSeen(p.id, p.origin);
       };
 
       if (!triageEnabled) {
         // --no-triage (issue #6): hand the raw deduped posts to the caller so it
-        // can judge them itself with full context. No score/ranking.
+        // can judge them itself with full context. No score/ranking. Still respects
+        // the language filter — wrong-audience posts aren't the caller's job either.
         markAllSeen();
-        writeOutput(emitRaw(newPosts, stats, format), opts);
+        writeOutput(emitRaw(kept, stats, format), opts);
         return;
       }
 
       const triaged = await triagePosts(
-        newPosts,
+        kept,
         triageConfig,
         cfg.triage_model,
         undefined,
@@ -273,7 +318,26 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
 interface PollStats {
   pulledCount: number;
   newCount: number;
+  /** New posts dropped by the language allow-list (0 when no filter is active). */
+  langFilteredCount: number;
+  /** The resolved, normalized language allow-list (empty = no filter). */
+  allowedLanguages: string[];
   errors: string[];
+}
+
+/**
+ * One-line, comma-prefixed summary of language filtering for human output —
+ * empty string when no filter is active, so default runs read unchanged.
+ */
+function langSummary(stats: PollStats): string {
+  if (stats.allowedLanguages.length === 0) return "";
+  return `, ${stats.langFilteredCount} language-filtered`;
+}
+
+/** Human note explaining a language filter dropped posts (for empty-candidate runs). */
+function langFilterNote(stats: PollStats): string | undefined {
+  if (stats.allowedLanguages.length === 0 || stats.langFilteredCount === 0) return undefined;
+  return `${stats.langFilteredCount} post(s) dropped by language filter (allowed: ${stats.allowedLanguages.join(", ")}).`;
 }
 
 function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat): string {
@@ -281,6 +345,8 @@ function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat)
     const payload = {
       pulled: stats.pulledCount,
       new: stats.newCount,
+      languageFiltered: stats.langFilteredCount,
+      allowedLanguages: stats.allowedLanguages,
       candidates: candidates.map((c) => ({
         id: c.post.id,
         // `id` IS the reply target (root for a self-thread); surface it explicitly
@@ -306,8 +372,9 @@ function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat)
     const md: string[] = [];
     md.push("# X watch — reply candidates");
     md.push("");
+    const langPart = stats.allowedLanguages.length ? ` · **Language-filtered:** ${stats.langFilteredCount}` : "";
     md.push(
-      `**Pulled:** ${stats.pulledCount} · **New:** ${stats.newCount} · **Candidates:** ${candidates.length}`,
+      `**Pulled:** ${stats.pulledCount} · **New:** ${stats.newCount}${langPart} · **Candidates:** ${candidates.length}`,
     );
     if (stats.errors.length > 0) {
       md.push("");
@@ -317,6 +384,8 @@ function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat)
     if (candidates.length === 0) {
       md.push("");
       md.push("_No follow-up candidates this poll._");
+      const note = langFilterNote(stats);
+      if (note) md.push(`_${note}_`);
     } else {
       candidates.forEach((c, i) => {
         const score = Math.round(c.triage.score * 100);
@@ -337,7 +406,7 @@ function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat)
 
   const lines: string[] = [];
   lines.push(
-    `Watch X: pulled ${stats.pulledCount} post(s), ${stats.newCount} new, ${candidates.length} candidate(s) above threshold.`,
+    `Watch X: pulled ${stats.pulledCount} post(s), ${stats.newCount} new${langSummary(stats)}, ${candidates.length} candidate(s) above threshold.`,
   );
   if (stats.errors.length > 0) {
     lines.push("");
@@ -348,6 +417,8 @@ function emit(candidates: TriagedPost[], stats: PollStats, format: OutputFormat)
   if (candidates.length === 0) {
     lines.push("");
     lines.push("No follow-up candidates this poll.");
+    const note = langFilterNote(stats);
+    if (note) lines.push(note);
   } else {
     candidates.forEach((c, i) => {
       const score = Math.round(c.triage.score * 100);
@@ -375,6 +446,8 @@ function emitRaw(posts: XPost[], stats: PollStats, format: OutputFormat): string
     const payload = {
       pulled: stats.pulledCount,
       new: stats.newCount,
+      languageFiltered: stats.langFilteredCount,
+      allowedLanguages: stats.allowedLanguages,
       triaged: false,
       posts: posts.map((p) => ({
         id: p.id,
@@ -396,7 +469,8 @@ function emitRaw(posts: XPost[], stats: PollStats, format: OutputFormat): string
     const md: string[] = [];
     md.push("# X watch — new posts (triage skipped)");
     md.push("");
-    md.push(`**Pulled:** ${stats.pulledCount} · **New:** ${stats.newCount}`);
+    const langPart = stats.allowedLanguages.length ? ` · **Language-filtered:** ${stats.langFilteredCount}` : "";
+    md.push(`**Pulled:** ${stats.pulledCount} · **New:** ${stats.newCount}${langPart}`);
     if (stats.errors.length > 0) {
       md.push("");
       md.push("## Warnings");
@@ -405,6 +479,8 @@ function emitRaw(posts: XPost[], stats: PollStats, format: OutputFormat): string
     if (posts.length === 0) {
       md.push("");
       md.push("_No new posts this poll._");
+      const note = langFilterNote(stats);
+      if (note) md.push(`_${note}_`);
     } else {
       posts.forEach((p, i) => {
         md.push("");
@@ -422,7 +498,7 @@ function emitRaw(posts: XPost[], stats: PollStats, format: OutputFormat): string
 
   const lines: string[] = [];
   lines.push(
-    `Watch X: pulled ${stats.pulledCount} post(s), ${stats.newCount} new (triage skipped — raw posts for caller to judge).`,
+    `Watch X: pulled ${stats.pulledCount} post(s), ${stats.newCount} new${langSummary(stats)} (triage skipped — raw posts for caller to judge).`,
   );
   if (stats.errors.length > 0) {
     lines.push("");
@@ -433,6 +509,8 @@ function emitRaw(posts: XPost[], stats: PollStats, format: OutputFormat): string
   if (posts.length === 0) {
     lines.push("");
     lines.push("No new posts this poll.");
+    const note = langFilterNote(stats);
+    if (note) lines.push(note);
   } else {
     posts.forEach((p, i) => {
       lines.push("");
@@ -473,6 +551,7 @@ function formatResolvedConfig(
   cfg: WatchConfig,
   queries: string[],
   lists: string[],
+  allowedLanguages: string[],
   triage: TriageConfig,
   triageEnabled: boolean,
   format: OutputFormat,
@@ -495,6 +574,7 @@ function formatResolvedConfig(
           lists,
           per_origin_limit: cfg.per_origin_limit,
           max_thread_chars: cfg.max_thread_chars,
+          allowed_languages: allowedLanguages,
           triage_enabled: triageEnabled,
           triage: {
             persona: triage.persona,
@@ -519,6 +599,7 @@ function formatResolvedConfig(
     `  lists (${lists.length}):       ${lists.length ? lists.join(", ") : "(none)"}`,
     `  per_origin_limit: ${cfg.per_origin_limit}`,
     `  max_thread_chars: ${cfg.max_thread_chars}`,
+    `  allowed_langs:    ${allowedLanguages.length ? allowedLanguages.join(", ") : "(all — no filter)"}`,
     `  triage:           ${triageEnabled ? "enabled" : "disabled (--no-triage)"}`,
     `    persona:        ${personaLine}`,
     `    min_score:      ${triage.min_score}`,
