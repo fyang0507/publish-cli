@@ -95,7 +95,7 @@ export function registerRedditInspectCommand(reddit: Command): void {
     .command("inspect <subreddits...>")
     .description("Report each named subreddit's full posting contract (facts only, no LLM)")
     .option("--json", "Machine-readable output (default: human report)")
-    .option("--inspect", "Headful browser (first login / selector calibration)")
+    .option("--inspect", "Headful browser for selector calibration (reads run logged-out; no login required)")
     .action(async (subreddits: string[], opts: RedditInspectOptions) => {
       const { BrowserRedditReader } = await import("../reddit/reader.js");
       const reader = new BrowserRedditReader({ inspect: opts.inspect });

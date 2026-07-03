@@ -40,20 +40,29 @@ export function registerRedditSearchCommand(reddit: Command): void {
     .option("--limit <n>", "Cap results (default 25)", (v) => parseInt(v, 10), 25)
     .option("--include-nsfw", "Include over-18 subreddits (default: excluded)")
     .option("--json", "Machine-readable output (default: human report)")
-    .option("--inspect", "Headful browser (first login / selector calibration)")
+    .option("--inspect", "Headful browser for selector calibration (reads run logged-out; no login required)")
     .action(async (query: string, opts: RedditSearchOptions) => {
       const { BrowserRedditReader } = await import("../reddit/reader.js");
       const reader = new BrowserRedditReader({ inspect: opts.inspect });
 
       let hits: import("../reddit/reader.js").SubredditSearchHit[] = [];
+      let failed: string | null = null;
       try {
         await reader.init();
         hits = await reader.search(query, {
           limit: opts.limit,
           includeNsfw: opts.includeNsfw,
         });
+      } catch (err) {
+        // e.g. RedditReadBlockedError — report the block, don't pretend "0 found".
+        failed = (err as Error).message;
       } finally {
         await reader.close();
+      }
+
+      if (failed) {
+        console.error(`✗ reddit search failed: ${failed}`);
+        process.exit(1);
       }
 
       if (opts.json) {

@@ -67,20 +67,32 @@ The Reddit channel drifts the same way and is calibrated the same way — re-run
 (`src/reddit/session.ts`) and `REDDIT_COMPOSER_SELECTORS`
 (`src/reddit/draftPoster.ts`); the profile is `~/.publish-cli/reddit-profile`.
 
-Likely drift points to check headful:
+Facts found during live calibration (2026-07) and likely drift points to check headful:
 
-- **Login is captcha-heavy.** First headful login usually needs a manual CAPTCHA /
-  challenge solve; headless login is likely blocked (same class as X). This is the
-  highest onboarding risk. The sign-in control and the optional email/identifier
-  challenge (`identifierChallengeInput`) may need re-selection; the flow falls back
-  to pressing Enter on the focused field. Logged-in signal (`loggedInSignal`) should
-  be a durable marker, not a hashed feed class.
-- **Reads (inspect/search).** Confirm `about.json` / `about/rules.json` /
-  `link_flair_v2` / `subreddits/search.json` still return the promised fields
-  through the authenticated context, and that `post_requirements` is captured from
-  the composer gateway response (match by a stable operation/path — hashes drift).
-  Private/quarantined subs should degrade to a note, not error the whole run; watch
-  for read rate-limiting.
+- **Login (www, captcha-heavy).** `www.reddit.com/login` renders its form inside
+  **shadow-DOM faceplate web components**; the fields are `input[name="username"]`
+  and `input[name="password"]` (Playwright pierces open shadow roots for CSS), and
+  the submit control is a **`type="button"` labeled "Log In"** (not `type=submit`) —
+  the flow falls back to pressing Enter on the focused field. Before the form
+  mounts, www serves a **`js_challenge` interstitial** (URL gains
+  `?js_challenge=1&token=…`) with zero inputs that needs **a few seconds of JS plus
+  a hardened context** to clear — the context sets `locale`/`timezoneId` and launches
+  with `--disable-blink-features=AutomationControlled`. The **first login MUST be
+  headful `--inspect`**: Reddit raises a CAPTCHA that only a human can solve. The
+  optional email/identifier challenge (`identifierChallengeInput`) and the logged-in
+  signal (`loggedInSignal`) may need re-selection; keep the signal a durable marker,
+  not a hashed feed class.
+- **Reads (inspect/search) run LOGGED-OUT — never demand credentials.** Host split
+  (verified): `subreddits/search.json` works on **www**, but `about.json` +
+  `about/rules.json` 403 logged-out on www and must go through **old.reddit.com**;
+  `link_flair_v2` + `post_requirements` **require login** and return a
+  `USER_REQUIRED` envelope logged-out (degrade to empty flairs / permissive
+  requirements + a "validated at draft time" note, never a crash). A raw
+  `context.request.get()` gets **IP-throttled / edge-403'd** (served the HTML wall
+  instead of JSON), so every read is **page-driven** (`page.goto` → parse the nav
+  response, retry once after the challenge delay). Private/quarantined subs degrade
+  to a note, not a whole-run error; watch for read rate-limiting. When the profile
+  already carries a session, the same reads transparently return authed data.
 - **Composer**: the self-post `submit` page/tab, the **Markdown-mode toggle** (must
   switch the body editor to raw `<textarea>` so the body is taken verbatim), the
   title/body editors, the **flair picker**, and the `nsfw`/`spoiler` toggles all

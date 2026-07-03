@@ -1,32 +1,45 @@
 /**
- * Reddit reader — authenticated JSON reads for inspect / search / draft-preflight,
- * driven THROUGH the logged-in browser context (REDDIT_DESIGN.md §3.3). The analog
- * of src/x/reader.ts: ONE read layer, THREE consumers (inspect, search, and the
- * draft-command preflight). No dedupe / SeenStore — that is a WATCH concern and
- * Reddit ships PUBLISH-only.
+ * Reddit reader — JSON reads for inspect / search / draft-preflight, driven
+ * THROUGH the shared Playwright browser context (REDDIT_DESIGN.md §3.3). The
+ * analog of src/x/reader.ts: ONE read layer, THREE consumers (inspect, search,
+ * and the draft-command preflight). No dedupe / SeenStore — that is a WATCH
+ * concern and Reddit ships PUBLISH-only.
  *
- * HOW IT READS: Reddit serves its facts as JSON to a logged-in session, so no
- * OAuth app is needed. Reads go through the authenticated browser context —
- * cookies attached — via `context.request.get(url)`:
- *   - GET /subreddits/search.json                (search)
- *   - GET /r/{sub}/about.json                    (about)
- *   - GET /r/{sub}/about/rules.json              (rules)
- *   - GET /r/{sub}/api/link_flair_v2             (flair templates)
- *   - GET /api/v1/me.json                        (operator karma/age context)
- * `post_requirements` (flair-required?, title regex, body limits) is served via
- * the composer gateway, not a tidy `.json` URL. We try the direct
- * `/api/v1/{sub}/post_requirements.json` endpoint first (it exists for a logged-in
- * session) and, if that fails, fall back to CAPTURING the response the composer
- * loads — matched by URL path (hashes/exact paths drift), the same technique X
- * uses for its `/graphql/` reads.
+ * LOGIN-FREE READS (live-calibrated): inspect / search never demand credentials.
+ * We fetch through getBrowserContext({ requireLogin: false }) — an ANONYMOUS read
+ * context — so a logged-out operator can still browse subreddit contracts. When
+ * the persistent profile happens to already carry a session (the draft-preflight
+ * path is "called with a logged-in session"), the same reads transparently return
+ * the authed data (real flair list + post_requirements). We never force a login
+ * to read.
+ *
+ * HOST (verified): unauthenticated `about` + `rules` return 403 on
+ * www.reddit.com but 200 with real JSON on OLD reddit — so those two go through
+ * https://old.reddit.com. Subreddit search works on www. A host constant per
+ * endpoint (WWW / OLD) captures this.
+ *
+ * TRANSPORT (verified): a raw context.request.get() does NOT run the browser's
+ * JS-challenge solver, so Reddit's edge 403-blocks it under throttling (serving a
+ * ~190KB theme-beta HTML wall instead of JSON). We therefore drive every read
+ * through a REAL page navigation (page.goto → parse the navigation response, or
+ * the rendered document body) and, if we get the challenge/HTML wall instead of
+ * JSON, wait briefly and retry once. One page is reused across the reads of a
+ * single inspect call and closed afterward; a small politeness delay separates
+ * successive subreddits to avoid burst-throttling.
+ *
+ * AUTH-GATED FACTS (verified): `link_flair_v2` and `post_requirements` return a
+ * {"json":{"errors":[["USER_REQUIRED",...]]}} envelope when logged out. We detect
+ * that envelope and degrade GRACEFULLY — empty flair list / permissive
+ * requirements plus a "validated at draft time" note — never a crash, and never
+ * mistaking the error envelope for a real (empty) contract.
  *
  * DRIFT / LIVE CALIBRATION: every endpoint + JSON field mapping here is
  * best-effort and needs live verification (CLAUDE.md "Verify live"); Reddit
  * reshapes payloads and the composer's post-requirements transport.
  */
 
-import { getBrowserContext, closeSession, type EnsureSessionOptions } from "./session.js";
-import type { BrowserContext, Page, Response, APIResponse } from "playwright";
+import { getBrowserContext, closeSession } from "./session.js";
+import type { BrowserContext, Page, Response } from "playwright";
 
 // ---------------------------------------------------------------------------
 // Wire shapes (the reader's public contract — consumed by inspect / search /
@@ -134,42 +147,121 @@ export interface RedditReader {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Hosts + tuning. HOST fix (verified): about/rules must go through OLD reddit
+// (www 403s them logged-out); search + the auth-gated JSON endpoints use WWW.
 // ---------------------------------------------------------------------------
 
-const REDDIT_ORIGIN = "https://www.reddit.com";
-// A browser-like UA on the API calls keeps Reddit from short-circuiting the
-// logged-in-JSON path (it still uses the context's cookies).
-const JSON_HEADERS = {
-  Accept: "application/json",
-  "User-Agent":
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-};
+const WWW = "https://www.reddit.com";
+const OLD = "https://old.reddit.com";
+
+const NAV_TIMEOUT = 30_000;
+/** After a JS-challenge / HTML wall, wait this long before the single retry. */
+const CHALLENGE_RETRY_DELAY = 3_000;
+/** Between successive subreddits in one inspect run, to avoid burst-throttling. */
+const POLITENESS_DELAY = 1_500;
+
+// ---------------------------------------------------------------------------
+// Small strict-typed JSON helpers (no `any`).
+// ---------------------------------------------------------------------------
+
+function asRecord(v: unknown): Record<string, unknown> {
+  return typeof v === "object" && v !== null ? (v as Record<string, unknown>) : {};
+}
+function asArray(v: unknown): unknown[] {
+  return Array.isArray(v) ? v : [];
+}
+function asString(v: unknown): string | undefined {
+  return typeof v === "string" ? v : undefined;
+}
+function toNum(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+function toBool(v: unknown): boolean {
+  return v === true;
+}
+
+/**
+ * A read failed because Reddit served its non-JSON "network security" / JS-challenge
+ * wall (or was otherwise unreachable) — as opposed to legitimately returning data.
+ * This is an environment/read failure, NOT subreddit info, so it must surface as a
+ * hard error ("blocked / unreachable"), never as a hollow empty contract. Common
+ * cause: the source IP is rate-limited or blocked after too many requests.
+ */
+export class RedditReadBlockedError extends Error {
+  constructor(status: number) {
+    super(
+      `blocked or unreachable — Reddit returned a non-JSON wall (HTTP ${status || "?"}). ` +
+        `The source IP is likely rate-limited or blocked by Reddit; retry later or from a different network.`,
+    );
+    this.name = "RedditReadBlockedError";
+  }
+}
 
 /** Normalize a subreddit reference to a bare name (strip a leading `/r/` or `r/`). */
 function cleanSub(name: string): string {
   return name.replace(/^\/?r\//i, "").replace(/^\/+/, "").trim();
 }
 
-function toNum(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+/**
+ * Reddit's logged-out failure shape: {"json":{"errors":[["USER_REQUIRED", ...]]}}.
+ * Any non-empty errors array under `.json.errors` counts as an error envelope
+ * (NOT a real, empty contract) — the crux of the post_requirements bug fix.
+ */
+function hasErrorEnvelope(json: unknown): boolean {
+  return asArray(asRecord(asRecord(json).json).errors).length > 0;
 }
 
-/** Read a URL's JSON through the authenticated context (cookies attached). */
-async function getJson(ctx: BrowserContext, url: string): Promise<{ status: number; json: any | null }> {
-  let resp: APIResponse;
-  try {
-    resp = await ctx.request.get(url, { headers: JSON_HEADERS, timeout: 30_000 });
-  } catch (err) {
-    throw new Error(`[reddit-reader] request failed for ${url}: ${(err as Error).message}`);
+/**
+ * Read a URL's JSON through a real page navigation (so the browser's JS-challenge
+ * solver runs — raw context.request.get() gets edge-403'd under throttling). We
+ * parse the navigation response as JSON, fall back to the rendered document body,
+ * and — if we got the challenge/HTML wall rather than JSON — wait briefly and
+ * retry ONCE.
+ */
+async function readJson(page: Page, url: string): Promise<{ status: number; json: unknown }> {
+  const attempt = async (): Promise<{ status: number; json: unknown; wall: boolean }> => {
+    let resp: Response | null;
+    try {
+      resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: NAV_TIMEOUT });
+    } catch (err) {
+      throw new Error(`[reddit-reader] navigation failed for ${url}: ${(err as Error).message}`);
+    }
+    const status = resp ? resp.status() : 0;
+
+    // Prefer the navigation response body parsed as JSON.
+    if (resp) {
+      try {
+        return { status, json: await resp.json(), wall: false };
+      } catch {
+        // Not a JSON response body — try the rendered document text next.
+      }
+    }
+
+    let bodyText = "";
+    try {
+      bodyText = await page.evaluate(() => document.body?.innerText ?? "");
+    } catch {
+      bodyText = "";
+    }
+    const trimmed = bodyText.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return { status, json: JSON.parse(trimmed) as unknown, wall: false };
+      } catch {
+        // Malformed — fall through to treating it as the wall.
+      }
+    }
+
+    // No parseable JSON: assume Reddit served its JS-challenge / theme-beta HTML wall.
+    return { status, json: null, wall: true };
+  };
+
+  let result = await attempt();
+  if (result.wall) {
+    await page.waitForTimeout(CHALLENGE_RETRY_DELAY);
+    result = await attempt();
   }
-  let json: any | null = null;
-  try {
-    json = await resp.json();
-  } catch {
-    json = null;
-  }
-  return { status: resp.status(), json };
+  return { status: result.status, json: result.json };
 }
 
 // ---------------------------------------------------------------------------
@@ -178,126 +270,260 @@ async function getJson(ctx: BrowserContext, url: string): Promise<{ status: numb
 
 export class BrowserRedditReader implements RedditReader {
   private inspect: boolean;
+  /** Whether a prior subreddit was already read in this run (drives the politeness delay). */
+  private readSomeSub = false;
 
   constructor(opts: { inspect?: boolean } = {}) {
     this.inspect = !!opts.inspect;
   }
 
   async init(): Promise<void> {
-    // Warm the shared logged-in context up front so any (headful) login happens
-    // before the first read.
-    await getBrowserContext({ inspect: this.inspect });
+    // Warm the shared context up front. LOGIN-FREE: reads never demand credentials.
+    await this.ctx();
   }
 
+  /**
+   * The shared browser context. LOGIN-FREE (`requireLogin: false`) so inspect /
+   * search never demand credentials; if the profile already carries a session the
+   * reads transparently run authed (the draft-preflight path).
+   */
   private async ctx(): Promise<BrowserContext> {
-    return getBrowserContext({ inspect: this.inspect });
+    return getBrowserContext({ inspect: this.inspect, requireLogin: false });
   }
+
+  // --- public single-read methods (each opens/closes its own page) ---
 
   async fetchAbout(name: string): Promise<SubredditAbout> {
-    const sub = cleanSub(name);
     const ctx = await this.ctx();
-    const { status, json } = await getJson(ctx, `${REDDIT_ORIGIN}/r/${encodeURIComponent(sub)}/about.json`);
-
-    // A missing sub returns a 404-shaped body; treat that as a hard error so the
-    // inspect command reports "could not inspect".
-    if (status === 404 || json?.error === 404 || json?.data?.dist === 0) {
-      throw new Error(`r/${sub} not found (or banned).`);
+    const page = await ctx.newPage();
+    try {
+      return await this.readAbout(page, cleanSub(name));
+    } finally {
+      await page.close().catch(() => {});
     }
-    const data = json?.data ?? {};
-    // Private/quarantined subs answer 403 with a {reason} body; surface what we can
-    // rather than throwing (the verdict marks the contract as degraded).
-    const reason: string | undefined = typeof json?.reason === "string" ? json.reason : undefined;
-    const subredditType: string =
-      typeof data.subreddit_type === "string"
-        ? data.subreddit_type
-        : reason === "private"
-          ? "private"
-          : "public";
-
-    return {
-      name: typeof data.display_name === "string" ? data.display_name : sub,
-      title: typeof data.title === "string" ? data.title : undefined,
-      subscribers: toNum(data.subscribers) ?? 0,
-      activeUsers: toNum(data.active_user_count ?? data.accounts_active),
-      subredditType,
-      submissionType: typeof data.submission_type === "string" ? data.submission_type : "any",
-      over18: !!(data.over18 ?? data.over_18),
-      quarantined: !!(data.quarantine ?? reason === "quarantined"),
-      publicDescription:
-        typeof data.public_description === "string" && data.public_description.trim()
-          ? data.public_description.trim()
-          : undefined,
-    };
   }
 
   async fetchRules(name: string): Promise<SubredditRule[]> {
-    const sub = cleanSub(name);
     const ctx = await this.ctx();
-    const { json } = await getJson(ctx, `${REDDIT_ORIGIN}/r/${encodeURIComponent(sub)}/about/rules.json`);
-    const rules = Array.isArray(json?.rules) ? json.rules : [];
-    return rules.map((r: any) => ({
-      shortName: typeof r?.short_name === "string" ? r.short_name : (typeof r?.violation_reason === "string" ? r.violation_reason : ""),
-      description: typeof r?.description === "string" ? r.description.trim() : "",
-    }));
+    const page = await ctx.newPage();
+    try {
+      return await this.readRules(page, cleanSub(name));
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
 
   async fetchFlairs(name: string): Promise<FlairTemplate[]> {
-    const sub = cleanSub(name);
     const ctx = await this.ctx();
-    // link_flair_v2 returns a bare JSON array of templates for a logged-in session.
-    const { json } = await getJson(ctx, `${REDDIT_ORIGIN}/r/${encodeURIComponent(sub)}/api/link_flair_v2`);
-    const list = Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : [];
-    return list
-      .map((f: any) => ({
-        id: typeof f?.id === "string" ? f.id : String(f?.id ?? ""),
-        text: typeof f?.text === "string" ? f.text : (typeof f?.flair_text === "string" ? f.flair_text : ""),
-      }))
-      .filter((f: FlairTemplate) => f.id || f.text);
+    const page = await ctx.newPage();
+    try {
+      return (await this.readFlairs(page, cleanSub(name))).flairs;
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
 
   async fetchPostRequirements(name: string): Promise<PostRequirements> {
+    const ctx = await this.ctx();
+    const page = await ctx.newPage();
+    try {
+      return (await this.readPostRequirements(page, ctx, cleanSub(name))).pr;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  async fetchMe(): Promise<RedditMe | null> {
+    const ctx = await this.ctx();
+    const page = await ctx.newPage();
+    try {
+      return await this.readMe(page);
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  async search(query: string, opts: SubredditSearchOptions = {}): Promise<SubredditSearchHit[]> {
+    const ctx = await this.ctx();
+    const page = await ctx.newPage();
+    try {
+      return await this.readSearch(page, query, opts);
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  async inspectSubreddit(name: string): Promise<SubredditContract> {
     const sub = cleanSub(name);
     const ctx = await this.ctx();
-
-    // PRIMARY: the direct post_requirements endpoint (works for a logged-in session).
+    // One page reused across all reads of this inspect call; closed in `finally`.
+    const page = await ctx.newPage();
     try {
-      const { status, json } = await getJson(
-        ctx,
-        `${REDDIT_ORIGIN}/api/v1/${encodeURIComponent(sub)}/post_requirements.json`,
-      );
-      if (status < 400 && json && typeof json === "object") {
-        return mapPostRequirements(json);
+      // Politeness: throttle bursts across successive subs in one inspect run.
+      if (this.readSomeSub) await page.waitForTimeout(POLITENESS_DELAY);
+      this.readSomeSub = true;
+
+      // `about` is required (it reveals private/banned). If it can't be read at all
+      // (404 / banned / network), degrade to a note-only contract rather than
+      // throwing — one bad sub must not abort a multi-sub inspect run.
+      let about: SubredditAbout;
+      try {
+        about = await this.readAbout(page, sub);
+      } catch (err) {
+        // A network block is a read failure — let the command report it as such,
+        // not a degraded "empty" contract. 404/private/banned DO degrade to a note.
+        if (err instanceof RedditReadBlockedError) throw err;
+        return degradedContract(sub, (err as Error).message);
       }
-    } catch {
-      // Fall through to the capture path.
+
+      // Reads share one page, so they run sequentially (a page can only navigate
+      // one URL at a time — which also keeps us throttle-friendly).
+      const rules = await this.readRules(page, sub).catch((): SubredditRule[] => []);
+      const flairRead = await this.readFlairs(page, sub).catch(
+        (): { flairs: FlairTemplate[]; note?: string } => ({ flairs: [] }),
+      );
+      const prRead = await this.readPostRequirements(page, ctx, sub).catch(
+        (): { pr: PostRequirements; note?: string } => ({ pr: permissivePostRequirements() }),
+      );
+      const me = await this.readMe(page).catch((): RedditMe | null => null);
+
+      const extraNotes: string[] = [];
+      if (flairRead.note) extraNotes.push(flairRead.note);
+      if (prRead.note) extraNotes.push(prRead.note);
+
+      const verdict = buildVerdict(about, rules, flairRead.flairs, prRead.pr, me, extraNotes);
+      return { about, rules, flairs: flairRead.flairs, postRequirements: prRead.pr, verdict };
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  // --- private page-driven reads ---
+
+  private async readAbout(page: Page, sub: string): Promise<SubredditAbout> {
+    // HOST fix: about.json 403s on www logged-out but 200s on OLD reddit.
+    const { status, json } = await readJson(page, `${OLD}/r/${encodeURIComponent(sub)}/about.json`);
+    // No parseable JSON = Reddit's network wall / unreachable. This is a read
+    // FAILURE, not an empty subreddit — throw so we never emit a hollow contract.
+    if (json === null) throw new RedditReadBlockedError(status);
+    const root = asRecord(json);
+    const data = asRecord(root.data);
+
+    // A missing/banned sub returns a 404-shaped body; treat as a hard error so the
+    // caller reports "could not inspect" (inspectSubreddit degrades it to a note).
+    if (status === 404 || root.error === 404 || toNum(data.dist) === 0) {
+      throw new Error(`r/${sub} not found (or banned).`);
     }
 
-    // FALLBACK: drive the composer and capture the post_requirements response.
-    const captured = await this.capturePostRequirements(ctx, sub);
-    if (captured) return mapPostRequirements(captured);
+    // Private/quarantined subs answer 403 with a {reason} body; surface what we can
+    // rather than throwing (the verdict marks the contract as degraded).
+    const reason = asString(root.reason);
+    const subredditType =
+      asString(data.subreddit_type) ?? (reason === "private" ? "private" : "public");
+    const desc = asString(data.public_description);
 
-    // Nothing readable — return a permissive default so preflight doesn't
-    // over-block on a read miss (the composer remains the authoritative gate).
     return {
-      isFlairRequired: false,
-      titleRegexes: [],
-      titleRequiredStrings: [],
-      titleBlacklistedStrings: [],
+      name: asString(data.display_name) ?? sub,
+      title: asString(data.title),
+      subscribers: toNum(data.subscribers) ?? 0,
+      activeUsers: toNum(data.active_user_count ?? data.accounts_active),
+      subredditType,
+      submissionType: asString(data.submission_type) ?? "any",
+      over18: toBool(data.over18) || toBool(data.over_18),
+      quarantined: toBool(data.quarantine) || reason === "quarantined",
+      publicDescription: desc && desc.trim() ? desc.trim() : undefined,
     };
+  }
+
+  private async readRules(page: Page, sub: string): Promise<SubredditRule[]> {
+    // HOST fix: rules also require OLD reddit when logged out.
+    const { json } = await readJson(page, `${OLD}/r/${encodeURIComponent(sub)}/about/rules.json`);
+    return asArray(asRecord(json).rules).map((raw) => {
+      const r = asRecord(raw);
+      return {
+        shortName: asString(r.short_name) ?? asString(r.violation_reason) ?? "",
+        description: (asString(r.description) ?? "").trim(),
+      };
+    });
+  }
+
+  private async readFlairs(
+    page: Page,
+    sub: string,
+  ): Promise<{ flairs: FlairTemplate[]; note?: string }> {
+    const { json } = await readJson(page, `${WWW}/r/${encodeURIComponent(sub)}/api/link_flair_v2`);
+
+    // link_flair_v2 requires auth — logged out it returns a USER_REQUIRED envelope.
+    // Degrade to an EMPTY list + note; never treat the envelope as real flairs.
+    if (hasErrorEnvelope(json)) {
+      return { flairs: [], note: "flair list requires login (validated at draft time)" };
+    }
+
+    const list = Array.isArray(json) ? json : asArray(asRecord(json).data);
+    const flairs = list
+      .map((raw): FlairTemplate => {
+        const f = asRecord(raw);
+        return {
+          id: asString(f.id) ?? String(f.id ?? ""),
+          text: asString(f.text) ?? asString(f.flair_text) ?? "",
+        };
+      })
+      .filter((f) => f.id || f.text);
+    return { flairs };
+  }
+
+  private async readPostRequirements(
+    page: Page,
+    ctx: BrowserContext,
+    sub: string,
+  ): Promise<{ pr: PostRequirements; note?: string }> {
+    // PRIMARY: the direct post_requirements endpoint.
+    const { status, json } = await readJson(
+      page,
+      `${WWW}/api/v1/${encodeURIComponent(sub)}/post_requirements.json`,
+    );
+
+    // BUG FIX: this endpoint returns HTTP 200 with a USER_REQUIRED error envelope
+    // when unauthenticated. The old guard (status<400 && object) accepted that and
+    // mapped it to the all-empty PERMISSIVE default, never falling through. Now:
+    //   - error envelope (logged-out inspect/search) -> permissive + login note
+    //   - valid payload (logged-in draft path)        -> map it
+    //   - other miss (logged-in, endpoint absent)     -> composer-capture fallback
+    if (hasErrorEnvelope(json)) {
+      return {
+        pr: permissivePostRequirements(),
+        note: "post requirements require login (validated at draft time)",
+      };
+    }
+    if (status < 400 && typeof json === "object" && json !== null) {
+      return { pr: mapPostRequirements(json) };
+    }
+
+    // FALLBACK (logged-in draft path): drive the composer and capture the
+    // post_requirements response it loads.
+    const captured = await this.capturePostRequirements(ctx, sub);
+    if (captured !== null && !hasErrorEnvelope(captured)) {
+      return { pr: mapPostRequirements(captured) };
+    }
+
+    // Nothing readable — permissive default so preflight doesn't over-block on a
+    // read miss (the composer remains the authoritative gate).
+    return { pr: permissivePostRequirements() };
   }
 
   /**
    * Capture the post_requirements JSON the submit composer loads. Matched by URL
    * substring ("post_requirements") rather than an exact path, since Reddit's
-   * transport/hashes drift.
+   * transport/hashes drift. Uses its OWN page (it navigates /submit), leaving the
+   * shared read page untouched.
    */
-  private async capturePostRequirements(ctx: BrowserContext, sub: string): Promise<any | null> {
+  private async capturePostRequirements(ctx: BrowserContext, sub: string): Promise<unknown | null> {
     const page: Page = await ctx.newPage();
-    let payload: any | null = null;
+    let payload: unknown | null = null;
 
     const isReqResponse = (r: Response): boolean => r.url().includes("post_requirements");
     const onResponse = async (resp: Response): Promise<void> => {
-      if (payload || !isReqResponse(resp)) return;
+      if (payload !== null || !isReqResponse(resp)) return;
       try {
         payload = await resp.json();
       } catch {
@@ -307,13 +533,17 @@ export class BrowserRedditReader implements RedditReader {
 
     page.on("response", onResponse);
     try {
-      await page.goto(`${REDDIT_ORIGIN}/r/${encodeURIComponent(sub)}/submit?type=TEXT`, {
+      await page.goto(`${WWW}/r/${encodeURIComponent(sub)}/submit?type=TEXT`, {
         waitUntil: "domcontentloaded",
         timeout: 45_000,
       });
       await page
         .waitForResponse(isReqResponse, { timeout: 15_000 })
-        .catch(() => {/* no capture — return whatever (null) we have */});
+        .catch(() => {
+          /* no capture — return whatever (null) we have */
+        });
+    } catch {
+      // Navigation hiccup — return whatever (null) we captured.
     } finally {
       page.off("response", onResponse);
       await page.close().catch(() => {});
@@ -321,16 +551,18 @@ export class BrowserRedditReader implements RedditReader {
     return payload;
   }
 
-  async fetchMe(): Promise<RedditMe | null> {
-    const ctx = await this.ctx();
+  private async readMe(page: Page): Promise<RedditMe | null> {
     try {
-      const { status, json } = await getJson(ctx, `${REDDIT_ORIGIN}/api/v1/me.json`);
-      if (status >= 400 || !json || typeof json !== "object") return null;
+      const { status, json } = await readJson(page, `${WWW}/api/v1/me.json`);
+      if (status >= 400 || typeof json !== "object" || json === null) return null;
+      if (hasErrorEnvelope(json)) return null; // logged-out USER_REQUIRED
+      const root = asRecord(json);
       // /api/v1/me returns the account fields at the top level (sometimes under data).
-      const d = json.data ?? json;
-      if (!d || typeof d.name !== "string") return null;
+      const d = asRecord(root.data ?? root);
+      const name = asString(d.name);
+      if (!name) return null;
       return {
-        name: d.name,
+        name,
         linkKarma: toNum(d.link_karma) ?? 0,
         commentKarma: toNum(d.comment_karma) ?? 0,
         totalKarma: toNum(d.total_karma),
@@ -341,53 +573,34 @@ export class BrowserRedditReader implements RedditReader {
     }
   }
 
-  async search(query: string, opts: SubredditSearchOptions = {}): Promise<SubredditSearchHit[]> {
+  private async readSearch(
+    page: Page,
+    query: string,
+    opts: SubredditSearchOptions,
+  ): Promise<SubredditSearchHit[]> {
     const limit = opts.limit ?? 25;
     const includeNsfw = !!opts.includeNsfw;
-    const ctx = await this.ctx();
     const url =
-      `${REDDIT_ORIGIN}/subreddits/search.json?q=${encodeURIComponent(query)}` +
+      `${WWW}/subreddits/search.json?q=${encodeURIComponent(query)}` +
       `&limit=${encodeURIComponent(String(limit))}&include_over_18=${includeNsfw ? "on" : "off"}`;
-    const { json } = await getJson(ctx, url);
-    const children = Array.isArray(json?.data?.children) ? json.data.children : [];
-    const hits: SubredditSearchHit[] = children.map((c: any) => {
-      const d = c?.data ?? {};
+    const { status, json } = await readJson(page, url);
+    // No parseable JSON = the network wall / unreachable — distinguish a genuine
+    // "no matches" (empty children) from a block, which must not read as "0 found".
+    if (json === null) throw new RedditReadBlockedError(status);
+    const children = asArray(asRecord(asRecord(json).data).children);
+    const hits: SubredditSearchHit[] = children.map((raw) => {
+      const d = asRecord(asRecord(raw).data);
+      const desc = asString(d.public_description);
       return {
-        name: typeof d.display_name === "string" ? d.display_name : "",
+        name: asString(d.display_name) ?? "",
         subscribers: toNum(d.subscribers) ?? 0,
-        over18: !!(d.over18 ?? d.over_18),
-        submissionType: typeof d.submission_type === "string" ? d.submission_type : "any",
-        publicDescription:
-          typeof d.public_description === "string" && d.public_description.trim()
-            ? d.public_description.trim()
-            : undefined,
+        over18: toBool(d.over18) || toBool(d.over_18),
+        submissionType: asString(d.submission_type) ?? "any",
+        publicDescription: desc && desc.trim() ? desc.trim() : undefined,
       };
     });
     const filtered = includeNsfw ? hits : hits.filter((h) => !h.over18);
     return filtered.filter((h) => h.name).slice(0, limit);
-  }
-
-  async inspectSubreddit(name: string): Promise<SubredditContract> {
-    const sub = cleanSub(name);
-    // about is required (it also reveals private/banned); the rest degrade to empty.
-    const about = await this.fetchAbout(sub);
-
-    const [rules, flairs, postRequirements, me] = await Promise.all([
-      this.fetchRules(sub).catch(() => [] as SubredditRule[]),
-      this.fetchFlairs(sub).catch(() => [] as FlairTemplate[]),
-      this.fetchPostRequirements(sub).catch(
-        (): PostRequirements => ({
-          isFlairRequired: false,
-          titleRegexes: [],
-          titleRequiredStrings: [],
-          titleBlacklistedStrings: [],
-        }),
-      ),
-      this.fetchMe().catch(() => null),
-    ]);
-
-    const verdict = buildVerdict(about, rules, flairs, postRequirements, me);
-    return { about, rules, flairs, postRequirements, verdict };
   }
 
   async close(): Promise<void> {
@@ -399,24 +612,51 @@ export class BrowserRedditReader implements RedditReader {
 // Pure mappers / verdict builder (deterministic).
 // ---------------------------------------------------------------------------
 
-function mapPostRequirements(raw: any): PostRequirements {
-  const arr = (v: unknown): string[] =>
-    Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+/** The all-permissive default returned on a read miss (composer stays the gate). */
+function permissivePostRequirements(): PostRequirements {
   return {
-    isFlairRequired: !!(raw.is_flair_required ?? raw.isFlairRequired),
-    titleRegexes: arr(raw.title_regexes ?? raw.titleRegexes),
-    titleRequiredStrings: arr(raw.title_required_strings ?? raw.titleRequiredStrings),
-    titleBlacklistedStrings: arr(raw.title_blacklisted_strings ?? raw.titleBlacklistedStrings),
-    bodyRestrictionPolicy:
-      typeof (raw.body_restriction_policy ?? raw.bodyRestrictionPolicy) === "string"
-        ? (raw.body_restriction_policy ?? raw.bodyRestrictionPolicy)
-        : undefined,
-    bodyMinLength: toNum(raw.body_text_min_length ?? raw.bodyMinLength),
-    bodyMaxLength: toNum(raw.body_text_max_length ?? raw.bodyMaxLength),
-    guidelinesText:
-      typeof (raw.guidelines_text ?? raw.guidelinesText) === "string" && (raw.guidelines_text ?? raw.guidelinesText).trim()
-        ? (raw.guidelines_text ?? raw.guidelinesText).trim()
-        : undefined,
+    isFlairRequired: false,
+    titleRegexes: [],
+    titleRequiredStrings: [],
+    titleBlacklistedStrings: [],
+  };
+}
+
+/** A note-only contract for a sub whose `about` could not be read (404/banned/net). */
+function degradedContract(sub: string, reason: string): SubredditContract {
+  const about: SubredditAbout = {
+    name: sub,
+    subscribers: 0,
+    subredditType: "unknown",
+    submissionType: "any",
+    over18: false,
+    quarantined: false,
+  };
+  const verdict: SubredditVerdict = {
+    selfPostsAllowed: true,
+    flairRequired: false,
+    availableFlairs: [],
+    degraded: `could not read r/${sub}: ${reason}`,
+    notes: [],
+  };
+  return { about, rules: [], flairs: [], postRequirements: permissivePostRequirements(), verdict };
+}
+
+function mapPostRequirements(raw: unknown): PostRequirements {
+  const r = asRecord(raw);
+  const strArr = (v: unknown): string[] =>
+    asArray(v).filter((x): x is string => typeof x === "string");
+  const policy = asString(r.body_restriction_policy ?? r.bodyRestrictionPolicy);
+  const guidelines = asString(r.guidelines_text ?? r.guidelinesText);
+  return {
+    isFlairRequired: toBool(r.is_flair_required ?? r.isFlairRequired),
+    titleRegexes: strArr(r.title_regexes ?? r.titleRegexes),
+    titleRequiredStrings: strArr(r.title_required_strings ?? r.titleRequiredStrings),
+    titleBlacklistedStrings: strArr(r.title_blacklisted_strings ?? r.titleBlacklistedStrings),
+    bodyRestrictionPolicy: policy,
+    bodyMinLength: toNum(r.body_text_min_length ?? r.bodyMinLength),
+    bodyMaxLength: toNum(r.body_text_max_length ?? r.bodyMaxLength),
+    guidelinesText: guidelines && guidelines.trim() ? guidelines.trim() : undefined,
   };
 }
 
@@ -445,8 +685,9 @@ function buildVerdict(
   flairs: FlairTemplate[],
   pr: PostRequirements,
   me: RedditMe | null,
+  extraNotes: string[] = [],
 ): SubredditVerdict {
-  const notes: string[] = [];
+  const notes: string[] = [...extraNotes];
   let degraded: string | undefined;
 
   if (about.subredditType === "private") {

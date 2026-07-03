@@ -74,6 +74,15 @@ export interface EnsureSessionOptions {
   inspect?: boolean;
   /** Force a fresh login even if the persisted profile/cookies look valid. */
   force?: boolean;
+  /**
+   * When true (default), a logged-in session is required — the credential login
+   * flow runs if the persisted profile isn't already authed (the write path). Set
+   * to false via getBrowserContext() to obtain an ANONYMOUS read context: the
+   * persistent context is launched/returned WITHOUT performLogin / ensureCredentials
+   * so logged-out reads (inspect / search) proceed even without credentials. If the
+   * profile already carries a session, reads run authed; otherwise logged-out.
+   */
+  requireLogin?: boolean;
 }
 
 /**
@@ -93,30 +102,29 @@ export const REDDIT_LOGIN_SELECTORS = {
   loginUrl: "https://www.reddit.com/login/",
   homeUrl: "https://www.reddit.com/",
 
-  // Username field. BEST-EFFORT / NEEDS LIVE CALIBRATION. Reddit's login form
-  // uses name="username" today, but the field is often inside a faceplate web
-  // component and may render a hidden duplicate — prefer a :visible match.
+  // Username field. LIVE-CALIBRATED 2026-07 (verified against real Reddit):
+  // input[name="username"]:visible resolves (count=1). The autocomplete value is
+  // "username webauthn", so match with ~= (whitespace-separated token), not =.
   usernameInput: [
     'input[name="username"]:visible',
-    "input#login-username",
-    'input[autocomplete="username"]:visible',
+    'input[autocomplete~="username"]',
     'input[type="text"]:visible',
   ],
-  // Password field. BEST-EFFORT / NEEDS LIVE CALIBRATION.
+  // Password field. LIVE-CALIBRATED 2026-07: input[name="password"]:visible
+  // resolves (verified); autocomplete="current-password" kept as a fallback.
   passwordInput: [
     'input[name="password"]:visible',
-    "input#login-password",
     'input[autocomplete="current-password"]:visible',
     'input[type="password"]:visible',
   ],
-  // Submit button. BEST-EFFORT / NEEDS LIVE CALIBRATION. Reddit's control is a
-  // faceplate/shreddit button labeled "Log In"; advance() falls back to pressing
-  // Enter on the focused password field if none of these resolve.
+  // Submit button. LIVE-CALIBRATED 2026-07: the control is type="button" (NOT
+  // type="submit"), labeled "Log In" (count=1 verified) — so the text/xpath
+  // strategies lead. advance() falls back to pressing Enter on the focused
+  // password field if none of these resolve.
   submitButton: [
-    'button[type="submit"]:visible',
     '//button[normalize-space()="Log In"]',
-    '//button[normalize-space()="Log in"]',
     'button:has-text("Log In"):visible',
+    '//button[normalize-space()="Log in"]',
   ],
 
   // CONDITIONAL email/identifier confirmation (Reddit may ask you to confirm the
@@ -169,8 +177,19 @@ const CHALLENGE_PROMPT_HINTS = [
 // Reddit's interstitials (incl. a human-solved CAPTCHA under --inspect) can be
 // slow; never use fixed sleeps.
 const SELECTOR_TIMEOUT = 15_000;
-// Extra-long landing budget: under --inspect a human may be solving a CAPTCHA.
-const LOGIN_LANDING_TIMEOUT = 120_000;
+// Headless landing budget — SHORT on purpose: without a human there's no way to
+// solve the captcha, so fail fast with the re-run-with-inspect hint rather than
+// hang.
+const LOGIN_LANDING_TIMEOUT = 30_000;
+// Manual-login budget under --inspect: the operator solves the JS bot-challenge /
+// CAPTCHA and can finish login BY HAND in the visible browser; we poll for the
+// logged-in signal for this long before giving up.
+const MANUAL_LOGIN_TIMEOUT = 180_000;
+// How long to wait for the login FORM to attach after navigating to /login.
+// www.reddit.com/login first serves a JS bot-challenge interstitial (URL gains
+// ?js_challenge=1&token=…) that has ZERO inputs and needs several seconds of JS
+// to clear before the real form mounts.
+const LOGIN_FORM_TIMEOUT = 60_000;
 
 // ---------------------------------------------------------------------------
 // Module-level singleton context (the publisher/reader drive ONE logged-in
@@ -306,9 +325,13 @@ async function launchContext(inspect: boolean): Promise<BrowserContext> {
   }
 
   const { redditProfileDir } = dataPaths();
+  // locale + timezoneId make the context look like a real browser — Reddit's JS
+  // bot-challenge interstitial only auto-clears with a realistic context.
   const launchOpts = {
     headless: !inspect,
     viewport: { width: 1280, height: 900 },
+    locale: "en-US",
+    timezoneId: "America/Los_Angeles",
     args: ["--disable-blink-features=AutomationControlled"],
   };
 
@@ -344,49 +367,100 @@ async function getWorkingPage(context: BrowserContext): Promise<Page> {
 
 /**
  * Run the credential login flow against REDDIT_LOGIN_SELECTORS on the given page.
- * Sequence: username + password -> submit -> (optional email/identifier
- * challenge, and/or a human-solved CAPTCHA under --inspect) -> land logged in.
+ * Sequence: navigate -> WAIT for the form to clear the JS bot-challenge -> fill
+ * username + password -> submit -> (optional email/identifier challenge, and/or a
+ * human-solved CAPTCHA under --inspect) -> land logged in.
+ *
+ * The REAL first-login failure was TIMING, not selectors: www.reddit.com/login
+ * first serves a JS bot-challenge interstitial (URL gains ?js_challenge=1&token=…)
+ * that has ZERO inputs and needs several seconds of JS to clear before the form
+ * attaches — so we explicitly wait for the username input before probing.
+ *
+ * `inspect` toggles the MANUAL-LOGIN posture: Reddit login requires solving a
+ * CAPTCHA that automation cannot. Under --inspect (headful) any auto-fill hiccup
+ * is NON-fatal — we give the operator up to MANUAL_LOGIN_TIMEOUT to solve the
+ * challenge / finish login BY HAND in the visible browser. The headless path stays
+ * strict: short wait, then throw with the re-run-with-inspect hint.
  */
-async function performLogin(page: Page): Promise<void> {
-  ensureCredentials();
+async function performLogin(page: Page, inspect: boolean): Promise<void> {
+  // Credentials are required for the UNATTENDED path. Under --inspect a human can
+  // finish by hand, so missing creds is non-fatal there (auto-fill is skipped).
+  if (!inspect) ensureCredentials();
 
   await page.goto(REDDIT_LOGIN_SELECTORS.loginUrl, { waitUntil: "domcontentloaded" });
 
-  // Reddit's login shows username + password on ONE page.
-  await fillFirst(page, REDDIT_LOGIN_SELECTORS.usernameInput, env.REDDIT_USERNAME, "usernameInput");
-  const passwordInput = await fillFirst(
-    page,
-    REDDIT_LOGIN_SELECTORS.passwordInput,
-    env.REDDIT_PASSWORD,
-    "passwordInput",
-  );
-  await advance(page, passwordInput, REDDIT_LOGIN_SELECTORS.submitButton);
-
-  // CONDITIONAL: Reddit may interject an email/identifier confirmation.
-  if (await isIdentifierChallenge(page)) {
-    if (!env.REDDIT_EMAIL) {
+  // Wait for the login form to clear the JS bot-challenge interstitial and attach.
+  // Under --inspect this same window lets the human start solving the captcha.
+  try {
+    await page.waitForSelector('input[name="username"]', {
+      state: "visible",
+      timeout: LOGIN_FORM_TIMEOUT,
+    });
+  } catch {
+    if (!inspect) {
       throw new Error(
-        `[reddit-session] Reddit raised an email/identifier confirmation but ` +
-          `REDDIT_EMAIL is not set. Add REDDIT_EMAIL to .env and re-run ` +
-          `(with --inspect to watch the flow).`,
+        `[reddit-session] the Reddit login form never attached within ` +
+          `${LOGIN_FORM_TIMEOUT}ms — www.reddit.com/login first serves a JS ` +
+          `bot-challenge interstitial (?js_challenge=1&token=…) that must clear ` +
+          `before the form mounts, and headless couldn't get past it. The FIRST ` +
+          `login MUST be headful — re-run with --inspect to SOLVE THE CAPTCHA by ` +
+          `hand and (if needed) recalibrate REDDIT_LOGIN_SELECTORS in ` +
+          `src/reddit/session.ts.`,
       );
     }
-    const challengeInput = await fillFirst(
-      page,
-      REDDIT_LOGIN_SELECTORS.identifierChallengeInput,
-      env.REDDIT_EMAIL,
-      "identifierChallengeInput",
-    );
-    await advance(page, challengeInput, REDDIT_LOGIN_SELECTORS.identifierChallengeSubmit);
+    // Under --inspect, don't give up: fall through so the human can drive the
+    // browser (clear the challenge / log in by hand) within the manual window.
   }
 
-  // Wait to land logged in. Under --inspect this window also covers a human
-  // solving a CAPTCHA in the visible browser (hence the long budget).
-  const landed = await isLoggedIn(page, LOGIN_LANDING_TIMEOUT);
+  // Best-effort auto-fill. Reddit's login shows username + password on ONE page.
+  // Under --inspect any hiccup here is swallowed — the human finishes by hand.
+  try {
+    if (env.REDDIT_USERNAME && env.REDDIT_PASSWORD) {
+      await fillFirst(
+        page,
+        REDDIT_LOGIN_SELECTORS.usernameInput,
+        env.REDDIT_USERNAME,
+        "usernameInput",
+      );
+      const passwordInput = await fillFirst(
+        page,
+        REDDIT_LOGIN_SELECTORS.passwordInput,
+        env.REDDIT_PASSWORD,
+        "passwordInput",
+      );
+      await advance(page, passwordInput, REDDIT_LOGIN_SELECTORS.submitButton);
+
+      // CONDITIONAL: Reddit may interject an email/identifier confirmation.
+      if (await isIdentifierChallenge(page)) {
+        if (!env.REDDIT_EMAIL) {
+          throw new Error(
+            `[reddit-session] Reddit raised an email/identifier confirmation but ` +
+              `REDDIT_EMAIL is not set. Add REDDIT_EMAIL to .env and re-run ` +
+              `(with --inspect to watch the flow).`,
+          );
+        }
+        const challengeInput = await fillFirst(
+          page,
+          REDDIT_LOGIN_SELECTORS.identifierChallengeInput,
+          env.REDDIT_EMAIL,
+          "identifierChallengeInput",
+        );
+        await advance(page, challengeInput, REDDIT_LOGIN_SELECTORS.identifierChallengeSubmit);
+      }
+    }
+  } catch (fillErr) {
+    if (!inspect) throw fillErr;
+    // Under --inspect the operator takes over; swallow and wait for the signal.
+  }
+
+  // Wait to land logged in. Under --inspect the long window covers the human
+  // solving the CAPTCHA in the visible browser; headless stays short + strict.
+  const landingTimeout = inspect ? MANUAL_LOGIN_TIMEOUT : LOGIN_LANDING_TIMEOUT;
+  const landed = await isLoggedIn(page, landingTimeout);
   if (!landed) {
     throw new Error(
       `[reddit-session] login did not land on a logged-in page within ` +
-        `${LOGIN_LANDING_TIMEOUT}ms. Reddit likely raised a CAPTCHA / bot check ` +
+        `${landingTimeout}ms. Reddit likely raised a CAPTCHA / bot check ` +
         `(it is captcha-heavy) or an unhandled 2FA/device step, or the selectors ` +
         `drifted. The FIRST login MUST be headful — re-run with --inspect to ` +
         `SOLVE THE CAPTCHA by hand and recalibrate REDDIT_LOGIN_SELECTORS in ` +
@@ -485,7 +559,7 @@ export async function ensureSession(opts: EnsureSessionOptions = {}): Promise<vo
     }
   }
 
-  await performLogin(page);
+  await performLogin(page, inspect);
   await harvestAndCacheCookies(context);
 }
 
@@ -512,14 +586,34 @@ export async function getCookies(opts: EnsureSessionOptions = {}): Promise<Sessi
 }
 
 /**
- * Return the live, logged-in PERSISTENT browser context for the reader (JSON reads
- * / response capture) and the composer to drive. Same profile as ensureSession —
- * never a second login. The caller MUST NOT close the context directly; use
- * closeSession() so the shared handle is cleared.
+ * Return the live PERSISTENT browser context for the reader (JSON reads / response
+ * capture) and the composer to drive. Same profile as ensureSession — never a
+ * second login. The caller MUST NOT close the context directly; use closeSession()
+ * so the shared handle is cleared.
+ *
+ * By default this requires a logged-in session (the write path). Pass
+ * `requireLogin: false` for an ANONYMOUS read context (inspect / search): the
+ * persistent context is launched WITHOUT performLogin / ensureCredentials, so reads
+ * proceed logged-out (or authed, if the profile already carries a session). We
+ * still navigate www.reddit.com once so the anonymous edgebucket cookie is set and
+ * the JS bot-challenge clears before the reader drives it (the reader may also do
+ * its own page.goto).
  */
 export async function getBrowserContext(
   opts: EnsureSessionOptions = {},
 ): Promise<BrowserContext> {
+  if (opts.requireLogin === false) {
+    const inspect = !!opts.inspect;
+    const context = await launchContext(inspect);
+    const page = await getWorkingPage(context);
+    try {
+      await page.goto(REDDIT_LOGIN_SELECTORS.homeUrl, { waitUntil: "domcontentloaded" });
+    } catch {
+      // Best-effort priming; the reader does its own navigation too.
+    }
+    return context;
+  }
+
   await ensureSession(opts);
   if (!sharedContext) {
     throw new Error("[reddit-session] browser context unavailable after ensureSession.");
