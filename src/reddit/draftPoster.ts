@@ -69,15 +69,27 @@ export const REDDIT_COMPOSER_SELECTORS = {
     '//*[@role="tab"][contains(normalize-space(),"Post")]',
   ],
 
-  // Switch the body editor into raw-Markdown mode (Reddit's rich editor defaults
-  // to the fancy/WYSIWYG editor; we want verbatim Markdown). BEST-EFFORT /
-  // NEEDS LIVE CALIBRATION — the toggle is a small "Markdown Mode" / "Switch to
-  // Markdown Editor" control near the body editor.
+  // A stable member of the body RTE formatting toolbar, used only as a "toolbar
+  // has hydrated" signal (the toolbar mounts a few seconds after the composer, and
+  // looking for the Markdown toggle before then silently fails). CALIBRATED LIVE
+  // 2026-07-03. NEEDS LIVE CALIBRATION.
+  rteToolbarReady: ['button[aria-label*="Bold" i]:visible', 'button:has-text("Bold"):visible'],
+  // The body toolbar's "More options" (…) overflow button — one place the "Switch
+  // to Markdown" control lives (at other viewports it is an inline toolbar
+  // button). CALIBRATED LIVE 2026-07-03; renders once the body is focused.
+  // NEEDS LIVE CALIBRATION.
+  composerMoreOptions: ['button[aria-label*="More options" i]:visible'],
+  // Switch the body editor into Markdown mode so the typed body is treated as
+  // Markdown (Reddit's editor defaults to the rich/WYSIWYG mode, which renders
+  // markdown syntax literally). CALIBRATED LIVE 2026-07-03: this is a MENU ITEM
+  // inside composerMoreOptions (opened after focusing the body), not a top-level
+  // button. The body stays the same div[name="body"] element in either mode, so
+  // switching never breaks body typing. BEST-EFFORT / NEEDS LIVE CALIBRATION.
   markdownToggle: [
-    'button[aria-label*="Markdown" i]',
-    'button:has-text("Markdown Mode"):visible',
     'button:has-text("Switch to Markdown"):visible',
-    '//button[contains(normalize-space(),"Markdown")]',
+    '//button[contains(normalize-space(),"Switch to Markdown")]',
+    'button[aria-label*="Switch to Markdown" i]',
+    'button:has-text("Markdown Mode"):visible',
   ],
 
   // The title input. NEEDS LIVE CALIBRATION.
@@ -89,15 +101,22 @@ export const REDDIT_COMPOSER_SELECTORS = {
     '//textarea[contains(@placeholder,"Title")]',
   ],
 
-  // The Markdown body editor (after markdownToggle switches to raw mode). In
-  // Markdown mode Reddit renders a plain <textarea>; in rich mode it is a
-  // contenteditable. typeText handles both. NEEDS LIVE CALIBRATION.
+  // The self-post body editor. CALIBRATED LIVE 2026-07-03 against the new
+  // www.reddit.com <shreddit-composer>: the body is a NAME-SCOPED contenteditable
+  // `div[role="textbox"][name="body"]` (aria-label "Post body text field") in BOTH
+  // rich and markdown views — NOT a <textarea>. typeText handles contenteditable.
+  // Lead with the name/aria-scoped, VISIBLE selectors: a generic
+  // `div[contenteditable="true"][role="textbox"]` matches TWO nodes whose FIRST is
+  // hidden, and tolerantLocator's .first() would grab the hidden one and time out
+  // waiting for it to become visible. The <textarea> variants are older-UI /
+  // markdown-mode fallbacks. NEEDS LIVE CALIBRATION.
   bodyEditor: [
+    'div[role="textbox"][name="body"]',
+    'div[name="body"]',
+    'div[aria-label="Post body text field" i]',
     'textarea[name="body"]',
     'textarea[placeholder*="body" i]',
-    'div[contenteditable="true"][role="textbox"]',
-    'div[name="body"] div[contenteditable="true"]',
-    '//textarea[contains(@placeholder,"Text")]',
+    '//div[@role="textbox"][@name="body"]',
   ],
 
   // Open the flair picker. NEEDS LIVE CALIBRATION.
@@ -107,22 +126,41 @@ export const REDDIT_COMPOSER_SELECTORS = {
     'button[aria-label*="flair" i]',
     '//button[contains(normalize-space(),"flair")]',
   ],
-  // A flair option row inside the open picker. selectFlair() ALSO builds
-  // id-specific candidates from the resolved flairId at call time (derived, not a
-  // new static selector) so the correct template is chosen; these are the generic
-  // fallbacks. NEEDS LIVE CALIBRATION.
+  // Expand the modal to show the full flair list. CALIBRATED LIVE 2026-07-03: the
+  // new composer's flair modal shows a subset until "View all flairs" is clicked;
+  // radios below the fold aren't checkable until then.
+  flairViewAll: ['button:has-text("View all flairs"):visible'],
+  // A flair option row inside the open modal. CALIBRATED LIVE 2026-07-03: the new
+  // composer renders each flair as a VISUALLY-HIDDEN `faceplate-radio-input
+  // [role="radio"][name="flairId"]` whose `value` is the template id and whose
+  // TEXT is the flair label. selectFlair() selects it via .check() (a plain
+  // .click() fails — the radio is not "visible"), preferring the accessible name
+  // (text) because the composer radio `value` ids can differ from the link_flair
+  // ids. These CSS fallbacks target the value-scoped radio. NEEDS LIVE CALIBRATION.
   flairOption: [
+    'faceplate-radio-input[name="flairId"]',
     'span[role="button"][data-flair-id]',
     'li[role="option"]',
     'button[role="radio"]',
-    'div.flairselect__option',
   ],
-  // Apply/confirm the chosen flair and close the picker. NEEDS LIVE CALIBRATION.
+  // Confirm the chosen flair and close the modal. CALIBRATED LIVE 2026-07-03: the
+  // new composer modal's confirm button is exactly "Add" (NOT "Apply"/"Done") —
+  // and it MUST be text-EXACT so it doesn't match "Add flair and tags" /
+  // "Add community to favorites". Leaving the modal open lets it intercept the
+  // Save Draft click. NEEDS LIVE CALIBRATION.
   flairApply: [
-    'button:has-text("Apply"):visible',
-    'button:has-text("Done"):visible',
+    'button:text-is("Add"):visible',
+    'button:text-is("Apply"):visible',
+    'button:text-is("Done"):visible',
+    '//button[normalize-space()="Add"]',
     '//button[normalize-space()="Apply"]',
-    '//button[normalize-space()="Done"]',
+  ],
+  // Dismiss the flair modal WITHOUT applying (used when selection fails, so the
+  // modal can't intercept Save Draft). NEEDS LIVE CALIBRATION.
+  flairCancel: [
+    'button:text-is("Cancel"):visible',
+    '//button[normalize-space()="Cancel"]',
+    'button[aria-label*="Close" i]:visible',
   ],
 
   // NSFW / spoiler mark toggles. Clicked only when the post is flagged. Both are
@@ -189,6 +227,12 @@ export interface StageDraftOptions extends EnsureSessionOptions {
    * select in the composer. When absent, no flair is selected.
    */
   flairId?: string;
+  /**
+   * The resolved flair template TEXT (from preflightSelfPost().resolvedFlair).
+   * Preferred for selection — the composer's radio `value` ids can differ from the
+   * link_flair ids, but the visible label text is stable.
+   */
+  flairText?: string;
 }
 
 export interface StageDraftResult {
@@ -273,43 +317,146 @@ async function detectEligibilityBlock(page: Page, sub: string): Promise<string |
 }
 
 /**
- * Switch the body editor into raw-Markdown mode so the Markdown body is kept
- * verbatim (not re-parsed by the rich editor). Best-effort — if the toggle
- * doesn't resolve (composer may already be in Markdown mode), continue.
+ * Switch the body editor into Markdown mode so the typed body is treated as
+ * Markdown rather than rendered literally by the rich editor. CALIBRATED LIVE
+ * 2026-07-03 for the new <shreddit-composer>: focus the body (so its toolbar
+ * renders) → open the "More options" (…) overflow menu → click "Switch to
+ * Markdown". The body stays the SAME div[name="body"] element in either mode, so
+ * this never breaks the subsequent body typing.
+ *
+ * Best-effort throughout: if the body/menu/toggle doesn't resolve (viewport,
+ * hydration, or the composer is already in Markdown mode), we close any menu we
+ * opened and return false — the caller then types into the rich editor and emits
+ * an advisory. NEVER throws.
  */
 async function switchToMarkdownMode(page: Page): Promise<boolean> {
-  const toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 4_000);
-  if (!toggle) return false;
-  await toggle.click().catch(() => {});
-  await page.waitForTimeout(300);
-  return true;
+  // The RTE formatting toolbar hydrates a few seconds AFTER the composer mounts,
+  // and interacting before it does can suppress it. Wait for a stable toolbar
+  // member ("Bold") to appear FIRST — looking for the toggle too early was why
+  // this silently no-op'd. Best-effort: continue even if Bold never resolves.
+  await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.rteToolbarReady, 5_000);
+
+  // Path 1: at some viewports the toggle is an inline toolbar button.
+  let toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 1_500);
+  if (toggle) {
+    await toggle.click().catch(() => {});
+    await page.waitForTimeout(400);
+    return true;
+  }
+
+  // Path 2: otherwise it lives in the body toolbar's "More options" (…) overflow
+  // menu, which renders once the body is focused. Retry against hydration jitter;
+  // close any menu we open but don't use. Kept SHORT — Reddit's new composer
+  // hydrates this toggle unreliably, so we do not want to stall a working draft
+  // waiting on a control that may never mount (the caller degrades gracefully).
+  const body = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.bodyEditor, 4_000);
+  if (body) await body.click().catch(() => {});
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const more = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.composerMoreOptions, 3_000);
+    if (more) {
+      await more.click().catch(() => {});
+      await page.waitForTimeout(400);
+      toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 2_500);
+      if (toggle) {
+        await toggle.click().catch(() => {});
+        await page.waitForTimeout(400);
+        return true;
+      }
+      await page.keyboard.press("Escape").catch(() => {});
+    }
+    await page.waitForTimeout(700);
+  }
+  return false;
+}
+
+/** Dismiss the flair modal without applying, so it can't intercept Save Draft. */
+async function dismissFlairModal(page: Page): Promise<void> {
+  const cancel = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.flairCancel, 2_000);
+  if (cancel) await cancel.click().catch(() => {});
+  await page.waitForTimeout(200);
 }
 
 /**
- * Select the flair template `flairId` in the composer. Best-effort — opens the
- * picker, prefers an id-specific option (derived from flairId), falls back to the
- * generic option candidates, then applies. Returns true if a flair was applied.
+ * Select a flair template in the composer's flair modal. CALIBRATED LIVE
+ * 2026-07-03 for the new <shreddit-composer>: open "Add flair and tags" → expand
+ * "View all flairs" → SELECT the flair (the flair is a visually-hidden
+ * faceplate-radio-input, so we .check() it — a plain .click() fails on "not
+ * visible" — preferring the accessible NAME/text, since the composer radio `value`
+ * ids can differ from the link_flair ids) → confirm with "Add". If selection
+ * fails, the modal is DISMISSED (Cancel) so it can't intercept the Save Draft
+ * click (drafts still save without a flair). Returns true iff a flair was applied.
  */
-async function selectFlair(page: Page, flairId: string): Promise<boolean> {
+async function selectFlair(page: Page, flair: { id?: string; text?: string }): Promise<boolean> {
   const flairBtn = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.flairButton, 4_000);
   if (!flairBtn) return false;
   await flairBtn.click().catch(() => {});
+  await page.waitForTimeout(400);
 
-  // Prefer an option that carries the resolved template id (derived candidates,
-  // not new static selectors); fall back to the generic flairOption list.
-  const idCandidates = [
-    `[data-flair-id="${flairId}"]`,
-    `input[value="${flairId}"]`,
-    `//*[@data-flair-id="${flairId}"]`,
-  ];
-  let option = await optionalLocator(page, idCandidates, 4_000);
-  if (!option) option = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.flairOption, 4_000);
-  if (!option) return false;
-  await option.click().catch(() => {});
+  // The modal shows a subset until "View all flairs" expands it (below-fold radios
+  // aren't checkable until then). Best-effort.
+  const viewAll = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.flairViewAll, 2_500);
+  if (viewAll) {
+    await viewAll.click().catch(() => {});
+    await page.waitForTimeout(400);
+  }
 
-  const apply = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.flairApply, 3_000);
-  if (apply) await apply.click().catch(() => {});
-  await page.waitForTimeout(300);
+  // Select: prefer the accessible radio BY TEXT (most robust across id namespaces),
+  // then fall back to the value-scoped radio, checking it (not clicking).
+  let selected = false;
+  if (flair.text) {
+    const byText = page.getByRole("radio", { name: flair.text, exact: false }).first();
+    try {
+      await byText.check({ timeout: 4_000 });
+      selected = true;
+    } catch {
+      /* fall through */
+    }
+  }
+  if (!selected && flair.id) {
+    const byVal = page.locator(`faceplate-radio-input[value="${flair.id}"]`).first();
+    try {
+      await byVal.check({ timeout: 3_000 });
+      selected = true;
+    } catch {
+      try {
+        await byVal.click({ force: true, timeout: 2_000 });
+        selected = true;
+      } catch {
+        /* fall through */
+      }
+    }
+  }
+
+  if (!selected) {
+    // Couldn't pick the flair — CLOSE the modal so it doesn't cover Save Draft.
+    await dismissFlairModal(page);
+    return false;
+  }
+
+  // Confirm — the new composer modal's confirm button is exactly "Add". This click
+  // is what COLLAPSES the flair section; skipping it leaves the section overlaying
+  // and intercepting the Save Draft click. Match by ACCESSIBLE NAME (calibrated
+  // live 2026-07-03): a CSS `:text-is("Add")` does NOT match this button, and
+  // `:has-text("Add")` would wrongly also match "Add flair and tags". Try Add,
+  // then Apply/Done for other subs' modals; fall back to the CSS flairApply list.
+  let confirmed = false;
+  for (const name of ["Add", "Apply", "Done"]) {
+    const btn = page.getByRole("button", { name, exact: true }).first();
+    try {
+      if ((await btn.count()) > 0) {
+        await btn.click({ timeout: 3_000 });
+        confirmed = true;
+        break;
+      }
+    } catch {
+      /* try the next label */
+    }
+  }
+  if (!confirmed) {
+    const apply = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.flairApply, 2_000);
+    if (apply) await apply.click().catch(() => {});
+  }
+  await page.waitForTimeout(400);
   return true;
 }
 
@@ -437,11 +584,11 @@ export async function stageDraft(
       await typeText(page, bodyEditor, post.body);
     }
 
-    // Flair (only when a resolved template id was passed in).
+    // Flair (only when a resolved template was passed in). Prefer text selection.
     let flairApplied: string | undefined;
-    if (opts.flairId) {
-      const ok = await selectFlair(page, opts.flairId);
-      if (ok) flairApplied = opts.flairId;
+    if (opts.flairId || opts.flairText) {
+      const ok = await selectFlair(page, { id: opts.flairId, text: opts.flairText });
+      if (ok) flairApplied = opts.flairText ?? opts.flairId;
     }
 
     // Marks.
@@ -460,11 +607,14 @@ export async function stageDraft(
     );
     if (!markdown) {
       noteParts.push(
-        "Markdown-mode toggle did not resolve — the body may have been typed into the rich editor; verify Markdown rendered as intended (fenced code renders differently on old Reddit).",
+        "Could NOT switch the composer to Markdown mode (Reddit's new composer hydrates that toggle unreliably) — the body was entered in the RICH editor, so Markdown syntax (**bold**, lists, fenced code) will render LITERALLY. Before posting, open the draft and use the body toolbar's “… → Switch to Markdown” so it renders as intended.",
       );
     }
     if (flairApplied) noteParts.push(`flair applied: ${flairApplied}.`);
-    else if (opts.flairId) noteParts.push(`flair id ${opts.flairId} requested but the picker did not resolve — set it manually.`);
+    else if (opts.flairId || opts.flairText)
+      noteParts.push(
+        `flair "${opts.flairText ?? opts.flairId}" requested but the picker did not resolve — the modal was dismissed so the draft could still save; set the flair manually before posting.`,
+      );
     if (post.codeFlags.length) {
       noteParts.push(
         "Code blocks: confirm fenced code renders on both new and old Reddit (old Reddit needs 4-space indentation for some clients).",

@@ -145,18 +145,25 @@ export const REDDIT_LOGIN_SELECTORS = {
     'button:has-text("Continue"):visible',
   ],
 
-  // Logged-in signal (used by isLoggedIn()/ensureSession()). BEST-EFFORT / NEEDS
-  // LIVE CALIBRATION: Reddit's shell uses shadowed web components, so durable
-  // markers are the user-menu avatar / dropdown — which render ONLY when logged in.
-  // Do NOT add `a[href^="/submit"]` or `button[aria-label="Create a post"]` here:
-  // Reddit renders those on the LOGGED-OUT shell too (they open the login modal),
-  // so isLoggedIn() would false-positive → skip credential login → cookie harvest
-  // throws "reddit_session cookie missing". A false-negative here is the safe
-  // direction (it just re-attempts login). LOCALE NOTE: aria-label is English-UI.
+  // Logged-in signal (used by isLoggedIn()/ensureSession()). CALIBRATED LIVE
+  // 2026-07-03 against the authenticated www.reddit.com shell (release web3x /
+  // 2026-07-02). The durable marker is the `user-logged-in` ATTRIBUTE Reddit
+  // stamps on its <shreddit-app> root element — it reads "true" when authed and
+  // "false"/absent otherwise, so it is both reliable and locale-independent (no
+  // aria-label text to drift). The user-drawer (avatar menu) button is the
+  // secondary marker; it renders ONLY when logged in.
+  //
+  // Do NOT add `a[href^="/submit"]`, `a[aria-label="Create post"]`, or the chat
+  // button here: Reddit renders those on the LOGGED-OUT shell too (they open the
+  // login modal), so isLoggedIn() would false-positive → skip credential login →
+  // cookie harvest throws "reddit_session cookie missing". Likewise avoid
+  // `a[href^="/user/"]`, which also matches logged-out post-author links. A
+  // false-NEGATIVE here is the safe direction (it just re-attempts login).
+  // NOTE: the prior avatar/user_avatar/#USER_DROPDOWN_ID markers were STALE
+  // (all resolved 0 on the live authed page — the cause of a failed login-land).
   loggedInSignal: [
-    'button[aria-label*="Expand user menu"]',
-    'faceplate-tracker[noun="user_avatar"]',
-    "#USER_DROPDOWN_ID",
+    'shreddit-app[user-logged-in="true"]',
+    "button#expand-user-drawer-button",
   ],
 } as const;
 

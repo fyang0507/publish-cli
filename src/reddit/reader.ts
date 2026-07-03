@@ -451,25 +451,48 @@ export class BrowserRedditReader implements RedditReader {
     page: Page,
     sub: string,
   ): Promise<{ flairs: FlairTemplate[]; note?: string }> {
-    const { json } = await readJson(page, `${WWW}/r/${encodeURIComponent(sub)}/api/link_flair_v2`);
+    // ENDPOINT DRIFT (calibrated live 2026-07-03): on www.reddit.com the bare
+    // `/api/link_flair_v2` path (no suffix) 404s to an HTML page — readJson then
+    // yields {status:404, json:null} and we degrade to an empty list, WRONGLY
+    // reporting "no flairs" for subs that actually require one. The `.json`
+    // endpoints return the real template list when authed (and a USER_REQUIRED
+    // envelope when logged out). Try v2.json first (richer), fall back to the v1
+    // `.json` list, which is verified to return [{id,text,...}] for r/codex.
+    const endpoints = [
+      `${WWW}/r/${encodeURIComponent(sub)}/api/link_flair_v2.json`,
+      `${WWW}/r/${encodeURIComponent(sub)}/api/link_flair.json`,
+    ];
+    let sawEnvelope = false;
+    for (const url of endpoints) {
+      const { status, json } = await readJson(page, url);
+      // Logged-out USER_REQUIRED envelope — note it, but keep trying (a later
+      // endpoint could still resolve); never treat the envelope as real flairs.
+      if (hasErrorEnvelope(json)) {
+        sawEnvelope = true;
+        continue;
+      }
+      // 404 / wall / non-JSON — try the next candidate endpoint.
+      if (status >= 400 || json === null) continue;
 
-    // link_flair_v2 requires auth — logged out it returns a USER_REQUIRED envelope.
-    // Degrade to an EMPTY list + note; never treat the envelope as real flairs.
-    if (hasErrorEnvelope(json)) {
-      return { flairs: [], note: "flair list requires login (validated at draft time)" };
+      const list = Array.isArray(json) ? json : asArray(asRecord(json).data);
+      const flairs = list
+        .map((raw): FlairTemplate => {
+          const f = asRecord(raw);
+          return {
+            id: asString(f.id) ?? String(f.id ?? ""),
+            text: asString(f.text) ?? asString(f.flair_text) ?? "",
+          };
+        })
+        .filter((f) => f.id || f.text);
+      if (flairs.length) return { flairs };
+      // 200 but genuinely empty — fall through to the next endpoint in case it is
+      // richer; if none yield flairs we return an empty list below.
     }
 
-    const list = Array.isArray(json) ? json : asArray(asRecord(json).data);
-    const flairs = list
-      .map((raw): FlairTemplate => {
-        const f = asRecord(raw);
-        return {
-          id: asString(f.id) ?? String(f.id ?? ""),
-          text: asString(f.text) ?? asString(f.flair_text) ?? "",
-        };
-      })
-      .filter((f) => f.id || f.text);
-    return { flairs };
+    if (sawEnvelope) {
+      return { flairs: [], note: "flair list requires login (validated at draft time)" };
+    }
+    return { flairs: [] };
   }
 
   private async readPostRequirements(

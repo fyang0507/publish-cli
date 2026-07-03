@@ -131,6 +131,7 @@ export function registerRedditDraftCommand(reddit: Command): void {
           const result = await stageDraft(post, {
             inspect: opts.inspect,
             flairId: preflight.resolvedFlair?.id,
+            flairText: preflight.resolvedFlair?.text,
           });
 
           if (result.blocked) {
