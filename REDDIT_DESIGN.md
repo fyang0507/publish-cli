@@ -110,8 +110,10 @@ For each `<subreddit>` it merges four reads (§3.3) into the full contract:
 | Posting contract | `is_flair_required`, `title_regexes`, title required/blacklisted strings, `body_restriction_policy`, body min/max length, `guidelines_text` | composer gateway response (captured; §3.3) |
 
 Plus a one-line **verdict** per sub: self-posts allowed? flair required (which)?
-would a draft pass the title regex? Private/quarantined subs degrade to a note,
-not a hard error (§9).
+would a draft pass the title regex? plus **any karma/age gate the rules text
+mentions** (best-effort — hard gates are AutoMod-enforced and only surface
+authoritatively at `draft` time; §4.1). Private/quarantined subs degrade to a
+note, not a hard error (§9).
 
 **`search` — breadth: list candidate subreddits for a topic** (the aid for when
 the agent can't name candidates).
@@ -281,6 +283,24 @@ gate. `--dry-run` runs the full preflight so the operator sees violations withou
 touching the composer. (Caveat: AutoMod rules aren't exposed — preflight catches
 the declared contract, not every mod filter; §9.)
 
+### 4.1 Eligibility gates (karma / account age)
+
+Many subreddits gate posting on **account karma or age**. These are almost always
+enforced by **AutoMod / internal spam filters and are NOT machine-declared** —
+they don't appear in `post_requirements` or `about.json`. The honest split:
+
+- **`inspect` (best-effort):** surface any karma/age requirement the subreddit's
+  **rules text** states in prose, plus the operator's own karma (from
+  `/api/v1/me`) for context. It does **not** promise a definitive threshold,
+  because the threshold usually isn't published.
+- **`draft` (authoritative):** driving the composer is what actually reveals
+  eligibility. If Reddit blocks with "not enough karma," "account too new,"
+  "approved submitters only," or a restricted/banned notice, `draft` **detects
+  that composer/gateway error and returns a plain message** (e.g. *"can't post to
+  r/foo: insufficient karma"*) instead of a silent failure — the browser-driven
+  advantage of seeing exactly what a human sees. It never degrades into clicking
+  Post. `--dry-run` surfaces this too where the block is detectable pre-submit.
+
 ## 5. Composer automation + the never-publish boundary
 
 `stageDraft(post, opts) -> StageDraftResult` in `src/reddit/draftPoster.ts`,
@@ -291,6 +311,9 @@ mirroring X's/LinkedIn's `stagePost` and reusing their shared primitives
 1. `getBrowserContext()` (persistent Reddit profile) → new page.
 2. **Preflight** (§4) via the reader — abort on any violation.
 3. Open the composer for the target sub (`/r/<sub>/submit`, self-post tab).
+   **Eligibility check (§4.1):** if the composer surfaces a karma/age/
+   approved-submitter/ban/restricted block, stop and return a plain
+   *"can't post to r/<sub>: <reason>"* — never proceed toward Post.
 4. **Switch to Markdown mode**, then `typeText` the title and the Markdown body.
 5. **Flair (if required/requested):** open the flair picker and select the
    resolved template.
@@ -381,3 +404,6 @@ headful (`--inspect`) against real Reddit before claiming any of this works:
   validate the PLATFORM_CAPABILITIES render profile empirically.
 - **Native draft semantics.** Confirm "Save Draft" stages a private draft
   reachable later, and that the verify step can find it reliably.
+- **Eligibility-gate detection.** Karma/age gates are AutoMod-enforced and not in
+  the JSON; confirm `draft` reliably catches the composer's eligibility block and
+  phrases it plainly (§4.1) rather than failing opaquely. Verify against r/codex.
