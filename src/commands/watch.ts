@@ -255,6 +255,18 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
       // are kept (see langFilter.ts). Empty allow-list = pass-through.
       const { kept, filtered: langFiltered } = filterByLanguage(newPosts, allowedLanguages);
 
+      // Drift guard: `legacy.lang` is where X puts the tweet language TODAY, but X
+      // does migrate fields out of `legacy` over time (it already moved the
+      // author's screen_name/name into `core`). If a filter is active yet NOT ONE
+      // pulled post carried a language code, the field has almost certainly moved —
+      // the filter is silently inert (fails open → everything kept, wrong-language
+      // posts return). Surface that loudly rather than pass them through in silence.
+      if (allowedLanguages.length > 0 && pulled.length > 0 && pulled.every((p) => !p.lang?.trim())) {
+        errors.push(
+          "language filter active but NO pulled post carried a language code — X likely moved the `lang` field; the filter is currently INERT (all posts kept). Re-calibrate the lang extraction in src/x/reader.ts.",
+        );
+      }
+
       const stats: PollStats = {
         newCount: newPosts.length,
         pulledCount: pulled.length,
