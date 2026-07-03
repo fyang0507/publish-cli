@@ -105,7 +105,8 @@ of people, build a List once, then keep it fresh:
 ```bash
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--description <t>] \
                  [--x-list <id>] [--private|--public] [--limit <n>] [--dry-run] [--json] [--inspect]
-publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text> | --persona-from <file>] \
+publish x watch  [--query <q>...] [--x-list <id>...] [--languages en,zh] \
+                 [--persona <text> | --persona-from <file>] \
                  [--config <watch.yaml>] [--validate-config] [--no-triage] \
                  [--format text|json|markdown] [--json] [--out <file>] [--inspect]
 publish x draft  --format tweet|thread|article (--text <content> | --from <file.md>) [--long] [--dry-run] [--inspect]
@@ -124,7 +125,12 @@ publish linkedin draft (--text <content> | --from <file.md>) [--media <path>...]
   final `member_count` is read back to verify.
 - **watch** — `--query`/`--x-list` merge with `watch.yaml` (both repeatable; each
   `--x-list` takes one X List id). Accounts are watched via a List, never one-by-one.
-  `--no-triage` skips the LLM and emits raw deduped posts (the caller judges them).
+  `--languages en,zh` (or `allowed_languages` in `watch.yaml`) restricts candidates
+  by language — posts KNOWN to be outside the list are dropped BEFORE triage (saving
+  classifier/drafting tokens); untagged posts are kept. The flag OVERRIDES the config
+  value; `--languages all` disables a configured filter. The dropped count is reported
+  in every format (`languageFiltered` in JSON) so a scheduled run can explain an empty
+  result. `--no-triage` skips the LLM and emits raw deduped posts (the caller judges them).
   `--persona` supplies the free-text reply-worthiness rubric at call time, or
   `--persona-from <file>` loads it from a file (mutually exclusive with `--persona`);
   either overrides `watch.yaml`. **The rubric MUST be self-contained** — the

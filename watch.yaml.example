@@ -34,6 +34,17 @@ per_origin_limit: 25
 # middle is elided. Applies to --no-triage runs too (it governs candidate assembly).
 max_thread_chars: 1500
 
+# Restrict candidates to these languages (BCP-47-ish codes). Posts KNOWN to be
+# outside the list are dropped BEFORE triage, so wrong-audience content never burns
+# classifier/drafting tokens; untagged/undetermined posts are kept. Codes are
+# normalized (case + region stripped: "zh-CN" -> "zh"). EMPTY = no filter (allow
+# all). Override per run with `--languages en,zh` (or `--languages all` to disable).
+# Language-filtered counts appear in the watch output so a scheduled run can
+# explain why it produced no candidates.
+allowed_languages: []
+#   - en
+#   - zh
+
 # Triage criteria — passed to the cheap model as the rubric for scoring each post on
 # whether it's worth a follow-up reply. Higher score = stronger follow-up candidate.
 triage:

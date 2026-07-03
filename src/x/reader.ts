@@ -47,6 +47,12 @@ export interface XPost {
   replyToStatusId?: string;
   /** Parent tweet's author id, if a reply (legacy.in_reply_to_user_id_str). */
   replyToUserId?: string;
+  /**
+   * Language code X assigned to the tweet (legacy.lang), e.g. "en", "zh", "fr",
+   * or an undetermined sentinel ("und", "qme"). Free on the captured payload;
+   * consumed by the channel-agnostic language filter (src/langFilter.ts).
+   */
+  lang?: string;
   metrics?: {
     likes?: number;
     reposts?: number;
@@ -271,6 +277,10 @@ function extractTweets(root: unknown, origin: string): XPost[] {
         legacy.in_reply_to_status_id_str != null ? String(legacy.in_reply_to_status_id_str) : undefined;
       const replyToUserId =
         legacy.in_reply_to_user_id_str != null ? String(legacy.in_reply_to_user_id_str) : undefined;
+      // X's own language classification, already on the wire — used by the
+      // channel-agnostic language filter to drop wrong-audience posts pre-triage.
+      const lang: string | undefined =
+        typeof legacy.lang === "string" && legacy.lang.trim() ? legacy.lang : undefined;
       out.push({
         id,
         url: handle
@@ -285,6 +295,7 @@ function extractTweets(root: unknown, origin: string): XPost[] {
         conversationId,
         replyToStatusId,
         replyToUserId,
+        lang,
         metrics: {
           likes: legacy.favorite_count,
           reposts: legacy.retweet_count,

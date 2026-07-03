@@ -159,6 +159,15 @@ export interface WatchConfig {
    * so it applies to --no-triage runs too.
    */
   max_thread_chars: number;
+  /**
+   * Allow-list of candidate languages (BCP-47-ish codes, e.g. ["en", "zh"]).
+   * EMPTY = no filter / allow all — the public-repo default. When set, posts
+   * KNOWN to be outside the list are dropped before triage so they don't burn
+   * classifier/drafting tokens; untagged/undetermined posts are kept. Codes are
+   * normalized at use (case + region stripped, "zh-CN" -> "zh"). Applied via the
+   * channel-agnostic src/langFilter.ts, so any future watch channel reuses it.
+   */
+  allowed_languages: string[];
   triage: TriageConfig;
 }
 
@@ -168,6 +177,7 @@ const WATCH_DEFAULTS: WatchConfig = {
   lists: [],
   per_origin_limit: 25,
   max_thread_chars: 1500,
+  allowed_languages: [],
   triage: {
     persona: "",
     min_score: 60,
@@ -175,7 +185,7 @@ const WATCH_DEFAULTS: WatchConfig = {
   },
 };
 
-const TOP_KEYS = ["triage_model", "queries", "lists", "per_origin_limit", "max_thread_chars", "triage"] as const;
+const TOP_KEYS = ["triage_model", "queries", "lists", "per_origin_limit", "max_thread_chars", "allowed_languages", "triage"] as const;
 const TRIAGE_KEYS = ["persona", "min_score", "batch_size"] as const;
 
 /**
@@ -248,6 +258,13 @@ export function loadWatchConfig(path?: string): WatchConfig {
   if ("max_thread_chars" in parsed) {
     if (isPositiveInt(parsed.max_thread_chars)) out.max_thread_chars = parsed.max_thread_chars;
     else errors.push(`max_thread_chars: expected a positive integer, got ${describe(parsed.max_thread_chars)}`);
+  }
+  if ("allowed_languages" in parsed) {
+    if (isStringArray(parsed.allowed_languages)) out.allowed_languages = parsed.allowed_languages;
+    else
+      errors.push(
+        `allowed_languages: expected a list of language-code strings (e.g. [en, zh]), got ${describe(parsed.allowed_languages)}`,
+      );
   }
   if ("triage" in parsed) {
     if (!isPlainObject(parsed.triage)) {
