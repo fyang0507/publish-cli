@@ -59,3 +59,39 @@ Gotchas found during live calibration (2026-07) — the likely drift points:
   aria-labels — match by text). NEVER click "Discard" or the "Post" button; both
   are documented FORBIDDEN selectors. Verification reopens the composer and matches
   the staged text in the auto-restored editor.
+
+## Reddit (`publish reddit inspect` / `search` / `draft`)
+
+The Reddit channel drifts the same way and is calibrated the same way — re-run with
+`--inspect` and update selectors. Its selectors live in `REDDIT_LOGIN_SELECTORS`
+(`src/reddit/session.ts`) and `REDDIT_COMPOSER_SELECTORS`
+(`src/reddit/draftPoster.ts`); the profile is `~/.publish-cli/reddit-profile`.
+
+Likely drift points to check headful:
+
+- **Login is captcha-heavy.** First headful login usually needs a manual CAPTCHA /
+  challenge solve; headless login is likely blocked (same class as X). This is the
+  highest onboarding risk. The sign-in control and the optional email/identifier
+  challenge (`identifierChallengeInput`) may need re-selection; the flow falls back
+  to pressing Enter on the focused field. Logged-in signal (`loggedInSignal`) should
+  be a durable marker, not a hashed feed class.
+- **Reads (inspect/search).** Confirm `about.json` / `about/rules.json` /
+  `link_flair_v2` / `subreddits/search.json` still return the promised fields
+  through the authenticated context, and that `post_requirements` is captured from
+  the composer gateway response (match by a stable operation/path — hashes drift).
+  Private/quarantined subs should degrade to a note, not error the whole run; watch
+  for read rate-limiting.
+- **Composer**: the self-post `submit` page/tab, the **Markdown-mode toggle** (must
+  switch the body editor to raw `<textarea>` so the body is taken verbatim), the
+  title/body editors, the **flair picker**, and the `nsfw`/`spoiler` toggles all
+  drift and need live calibration.
+- **Save/verify**: save is the composer's **"Save Draft"** affordance — the ONLY
+  save path. NEVER locate or click **"Post"** (a documented FORBIDDEN selector); if
+  "Save Draft" doesn't resolve, the flow bails rather than falling through to
+  another button (same safeguard as LinkedIn). Verification reopens the drafts list
+  and matches the staged title / leading body.
+- **Eligibility gates (karma / account age)** are AutoMod-enforced and NOT in the
+  JSON, so they only surface authoritatively at draft time — confirm `draft`
+  reliably catches the composer's "not enough karma" / "account too new" /
+  "approved submitters only" / restricted block and returns a plain message rather
+  than failing opaquely or proceeding toward Post.

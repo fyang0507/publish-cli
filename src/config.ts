@@ -35,6 +35,11 @@ export interface PublishEnv {
   LI_PASSWORD: string;
   /** Used to answer LinkedIn's email/identifier confirmation challenge. */
   LI_EMAIL: string;
+  /** Reddit login username. */
+  REDDIT_USERNAME: string;
+  REDDIT_PASSWORD: string;
+  /** Used to answer Reddit's email/identifier confirmation challenge. */
+  REDDIT_EMAIL: string;
 }
 
 const DEFAULT_TRIAGE_MODEL = "gemini-3.5-flash";
@@ -48,6 +53,9 @@ export const env: PublishEnv = {
   LI_USERNAME: process.env.LI_USERNAME ?? "",
   LI_PASSWORD: process.env.LI_PASSWORD ?? "",
   LI_EMAIL: process.env.LI_EMAIL ?? "",
+  REDDIT_USERNAME: process.env.REDDIT_USERNAME ?? "",
+  REDDIT_PASSWORD: process.env.REDDIT_PASSWORD ?? "",
+  REDDIT_EMAIL: process.env.REDDIT_EMAIL ?? "",
 };
 
 /**
@@ -75,6 +83,10 @@ export interface DataPaths {
   liProfileDir: string;
   /** Harvested LinkedIn cookie cache as JSON. */
   liCookieCache: string;
+  /** Persistent Playwright user-data-dir for the logged-in Reddit profile. */
+  redditProfileDir: string;
+  /** Harvested Reddit cookie cache as JSON. */
+  redditCookieCache: string;
   /** better-sqlite3 dedupe store — in the data repo (`<dataRepo>/.publish-cli/`) when resolvable, else baseDir. */
   dbFile: string;
 }
@@ -97,13 +109,15 @@ export function dataPaths(): DataPaths {
   const baseDir = resolveBaseDir();
   const xProfileDir = join(baseDir, "x-profile");
   const liProfileDir = join(baseDir, "li-profile");
+  const redditProfileDir = join(baseDir, "reddit-profile");
 
   // Machine-local SESSION/secret artifacts (browser profile + cookie cache) live
   // under baseDir (~/.publish-cli), off any synced drive. One persistent profile
-  // per browser-driven channel (X, LinkedIn).
+  // per browser-driven channel (X, LinkedIn, Reddit).
   mkdirSync(baseDir, { recursive: true });
   mkdirSync(xProfileDir, { recursive: true });
   mkdirSync(liProfileDir, { recursive: true });
+  mkdirSync(redditProfileDir, { recursive: true });
 
   // DURABLE state (the dedupe DB) lives in the DATA REPO (the agent workspace) so
   // it travels with the workspace rather than the machine. Falls back to baseDir
@@ -118,6 +132,8 @@ export function dataPaths(): DataPaths {
     xCookieCache: join(baseDir, "x-cookies.json"),
     liProfileDir,
     liCookieCache: join(baseDir, "li-cookies.json"),
+    redditProfileDir,
+    redditCookieCache: join(baseDir, "reddit-cookies.json"),
     dbFile: join(dbDir, "publish.db"),
   };
   return cachedPaths;

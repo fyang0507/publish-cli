@@ -1,6 +1,6 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH) **and LinkedIn** (PUBLISH — `linkedin draft`). Every PUBLISH path is **draft-only and never posts.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH), **LinkedIn** (PUBLISH — `linkedin draft`) **and Reddit** (PUBLISH — `reddit inspect` / `search` / `draft`, self-posts). Every PUBLISH path is **draft-only and never posts.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
 
 ## What it does (X channel)
 
@@ -11,6 +11,13 @@ A per-channel content-distribution toolkit for growing the operator's audience i
 ## What it does (LinkedIn channel)
 
 - **`publish linkedin draft`** — owned-content publisher. Turns inline text (`--text`, the primary path) or a markdown file (`--from`) into a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) and stages it as a **native draft on LinkedIn** via "Save as draft". Same boundary as X — it **never posts**. Surfaces an above-the-fold hook advisory and a first-comment-link advisory; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility caveat). Selectors are best-effort — calibrate live with `--inspect`.
+
+## What it does (Reddit channel)
+
+Reddit self-posts are **contract-gated**: each subreddit imposes its own rules (mandatory flair, title regex, allowed post types), so publishing is a two-phase flow — discover the contract, then draft against it. Discovery is **facts only, no LLM ranking** (the agent judges where to post).
+
+- **`publish reddit inspect <sub>...`** / **`publish reddit search "<query>"`** — read-only discovery. `inspect` reports each named subreddit's full posting contract (subscribers, `submission_type`, rules, flair templates, post requirements) with a one-line verdict; `search` lists candidate subreddits for a topic (`--limit`, `--include-nsfw`). Both take `--json` for machine output.
+- **`publish reddit draft`** — owned-content publisher. Turns inline text (`--text`) or a markdown file (`--from`) into a single **self-post** for one subreddit (`--subreddit`, `--title`, optional `--flair`/`--nsfw`/`--spoiler`) and stages it as a **native draft on Reddit** via "Save Draft". Because Reddit renders Markdown natively, the body is kept ~verbatim (typed in Markdown mode) rather than flattened. Preflights the target subreddit's contract before staging and **never posts**. `--subreddit`/`--title`/`--flair` may also come from `--from` frontmatter.
 
 ## Install
 
@@ -34,6 +41,7 @@ npx playwright install chromium
   - `TRIAGE_MODEL` — cheap triage model id (default `gemini-3.5-flash`).
   - `X_USERNAME` / `X_PASSWORD` / `X_EMAIL` — X credential login. No 2FA; `X_EMAIL` answers X's email/identifier confirmation challenge.
   - `LI_USERNAME` / `LI_PASSWORD` / `LI_EMAIL` — LinkedIn credential login (same persistent-profile model as X); `LI_EMAIL` answers LinkedIn's identifier confirmation checkpoint. Only needed for `publish linkedin draft`.
+  - `REDDIT_USERNAME` / `REDDIT_PASSWORD` (/ `REDDIT_EMAIL` if the login challenge needs it) — Reddit credential login (same persistent-profile model as X). Only needed for the `reddit` channel. Reddit login is captcha-heavy — complete any challenge in the headful `--inspect` window on first login.
   - `PUBLISH_DATA_DIR` (optional) — runtime data dir, default `~/.publish-cli`.
 - **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, and the triage rubric. The triage rubric (`triage.persona`, or `--persona` / `--persona-from <file>`) **must be self-contained** — the classifier sees only the rubric plus each candidate post, never the source essay, campaign brief, or surrounding agent context, so spell out the actual selection criteria inline. Validate a config cheaply (no browser) with `publish x watch --validate-config`.
 
@@ -70,6 +78,10 @@ publish x draft --format tweet|thread|article (--text <content> | --from <base.m
 publish x reply --to <id|url> (--text <content> | --from <base.md>) [--long] [--dry-run] [--force] [--inspect]
 
 publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
+
+publish reddit inspect <subreddit>... [--json] [--inspect]
+publish reddit search "<query>" [--limit <n>] [--include-nsfw] [--json] [--inspect]
+publish reddit draft --subreddit <name> --title <title> (--text <content> | --from <base.md>) [--flair <id|text>] [--nsfw] [--spoiler] [--dry-run] [--inspect]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.

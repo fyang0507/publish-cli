@@ -5,6 +5,9 @@ import { registerDraftCommand } from "./commands/draft.js";
 import { registerReplyCommand } from "./commands/reply.js";
 import { registerCreateWatchListCommand } from "./commands/create-watch-list.js";
 import { registerLinkedInDraftCommand } from "./commands/linkedin-draft.js";
+import { registerRedditInspectCommand } from "./commands/reddit-inspect.js";
+import { registerRedditSearchCommand } from "./commands/reddit-search.js";
+import { registerRedditDraftCommand } from "./commands/reddit-draft.js";
 
 const program = new Command();
 
@@ -40,5 +43,20 @@ const linkedin = program
 
 // --- draft: owned-content publisher (native LinkedIn post drafts, never posts) ---
 registerLinkedInDraftCommand(linkedin);
+
+// Reddit channel: inspect/search (subreddit facts) + draft (native self-post
+// drafts, never posts). No watch (borrowed-reach) loop today.
+const reddit = program
+  .command("reddit")
+  .description("Reddit channel: inspect/search (subreddit facts) + draft (native self-post drafts, never posts)");
+
+// --- inspect: subreddit facts (rules/flair/posting requirements) ---
+registerRedditInspectCommand(reddit);
+
+// --- search: find subreddits / posts ---
+registerRedditSearchCommand(reddit);
+
+// --- draft: owned-content publisher (native Reddit self-post drafts, never posts) ---
+registerRedditDraftCommand(reddit);
 
 program.parse();

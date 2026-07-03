@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts) from inline text or a Markdown file. Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, or turn Markdown into X-ready or LinkedIn-ready drafts.
+description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts; Reddit self-posts) from inline text or a Markdown file. Also inspects/searches subreddits for their posting contracts (facts only). Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, discover subreddit posting rules, or turn Markdown into X-ready, LinkedIn-ready, or Reddit-ready drafts.
 ---
 
 `publish` is a CLI that turns Markdown into X (Twitter) drafts and surfaces reply
@@ -22,6 +22,13 @@ send/approval flow are the caller's concern, not this CLI's.
 - **reply** — stage a native **reply** draft targeted at a specific tweet.
 - **linkedin draft** — turn inline text (or a Markdown file) into a native
   **LinkedIn post** draft (single post, 3000-char cap, optional attached media).
+- **reddit inspect / search** — read-only subreddit discovery (facts only, no LLM
+  ranking): `inspect <sub>…` reports each named subreddit's posting contract
+  (subscribers, allowed post types, rules, flairs, post requirements); `search
+  "<query>"` lists candidate subreddits for a topic.
+- **reddit draft** — turn inline text (or a Markdown file) into a native **Reddit
+  self-post** draft for one subreddit (title + Markdown body kept ~verbatim,
+  optional flair/nsfw/spoiler), preflighting that subreddit's rules.
 
 ## When to use
 
@@ -41,6 +48,13 @@ send/approval flow are the caller's concern, not this CLI's.
   advised into the **first comment**, not the body; `--media <path>` (repeatable)
   attaches images; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility
   caveat). Stages a native draft and **never posts**.
+- Publish owned content to Reddit → first discover the target community's rules,
+  then draft. Name candidates you already know and read their contracts with
+  `publish reddit inspect <sub>…`, or find new ones with `publish reddit search
+  "<query>"` → pick names → `inspect` them. Then stage the self-post with `publish
+  reddit draft --subreddit <name> --title "…" --from <file.md>` (or `--text`). The
+  CLI reports subreddit facts; **you** decide which subreddit fits (no LLM ranking).
+  Because Reddit renders Markdown, the body is kept ~verbatim (not flattened).
 
 Do **not** use it to post/publish (it only drafts), and do not use it to *decide*
 content — supply the Markdown (and, for triage, the free-text persona/rubric) yourself.
@@ -111,6 +125,10 @@ publish x watch  [--query <q>...] [--x-list <id>...] [--persona <text> | --perso
 publish x draft  --format tweet|thread|article (--text <content> | --from <file.md>) [--long] [--dry-run] [--inspect]
 publish x reply  --to <id|url> (--text <content> | --from <file.md>) [--long] [--dry-run] [--force] [--inspect]
 publish linkedin draft (--text <content> | --from <file.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
+publish reddit inspect <subreddit>... [--json] [--inspect]
+publish reddit search "<query>" [--limit <n>] [--include-nsfw] [--json] [--inspect]
+publish reddit draft --subreddit <name> --title "<title>" (--text <content> | --from <file.md>) \
+                 [--flair <id|text>] [--nsfw] [--spoiler] [--dry-run] [--inspect]
 ```
 
 - **create-watch-list** — seeds a List from the accounts `--handle` (default: the
@@ -157,6 +175,26 @@ publish linkedin draft (--text <content> | --from <file.md>) [--media <path>...]
   (repeatable) attaches images in order; `--bold` opts into Unicode bold; `--dry-run`
   generates + prints without a browser; `--inspect` runs headful. It surfaces an
   above-the-fold hook advisory and advises links into the first comment. Never posts.
+- **reddit inspect / search** — read-only discovery, **facts only, no LLM ranking**
+  (deliberately unlike `x watch`). `inspect` takes one or more subreddit names and
+  merges four reads per sub (about / rules / flair templates / composer post
+  requirements) into the full contract plus a one-line verdict (self-posts allowed?
+  flair required? would the title pass?). `search` takes a free-text query and lists
+  shallow candidates (`--limit`, default 25; `--include-nsfw` to include over-18
+  subs). Both emit a human report by default or a structured array with `--json`.
+  They compose: `search` → agent picks names → `inspect` those → agent decides →
+  `draft`.
+- **reddit draft** — inline `--text` or `--from <file.md>` (`-` = stdin); one
+  `--subreddit` (required, or from frontmatter), a `--title` (≤300 chars, or from
+  frontmatter / the Markdown H1). Body is **kept ~verbatim** (Reddit renders
+  Markdown; typed in the composer's Markdown mode, not flattened), capped at ~40 000
+  chars. `--flair <id|text>` resolves against the sub's flair templates;
+  `--nsfw`/`--spoiler` set the flags. Before staging it **preflights the target
+  subreddit's contract** (flair required?, title regex, body limits) and fails early
+  with an actionable message rather than staging a rejectable draft; karma/age gates
+  are AutoMod-enforced and only surface authoritatively at draft time. `--dry-run`
+  generates + runs the preflight without a browser; `--inspect` runs headful. Stages
+  via **"Save Draft"** and never posts. There is **no `--media`** (self-post only).
 
 ## Platform constraints (what each surface does NOT support)
 
