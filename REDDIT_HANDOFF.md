@@ -1,16 +1,33 @@
-# Reddit channel — handoff (as of 2026-07-02)
+# Reddit channel — handoff (updated 2026-07-03: LIVE-VERIFIED ✅)
 
-Self-contained pickup notes for a fresh agent. Read this, then
+Self-contained pickup notes. Read this, then
 [REDDIT_DESIGN.md](./REDDIT_DESIGN.md) for the full design.
 
 ## TL;DR
 
 A **browser-driven** Reddit PUBLISH channel (`publish reddit inspect | search |
-draft`, self-posts only, **draft-only, never posts**) is **implemented,
-compile-green, and pushed** to branch `worktree-reddit-channel-design` (PR #27).
-What's left is **real-data live verification**, which is currently **blocked by a
-Reddit IP ban on this machine** (see “Blocker” below) and by the one manual step
-only the human can do: a **headful login** (captcha).
+draft`, self-posts only, **draft-only, never posts**) is **implemented and
+LIVE-VERIFIED end-to-end** on branch `worktree-reddit-channel-design` (PR #27).
+
+**2026-07-03 live verification (headful, operator solved the login captcha):**
+- `reddit search` + logged-out `reddit inspect codex` return **real data**.
+- Credential login succeeds + persists; a **real `reddit draft` to r/codex stages
+  a native PRIVATE draft** (login → preflight → title/body → flair → Save Draft),
+  confirmed in Reddit Drafts, **nothing posted**. The delete path also works
+  (test drafts cleaned up).
+- Several selectors were **live-calibrated** against Reddit's new
+  `<shreddit-composer>` (see commit `ec82f72`): `loggedInSignal`, the flair-list
+  endpoint, the body editor, and the flair modal.
+
+**Known limitation (surfaced, not silent):** Reddit's new composer hydrates its
+"Switch to Markdown" toggle unreliably, so the body is often entered in the rich
+editor and markdown renders literally; `stageDraft` emits an advisory telling the
+operator to flip "… → Switch to Markdown" in the draft before posting. Every draft
+is human-reviewed pre-post, so this is acceptable.
+
+Note: the 403 "network security" wall blocks the **headless** read path but a
+**headful** real Chrome (persistent profile) passes — always verify live with
+`--inspect`.
 
 ## Where things live
 
