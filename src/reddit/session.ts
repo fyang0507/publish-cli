@@ -147,14 +147,16 @@ export const REDDIT_LOGIN_SELECTORS = {
 
   // Logged-in signal (used by isLoggedIn()/ensureSession()). BEST-EFFORT / NEEDS
   // LIVE CALIBRATION: Reddit's shell uses shadowed web components, so durable
-  // markers are the user-menu avatar button and the "Create Post" affordance.
-  // LOCALE NOTE: aria-label text is English-UI (best-effort).
+  // markers are the user-menu avatar / dropdown — which render ONLY when logged in.
+  // Do NOT add `a[href^="/submit"]` or `button[aria-label="Create a post"]` here:
+  // Reddit renders those on the LOGGED-OUT shell too (they open the login modal),
+  // so isLoggedIn() would false-positive → skip credential login → cookie harvest
+  // throws "reddit_session cookie missing". A false-negative here is the safe
+  // direction (it just re-attempts login). LOCALE NOTE: aria-label is English-UI.
   loggedInSignal: [
     'button[aria-label*="Expand user menu"]',
     'faceplate-tracker[noun="user_avatar"]',
-    'a[href^="/submit"]',
     "#USER_DROPDOWN_ID",
-    'button[aria-label="Create a post"]',
   ],
 } as const;
 

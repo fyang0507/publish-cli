@@ -156,13 +156,23 @@ export const REDDIT_COMPOSER_SELECTORS = {
   // insufficient karma, account too new, approved-submitters-only, banned, or
   // restricted. If ANY of these resolve, stageDraft stops and returns .blocked —
   // it never proceeds toward Post. NEEDS LIVE CALIBRATION (wording drifts).
+  // Every entry is scoped to a LEAF element (no child elements, `not(*)`) so
+  // normalize-space() reflects that element's OWN text — NOT text aggregated from
+  // all descendants. Without `not(*)`, an unanchored `//*[contains(...)]` matches
+  // <html>/<body> (they contain every word on the page), and optionalLocator's
+  // .first() then resolves the root as a "block" — falsely refusing to draft on
+  // nearly every sub whose page chrome mentions "karma"/"post"/"restricted". The
+  // karma clause additionally requires a posting/requirement cue in the SAME leaf
+  // so an incidental karma counter (e.g. "1.2k karma") doesn't trip it. This
+  // biases toward false-NEGATIVE (safe: the composer + "Save Draft" path stays the
+  // authoritative gate, and never-posts is unaffected) over false-positive.
   eligibilityBlockSignal: [
-    '//*[contains(translate(normalize-space(),"KARMA","karma"),"karma")]',
-    '//*[contains(normalize-space(),"too new") or contains(normalize-space(),"account age") or contains(normalize-space(),"account is too")]',
-    '//*[contains(normalize-space(),"approved") and contains(normalize-space(),"submitter")]',
-    '//*[contains(normalize-space(),"banned from")]',
-    '//*[contains(normalize-space(),"restricted") and contains(normalize-space(),"post")]',
-    '//*[contains(normalize-space(),"You don\'t have permission") or contains(normalize-space(),"not allowed to post")]',
+    '//*[not(*)][contains(translate(normalize-space(),"KARMA","karma"),"karma")][contains(normalize-space(),"post") or contains(normalize-space(),"require") or contains(normalize-space(),"need") or contains(normalize-space(),"enough") or contains(normalize-space(),"must") or contains(normalize-space(),"at least")]',
+    '//*[not(*)][contains(normalize-space(),"too new") or contains(normalize-space(),"account age") or contains(normalize-space(),"account is too")]',
+    '//*[not(*)][contains(normalize-space(),"approved") and contains(normalize-space(),"submitter")]',
+    '//*[not(*)][contains(normalize-space(),"banned from")]',
+    '//*[not(*)][contains(normalize-space(),"restricted") and contains(normalize-space(),"post")]',
+    '//*[not(*)][contains(normalize-space(),"You don\'t have permission") or contains(normalize-space(),"not allowed to post")]',
   ],
 
   // The PUBLISH/POST button — listed ONLY so we are explicit about what we must

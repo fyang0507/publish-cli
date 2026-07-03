@@ -522,30 +522,26 @@ export class BrowserRedditReader implements RedditReader {
     let payload: unknown | null = null;
 
     const isReqResponse = (r: Response): boolean => r.url().includes("post_requirements");
-    const onResponse = async (resp: Response): Promise<void> => {
-      if (payload !== null || !isReqResponse(resp)) return;
-      try {
-        payload = await resp.json();
-      } catch {
-        // Non-JSON — ignore.
-      }
-    };
-
-    page.on("response", onResponse);
+    // Register the wait BEFORE navigating so an early response isn't missed, and
+    // read the body from the returned Response itself — do NOT rely on a separate
+    // "response" listener whose async resp.json() would still be in flight when the
+    // finally block closes the page (page.close() aborts the read → payload null).
+    const respPromise = page
+      .waitForResponse(isReqResponse, { timeout: 15_000 })
+      .catch(() => null);
     try {
       await page.goto(`${WWW}/r/${encodeURIComponent(sub)}/submit?type=TEXT`, {
         waitUntil: "domcontentloaded",
         timeout: 45_000,
       });
-      await page
-        .waitForResponse(isReqResponse, { timeout: 15_000 })
-        .catch(() => {
-          /* no capture — return whatever (null) we have */
-        });
+      const resp = await respPromise;
+      if (resp) {
+        // Await the body BEFORE the finally closes the page.
+        payload = await resp.json().catch(() => null);
+      }
     } catch {
       // Navigation hiccup — return whatever (null) we captured.
     } finally {
-      page.off("response", onResponse);
       await page.close().catch(() => {});
     }
     return payload;
