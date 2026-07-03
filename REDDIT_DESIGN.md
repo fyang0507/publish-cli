@@ -1,25 +1,27 @@
 # Design: Reddit self-post channel (`publish reddit inspect` / `search` / `draft`)
 
-> **Status:** design proposal (Phase 2, per [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) §8;
-> the API-channel divergence this doc builds on was called in
-> [LINKEDIN_DESIGN.md](./LINKEDIN_DESIGN.md) §3.1).
+> **Status:** design proposal (Phase 2, per [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) §8).
 > **Scope:** the Reddit **PUBLISH** capability only, and within it **text /
 > self-posts only**. Three flat sibling actions (matching the toolkit's two-level
 > `publish <channel> <action>` grammar): two read-only discovery verbs —
 > **`inspect <sub>…`** (report each named subreddit's posting contract:
-> subscribers, allowed types, rules, `post_requirements`, flairs) and
+> subscribers, allowed types, rules, post requirements, flairs) and
 > **`search <query>`** (list candidate subreddits) — plus **`draft`**, staging a
 > native Reddit **draft** (subreddit + title + Markdown body + optional flair).
 > Link/image/gallery posts, multi-subreddit repost in one command, and Reddit
 > **WATCH** (monitoring → reply candidates) are separate designs (§8).
 >
+> **Architecture: browser-driven** (mirrors X and LinkedIn's persistent-profile
+> model) — **not** the official Reddit API. This **reverses** the API classification
+> in [LINKEDIN_DESIGN.md](./LINKEDIN_DESIGN.md) §3.1 and [PRODUCT_SPEC.md](./PRODUCT_SPEC.md)
+> §2.2; see §3.1 for why the facts changed.
+>
 > **Hard boundary (unchanged):** the publisher stops at a **native draft staged
-> on the platform**. It MUST NOT publish. Reddit's official API has a first-class
-> **Draft** primitive (`POST /api/draft`) — drafts stay private until an explicit
-> `submit`, which this channel **never implements**. So the boundary holds exactly
-> as it does for X ("Unsent") and LinkedIn ("Save as draft"), and here it is even
-> stronger: the submit endpoint is simply absent from the code, not a
-> forbidden-button we must avoid clicking.
+> on the platform**. It MUST NOT publish. Reddit's web composer has a real
+> **"Save Draft"**, so the boundary holds exactly as for X ("Unsent") and
+> LinkedIn ("Save as draft"): the code clicks Save Draft and **never** clicks
+> Post — which appears in the composer selectors only as a documented forbidden
+> selector.
 
 ---
 
@@ -41,9 +43,9 @@ Two things make Reddit unlike either channel we ship:
    subreddit imposes its own rules: mandatory flair, title regex / required or
    banned prefixes (`[Tag]`), allowed post types (some ban self-posts, some ban
    links), body length floors/ceilings, and account karma/age gates. This axis
-   does not exist for X or LinkedIn and is the main new complexity. Crucially,
-   Reddit exposes these rules **programmatically** (§4), so we can validate a
-   draft against the target subreddit's contract before staging it.
+   does not exist for X or LinkedIn and is the main new complexity. Reddit still
+   exposes these rules to a logged-in session (§3.3), so we can validate a draft
+   against the target subreddit's contract before staging it.
 
 ### 1.1 The workflow: search / inspect → decide → draft
 
@@ -57,7 +59,7 @@ workspace):
    candidate subreddits it doesn't already know (breadth; §2).
 2. **`publish reddit inspect <sub…>`** returns the **mechanical facts** for each
    candidate — subscribers, `submission_type` (any/self/link), `over18`, the
-   `post_requirements` (flair required?, title regex, body limits), the flair
+   post requirements (flair required?, title regex, body limits), the flair
    templates, and the rules text. **No ranking, no LLM** — deliberately unlike
    `x watch`'s Gemini triage. The CLI reports; the agent judges.
 3. **Agent decides** the target (and, for a repost, the *set* of targets and any
@@ -70,15 +72,15 @@ How it differs from the X channel we already ship:
 
 | Dimension | X (existing) | Reddit self-post (this design) |
 |---|---|---|
-| Transport | browser (persistent Playwright profile) | **official Reddit API (OAuth)** — no browser at runtime (§3) |
+| Transport | browser (persistent Playwright profile) | **same** — browser, persistent profile, your own login (§3) |
 | Target | your own timeline | **a chosen subreddit** — required, with its own rules (§4) |
 | Title | none | **required, ≤ 300 chars** (may face a subreddit title regex) |
 | Body | tweet / thread / article | **single Markdown body, ≤ ~40 000 chars** |
 | Formatting | plain (tweet) / rich (article) | **Markdown, kept ~verbatim** (Reddit renders it) — not flattened |
-| Flair | n/a | **often mandatory** — validated & set via API |
+| Flair | n/a | **often mandatory** — read from the sub, set in the composer |
 | Flags | n/a | optional `--nsfw` / `--spoiler` |
 | Media | article hero (5:2, required) | **none this phase** — self-post only (§8) |
-| Draft boundary | native Unsent draft, never Post | native **API Draft**, `submit` never implemented |
+| Draft boundary | native Unsent draft, never Post | composer **"Save Draft"**, never Post |
 
 ## 2. CLI surface
 
@@ -86,24 +88,26 @@ Three flat sibling actions — two read-only discovery verbs (`search`, `inspect
 that precede the write (`draft`), the agent bridging them. Kept flat (not nested
 under a `discover` group) to match the toolkit's two-level `publish <channel>
 <action>` grammar, exactly as X exposes `watch` / `draft` / `reply` as siblings.
-Both discovery verbs are **facts only, no LLM ranking** — read-only, no draft, no
-dedupe state (the agent proposes and decides; §1.1).
+Both discovery verbs are **facts only, no LLM ranking** — read-only (the agent
+proposes and decides; §1.1). All three drive the shared persistent Reddit browser
+session (§3.2); `--inspect` runs any of them headful for first login / calibration.
 
 **`inspect` — depth: the full posting contract for each named subreddit.**
 
 ```
 publish reddit inspect <subreddit>...              # one or more names (the agent already knows them)
                        [--json]                    # machine-readable (default: human report)
+                       [--inspect]                 # headful (first login / selector calibration)
 ```
 
-For each `<subreddit>` it merges four read endpoints into the full contract:
+For each `<subreddit>` it merges four reads (§3.3) into the full contract:
 
-| Group | Facts | Endpoint |
+| Group | Facts | Source |
 |---|---|---|
-| Reach & type | subscribers, active users, `subreddit_type` (public/restricted/private), `submission_type` (any/self/link), `over18`, quarantined | `GET /r/{sub}/about` |
-| Posting contract | `is_flair_required`, `is_title_required`, `title_regexes`, title required/blacklisted strings, `body_restriction_policy`, body min/max length, `guidelines_text` | `GET /api/v1/{sub}/post_requirements` |
-| Flairs | `{id, text, mod_only, editable}[]` | `GET /r/{sub}/api/link_flair_v2` |
-| Rules | `{short_name, description}[]` | `GET /r/{sub}/about/rules` |
+| Reach & type | subscribers, active users, `subreddit_type` (public/restricted/private), `submission_type` (any/self/link), `over18`, quarantined | `GET /r/{sub}/about.json` |
+| Rules | `{short_name, description}[]` | `GET /r/{sub}/about/rules.json` |
+| Flairs | `{id, text}[]` | `GET /r/{sub}/api/link_flair_v2` |
+| Posting contract | `is_flair_required`, `title_regexes`, title required/blacklisted strings, `body_restriction_policy`, body min/max length, `guidelines_text` | composer gateway response (captured; §3.3) |
 
 Plus a one-line **verdict** per sub: self-posts allowed? flair required (which)?
 would a draft pass the title regex? Private/quarantined subs degrade to a note,
@@ -117,15 +121,18 @@ publish reddit search "<query>"                    # free-text topic
                       [--limit <n>]                # cap results (default 25)
                       [--include-nsfw]             # include over-18 subs (default: excluded)
                       [--json]                     # machine-readable (default: human report)
+                      [--inspect]                  # headful
 ```
 
-Runs Reddit's subreddit search (`GET /subreddits/search`) and returns a
-**shallow** candidate list — `{name, subscribers, over18, submission_type,
+Fetches `GET /subreddits/search.json?q=…` (§3.3) and returns a **shallow**
+candidate list — `{name, subscribers, over18, submission_type,
 public_description}` per hit. No contract detail; it exists to feed `inspect`.
 
 The two compose: `reddit search "…"` → agent picks names →
 `reddit inspect Name1 Name2` for full contracts → agent decides → `draft`.
 `--json` (either verb) emits a structured array for the agent to parse.
+
+**`draft` — stage a native self-post draft.**
 
 ```
 publish reddit draft --subreddit <name>            # target community (or from --from frontmatter)
@@ -133,29 +140,28 @@ publish reddit draft --subreddit <name>            # target community (or from -
                      (--text "<body>" | --from <base.md> | --from -)
                      [--flair <id|text>]           # flair template id, or text matched to a template
                      [--nsfw] [--spoiler]
-                     [--dry-run]                   # generate + preflight-validate only; no write
-                     [--login]                     # one-time headful OAuth consent (capture refresh token)
+                     [--dry-run]                   # generate + preflight-validate only; no browser
+                     [--inspect]                   # headful (first login / selector calibration)
 ```
 
 New channel group in `src/cli.ts`, mirroring `x` / `linkedin`:
 
 ```ts
 const reddit = program.command("reddit")
-  .description("Reddit channel: inspect/search (subreddit facts) + draft (native self-post drafts via API, never posts)");
+  .description("Reddit channel: inspect/search (subreddit facts) + draft (native self-post drafts, never posts)");
 registerRedditInspectCommand(reddit);
 registerRedditSearchCommand(reddit);
 registerRedditDraftCommand(reddit);
 ```
 
-**Body input mirrors the rest of the toolkit** — the shared
-`resolveContentInput` (`--text` | `--from <file>` | `--from -` stdin,
-exactly-one-of). Because Reddit is long-form, `--from <base.md>` is the primary
-path (an inline `--text` still works for short posts), which is the opposite
-emphasis from LinkedIn but the same code.
+**Body input mirrors the rest of the toolkit** — the shared `resolveContentInput`
+(`--text` | `--from <file>` | `--from -` stdin, exactly-one-of). Because Reddit is
+long-form, `--from <base.md>` is the primary path (an inline `--text` still works
+for short posts), the opposite emphasis from LinkedIn but the same code.
 
-**`--subreddit`, `--title`, and `--flair` may also come from Markdown
-frontmatter** in the `--from` file (canonical-content metadata), with the flags
-overriding. This keeps a self-post fully described by one canonical `.md`:
+**`--subreddit`, `--title`, and `--flair` may also come from Markdown frontmatter**
+in the `--from` file (canonical-content metadata), with the flags overriding.
+This keeps a self-post fully described by one canonical `.md`:
 
 ```markdown
 ---
@@ -166,73 +172,73 @@ flair: "Discussion"
 # body markdown here…
 ```
 
-There is **no `--media`** (self-post only, §8) and **no `--inspect`** (no
-browser to inspect — `--login` is the one-time consent step, §3.2). `--dry-run`
-still renders the post *and* runs the subreddit preflight (§4) without writing a
-draft.
+There is **no `--media`** (self-post only, §8). `--inspect` replaces the old
+`--login`: like X/LinkedIn, first login is headful and unattended thereafter.
+`--dry-run` renders the post *and* runs the subreddit preflight (§4) without
+touching the composer.
 
-## 3. Architecture — an API channel, as the roadmap called
+## 3. Architecture — browser-driven (mirror X / LinkedIn)
 
-### 3.1 Why API, not browser (and how it satisfies the boundary)
+### 3.1 Why browser, not API (the reversal)
 
-[LINKEDIN_DESIGN.md](./LINKEDIN_DESIGN.md) §3.1 already drew the line: the
-browser-profile session pattern preserves for **browser-driven** channels (X,
-LinkedIn, 小红书) and **deliberately diverges for API channels** — Reddit was
-named there as OAuth/token, "no browser, no shared-context duality." This design
-fulfils that call. PRODUCT_SPEC §2.2/§8 concur: Reddit is "Programmable (API),
-Phase 2."
+An earlier draft of this design used Reddit's official OAuth API, per
+[LINKEDIN_DESIGN.md](./LINKEDIN_DESIGN.md) §3.1 ("Reddit = API channel") and
+[PRODUCT_SPEC.md](./PRODUCT_SPEC.md) §2.2. That choice rested on the API being
+**sanctioned, frictionless, usable on the operator's own account, with indefinite
+auth**. Attempting the setup live falsified three of those four:
 
-Two properties make the API the right — and *safer* — choice here, where it
-would be wrong for X:
+- **Not frictionless.** External app creation at `reddit.com/prefs/apps` is now
+  gated behind Reddit's **Responsible Builder Policy** registration, which funnels
+  into the **Developer Platform (Devvit)** onboarding (`npm create devvit@latest …`)
+  — tooling for apps that run *inside* Reddit, not an external CLI. The clean
+  `client_id`/`client_secret` path was not reachable.
+- **Not the operator's own account.** The registration flow requires a **dedicated
+  automated (bot) account** ("no mixed-use accounts"), so drafts would land under
+  the bot, not the operator — wrong for a "stage → *I* review → *I* publish" flow.
+- **Possible approval gate / Data-API support-ticket** with an unknown wait.
 
-- **Reddit's API is sanctioned.** Unlike X (whose HTTP surface is actively
-  blocked, forcing the browser path), Reddit offers a first-party OAuth API. No
-  anti-automation arms race, no selector drift, no headless-login captcha wall.
-- **The draft boundary is intrinsic, not enforced by omission-of-a-click.** The
-  Draft primitive (`POST /api/draft`) stages a real native draft (visible in
-  Reddit's own Drafts list) that is private until `POST /api/submit`. We
-  implement `create-draft` and preflight **only**; `submit` never exists in the
-  codebase. The "never publish" guarantee is therefore structural.
+The browser-driven pattern we already ship for X and LinkedIn has **none** of this
+friction: the operator logs in **as themselves**, drafts land in **their own**
+Reddit Drafts, and there is no registration, bot account, or approval. So Reddit
+joins X, LinkedIn, and 小红书 as a **browser-driven** channel; only WeChat remains
+API-driven. Designs update when the facts change — this is that update.
 
-### 3.2 Auth — a non-expiring, auto-refreshing refresh token
+### 3.2 Session — a persistent Reddit profile, structural sibling of X/LinkedIn
 
-The operator's requirement was: adopt the API **iff** auth can last
-indefinitely and auto-refresh. Reddit OAuth satisfies this exactly:
+`src/reddit/session.ts` mirrors `src/session.ts` (X) and `src/linkedin/session.ts`:
+a Playwright **persistent-profile** context, one unattended credential login,
+headful `--inspect` for first login / calibration. It is a **separate** session
+(profile `<PUBLISH_DATA_DIR>/reddit-profile`, cache `reddit-cookies.json`, creds
+`REDDIT_USERNAME` / `REDDIT_PASSWORD`) and does **not** share X's session — same
+"structural sibling, don't force a premature factory" posture as LinkedIn
+(CLAUDE.md). It exposes the browser-channel surface the reader and composer
+consume: `ensureSession` / `getBrowserContext` / `getCookies` / `closeSession`.
 
-- Access tokens live **60 minutes**. Requesting the authorization-code grant with
-  **`duration=permanent`** additionally returns a **refresh token that does not
-  expire** (valid until the user revokes it, or ~1 year of *total* inactivity —
-  a nightly-cron cadence keeps it alive indefinitely).
-- The client transparently exchanges the refresh token for a fresh access token
-  whenever the current one is near expiry. Fully unattended after a **one-time**
-  consent.
+Reddit's **login is captcha-heavy**, so first login is headful (`--inspect`) and
+may need a manual challenge solve, exactly like X's headful-first-login
+constraint. Login/composer selectors drift and need occasional live
+re-calibration (§9).
 
-**Flow.** Register a Reddit **"web app"** (gives a `client_id` + `client_secret`
-+ a redirect URI). `publish reddit draft --login` runs the one-time consent:
-open the authorize URL in the system browser, capture the `code` on a loopback
-redirect (`http://localhost:<port>/callback`), exchange it for
-`{ access_token, refresh_token, expires_at, scope }`, and persist that to a
-**machine-local** token store (`<baseDir>/reddit-token.json`, `mode 0600`) — the
-direct analog of X/LinkedIn's `--inspect` first-login + cookie cache. Every
-subsequent run reads the store and auto-refreshes; no password is ever kept at
-rest, and 2FA is handled entirely inside the browser consent. (A script-app
-password grant was considered and rejected: it can't do unattended 2FA.)
+### 3.3 Reads — authenticated JSON, with a capture fallback (inspect / search / preflight)
 
-Scopes requested: **`identity submit flair read history`** (`submit`+`flair` for
-drafting/flair, `read` for `post_requirements`, `history`/`read` for listing
-drafts on verify). Exact scope set for the Draft endpoints is a verification
-item (§9).
+Reddit serves the facts as JSON to a **logged-in session**, so no OAuth app is
+needed. `src/reddit/reader.ts` (the analog of X's `src/x/reader.ts`) issues these
+reads **through the authenticated browser context** — cookies attached — via
+`context.request.get(url)` / `page.evaluate(fetch)`:
 
-### 3.3 HTTP client — thin and hand-rolled, not a wrapper
+- **Direct JSON (primary):** `GET /subreddits/search.json` (search),
+  `GET /r/{sub}/about.json`, `GET /r/{sub}/about/rules.json`,
+  `GET /r/{sub}/api/link_flair_v2` (inspect). Stable, and the same endpoints
+  reddit.com's own frontend calls.
+- **Response capture (fallback):** `post_requirements` (flair-required?, title
+  regex, body limits) is served via the composer gateway/GraphQL, not a tidy
+  `.json` URL. For it, drive the composer for the target sub and **capture the
+  response** the frontend loads — matched by operation/path (hashes drift), the
+  same technique X uses for `/graphql/` reads.
 
-Use Node's global `fetch` behind a small authorized client rather than a
-third-party wrapper (`snoowrap`/PRAW-equivalent). Rationale: (a) it keeps the
-dependency surface lean, matching CLAUDE.md's "do not reintroduce out-of-band
-libs" posture (sanctioned here, but the discipline stands); (b) it lets the code
-implement **exactly** create-draft + preflight and *nothing that submits* —
-tightening the hard boundary; (c) Reddit requires a descriptive `User-Agent` and
-enforces ~100 QPM per OAuth client — both trivial to honor in a thin client, and
-both things a heavy wrapper hides.
+`inspect` and `search` are thin CLI wrappers over this reader; `draft`'s preflight
+(§4) calls the same reader. One reads layer, three consumers. No dedupe/SeenStore
+(that is a WATCH concern).
 
 ### 3.4 Content generation — reuse X's parser, keep the Markdown
 
@@ -241,82 +247,76 @@ than LinkedIn's flattener. It imports the channel-agnostic primitives from
 `../x/content.ts` — `parseBaseMarkdown` (for the H1→title derivation, `codeFlags`,
 `linkFlags`) and `countChars` (for the title/body caps) — and emits a
 `GeneratedSelfPost` that carries the body **as Markdown** (§4). This honors the
-operator's "Reddit ≈ X" framing at the content layer regardless of transport.
+"Reddit ≈ X" framing at the content layer.
 
 ## 4. Content generation + subreddit-rules preflight (deterministic, no LLM)
 
 `generateSelfPost(md, opts) -> GeneratedSelfPost` — same discipline as X/LinkedIn:
 plain code, reproducible, verifiable, no LLM deciding content.
 
-- **Title.** Required. From `--title`, else frontmatter `title`, else the
-  Markdown H1 (via `parseBaseMarkdown`). Cap **300** code points (`countChars`);
-  over cap → error, never silent truncation.
+- **Title.** Required. From `--title`, else frontmatter `title`, else the Markdown
+  H1 (via `parseBaseMarkdown`). Cap **300** code points (`countChars`); over cap →
+  error, never silent truncation.
 - **Body → Markdown, kept verbatim.** Reddit renders GFM-ish Markdown, so we do
   **not** flatten (the key divergence from LinkedIn). Strip only a leading H1 if
   it was consumed as the title. Cap **~40 000** code points; over cap → emit
   leading segment + warning.
 - **Old-vs-new render advisory.** Per
   [PLATFORM_CAPABILITIES.md](./skills/publish/PLATFORM_CAPABILITIES.md): on
-  old.reddit, fenced code + tables don't render — advise 4-space-indented code
-  and caution on tables. Reuse `codeFlags` to surface this. Draft is created in
-  **Markdown mode** so syntax is taken literally, not as rich-text.
+  old.reddit, fenced code + tables don't render — advise 4-space-indented code and
+  caution on tables. Reuse `codeFlags` to surface this. The composer is switched
+  to **Markdown mode** so syntax is taken literally, not as rich text.
 - **Link advisory.** Reuse `linkFlags` (informational; Reddit has no
   LinkedIn-style reach penalty, but flags bare/duplicated URLs).
 
-**Subreddit preflight (the new, load-bearing step).** Before staging, fetch and
-enforce the target subreddit's contract:
+**Subreddit preflight (the new, load-bearing step).** Before driving the composer,
+read and enforce the target's contract via `src/reddit/reader.ts` (§3.3):
+`post_requirements` (flair required?, title regex, body limits) + flair templates
+(resolve `--flair` text → a template to select in the UI). Validate the generated
+post and **fail early with an actionable message** — e.g. *"r/MachineLearning
+requires a flair; valid: Discussion, Research, Project…"* or *"title must match
+`^\[D\]|\[R\]|\[P\]`"* — rather than staging a draft the subreddit would reject.
+This is the browser analog of X's `watch.yaml` behavior layer: a per-target rules
+gate. `--dry-run` runs the full preflight so the operator sees violations without
+touching the composer. (Caveat: AutoMod rules aren't exposed — preflight catches
+the declared contract, not every mod filter; §9.)
 
-- `GET /api/v1/{subreddit}/post_requirements` → `is_flair_required`,
-  `title_regexes`, `title_required_strings`, `title_blacklisted_strings`,
-  `body_restriction_policy`, `body_blacklisted_strings`, min/max body length,
-  `guidelines_text`.
-- Flair templates: `GET /r/{subreddit}/api/link_flair_v2` → resolve `--flair`
-  text to a `flair_template_id` (or list valid choices on miss).
+## 5. Composer automation + the never-publish boundary
 
-> **`inspect` and `draft` share this fetch.** `inspect` reports these facts for
-> agent-proposed candidate subreddits (read-only, §1.1); `draft` re-runs the same
-> fetch to *enforce* the contract on the chosen target. One `src/reddit/rules.ts`,
-> two consumers.
+`stageDraft(post, opts) -> StageDraftResult` in `src/reddit/draftPoster.ts`,
+mirroring X's/LinkedIn's `stagePost` and reusing their shared primitives
+(`tolerantLocator` / `optionalLocator` / `typeText` from `../x/draftPoster.js`;
+`getBrowserContext` from `./session.js`):
 
-Validate the generated post against these and **fail early with an actionable
-message** — e.g. *"r/MachineLearning requires a flair; valid: Discussion,
-Research, Project…"* or *"title must match `^\[D\]|\[R\]|\[P\]` "* — rather than
-staging a draft the subreddit would reject. This is the API analog of X's
-`watch.yaml` behavior layer: a per-target rules gate. `--dry-run` runs the full
-preflight so the operator sees violations without any write. (Caveat: AutoMod
-rules aren't exposed by `post_requirements` — preflight catches the
-API-declared contract, not every mod filter; §9.)
-
-## 5. Draft creation + the never-publish boundary
-
-`stageDraft(post, opts) -> StageDraftResult` in `src/reddit/draft.ts`:
-
-1. Authorized client from `src/reddit/auth.ts` (auto-refreshed access token).
-2. **Preflight** (§4) — abort on any violation.
-3. `POST /api/draft` with `{ subreddit, title, body_markdown (kind: self),
-   flair_id?, nsfw?, spoiler?, is_public_link: false }`. This stages a native
-   private draft.
-4. **Verify:** `GET /api/v1/me/drafts` and confirm the new draft is present by id
+1. `getBrowserContext()` (persistent Reddit profile) → new page.
+2. **Preflight** (§4) via the reader — abort on any violation.
+3. Open the composer for the target sub (`/r/<sub>/submit`, self-post tab).
+4. **Switch to Markdown mode**, then `typeText` the title and the Markdown body.
+5. **Flair (if required/requested):** open the flair picker and select the
+   resolved template.
+6. Set `nsfw`/`spoiler` toggles if flagged.
+7. **Save Draft:** click the composer's **"Save Draft"** affordance. **Never**
+   locate or click **Post** — it appears in `REDDIT_COMPOSER_SELECTORS` only as a
+   documented forbidden selector (mirrors X's `tweetButton` and LinkedIn's Post).
+   Same safeguard as LinkedIn: if the Save-Draft affordance doesn't resolve, bail
+   — never fall through to another button.
+8. **Verify:** reopen the drafts list and match the staged title/leading body
    (port the X/LinkedIn "match the staged item, don't trust a blind success"
    hardening).
-5. Return `{ kind: "self", draftId, verified, subreddit, flair, note }` with the
+9. Return `{ kind: "self", verified, subreddit, flair, note }` with the
    old-reddit/link advisories folded into `note`.
 
-**The submit path is intentionally not implemented.** There is no code calling
-`POST /api/submit` or `Draft.submit`. The module's single write is
-`create-draft`. This is the structural equivalent of X/LinkedIn's forbidden
-Post selector — but stronger, because there is no affordance to mis-fire.
+Every selector lives in one `REDDIT_COMPOSER_SELECTORS` block, commented
+**best-effort / needs live calibration**. Per CLAUDE.md "Verify live," none of it
+is trustworthy until run headful (`--inspect`) against real Reddit.
 
 ## 6. Config & state additions
 
-- `PublishEnv`: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`,
-  `REDDIT_REDIRECT_URI` (default `http://localhost:8765/callback`),
-  `REDDIT_USER_AGENT` (Reddit mandates a descriptive UA) — added to
-  `.env.example`. **No `REDDIT_PASSWORD`** (refresh-token flow, not password
-  grant).
-- `DataPaths`: `redditTokenCache` (`<baseDir>/reddit-token.json`, `mode 0600`) —
-  machine-local, **off Google Drive**, same posture as the cookie caches. **No
-  `reddit-profile`** — there is no browser profile for an API channel.
+- `PublishEnv`: `REDDIT_USERNAME`, `REDDIT_PASSWORD` (+ `REDDIT_EMAIL` if the login
+  challenge needs it) — added to `.env.example`. No OAuth client id/secret/token.
+- `DataPaths`: `redditProfileDir` (`<baseDir>/reddit-profile`), `redditCookieCache`
+  (`<baseDir>/reddit-cookies.json`) — machine-local, **off Google Drive**, same
+  posture as the X/LinkedIn profiles. `mkdirSync` the profile like the others.
 - No `watch.yaml` changes (publish-only). No change to
   `scripts/install-agent-skill-symlinks.js` (Reddit lives inside the existing
   `publish` skill).
@@ -325,62 +325,59 @@ Post selector — but stronger, because there is no affordance to mis-fire.
 
 | Path | Purpose |
 |---|---|
-| `src/reddit/auth.ts` | OAuth: `--login` consent (loopback capture), token store, auto-refresh, authorized `fetch` client (UA + rate-limit aware) |
-| `src/reddit/rules.ts` | subreddit facts + preflight: deep-inspect (`about` / `post_requirements` / flair templates / rules), subreddit search (`subreddits/search`), validate a post, resolve flair text → id. **Shared by `inspect`, `search`, and `draft`** |
-| `src/commands/reddit-inspect.ts` | `registerRedditInspectCommand`; read-only depth report over `rules.ts`, human or `--json` |
-| `src/commands/reddit-search.ts` | `registerRedditSearchCommand`; read-only breadth candidate list (`--limit`/`--include-nsfw`), human or `--json`, over `rules.ts` |
+| `src/reddit/session.ts` | Reddit persistent-profile login (structural sibling of `src/session.ts` / `src/linkedin/session.ts`); `ensureSession` / `getBrowserContext` / `getCookies` / `closeSession` |
+| `src/reddit/reader.ts` | authenticated JSON reads for `inspect` / `search` / preflight (`about` / `about/rules` / `link_flair_v2` / `subreddits/search`) + `post_requirements` response capture. **Shared by all three commands** |
 | `src/reddit/content.ts` | `generateSelfPost` — title + Markdown body (kept verbatim), caps, old-reddit/link advisories (reuses `../x/content.ts`) |
-| `src/reddit/draft.ts` | `stageDraft` — `POST /api/draft` + verify; **no submit** |
-| `src/commands/reddit-draft.ts` | `registerRedditDraftCommand`; reuses `resolveContentInput`; lazy-imports auth/draft |
+| `src/reddit/draftPoster.ts` | `stageDraft` — composer automation → "Save Draft"; `REDDIT_COMPOSER_SELECTORS` (Post = forbidden). Reuses `../x/draftPoster.js` primitives |
+| `src/commands/reddit-inspect.ts` | `registerRedditInspectCommand`; read-only depth report over `reader.ts`, human or `--json` |
+| `src/commands/reddit-search.ts` | `registerRedditSearchCommand`; read-only breadth candidate list (`--limit`/`--include-nsfw`), human or `--json` |
+| `src/commands/reddit-draft.ts` | `registerRedditDraftCommand`; reuses `resolveContentInput`; lazy-imports session/reader/draftPoster |
 | `src/cli.ts` | register the `reddit` group (mirror the `linkedin` block) |
-| `src/config.ts` | `REDDIT_*` env + `redditTokenCache` in `DataPaths`/`dataPaths()` |
+| `src/config.ts` | `REDDIT_*` creds + `redditProfileDir` / `redditCookieCache` in `DataPaths`/`dataPaths()` |
 
-Unlike LinkedIn, **no** `session.ts` and **no** browser `draftPoster.ts` — the
-API channel replaces both with `auth.ts` (token) + `draft.ts` (HTTP). The
-channel-agnostic reuse is `src/x/content.ts` (parser) and
-`src/commands/contentInput.ts` (input) — both imported, neither edited, per
-CLAUDE.md "reuse by import."
+Channel-agnostic reuse (imported, not edited, per CLAUDE.md "reuse by import"):
+`src/x/content.ts` (parser), `src/x/draftPoster.ts` (locator/typing primitives),
+`src/commands/contentInput.ts` (input). Reddit is now a near-structural twin of
+LinkedIn — session + content + composer + commands — differing mainly in the
+reader layer (subreddit facts) and Markdown-verbatim content.
 
 ## 8. Out of scope (follow-ups)
 
-- **Reddit WATCH** — subreddit/search monitoring → triage → reply candidates
-  (the Reddit analog of `x watch`); PRODUCT_SPEC Phase 2, separate design. The
-  read API + OAuth client built here is the foundation.
-- **Link / image / gallery / video posts** — self-post first; the draft call
-  generalizes (`kind: link`, media upload via `POST /api/media/asset.json`).
+- **Reddit WATCH** — subreddit/search monitoring → triage → reply candidates (the
+  Reddit analog of `x watch`); PRODUCT_SPEC Phase 2, separate design. The
+  browser session + reader built here are the foundation.
+- **Link / image / gallery / video posts** — self-post first; the composer flow
+  generalizes to the other post tabs later.
 - **Multi-subreddit repost in one command / crossposts** — one subreddit per
   `draft` this phase; the agent orchestrates a repost by looping `draft` over the
-  targets it chose from `search`/`inspect` (§1.1). Native crosspost
-  (`kind: crosspost`) is a later add.
+  targets it chose from `search`/`inspect` (§1.1).
 - **LLM subreddit ranking** — `search`/`inspect` stay facts-only by design;
   ranking "which subreddit fits best" is the consuming agent's job, not the CLI's.
-- **Scheduled posts & the human send-gate** (`submit`) — future scope for the
-  whole toolkit (PRODUCT_SPEC §5), explicitly not built here.
-- **AutoMod-rule prediction** — preflight covers the API-declared contract only.
+- **Scheduled posts & the human send-gate** (publishing the draft) — future scope
+  for the whole toolkit (PRODUCT_SPEC §5), explicitly not built here.
+- **AutoMod-rule prediction** — preflight covers the declared contract only.
 
-## 9. Open verification risks
+## 9. Open calibration risks
 
-Per CLAUDE.md "Verify live" — compile-green is not proof for a platform flow.
-Do a live round-trip (a throwaway subreddit / your profile) before locking:
+Per CLAUDE.md "Verify live" — compile-green is not proof for a browser flow. Run
+headful (`--inspect`) against real Reddit before claiming any of this works:
 
-- **Draft endpoints.** `POST /api/draft` and `GET /api/v1/me/drafts` are
-  lightly documented. Verify the exact request shape, that the created draft is
-  private (never appears publicly), the required OAuth **scope**, and the field
-  names for flair/nsfw/spoiler. This is the highest-risk item.
-- **`post_requirements` coverage.** Confirm the response fields and that
-  preflight failures match what the composer would actually reject; document that
-  AutoMod filters are *not* covered — so `inspect` reports the API-declared
-  contract, not every mod filter, and the agent should treat it as necessary-not-
-  sufficient.
-- **`inspect` / `search` fact endpoints.** Confirm `GET /r/{sub}/about`, subreddit
-  search (`/subreddits/search` or `subreddit_autocomplete_v2`), and `about/rules`
-  return the fields the reports promise, and that private/quarantined subreddits
-  degrade gracefully rather than erroring the whole run.
-- **Markdown fidelity.** Round-trip the body on both new and old Reddit
-  (fenced code, tables, headings) to confirm the "keep verbatim, Markdown mode"
-  assumption and validate the PLATFORM_CAPABILITIES render profile empirically.
-- **Refresh-token longevity & revocation.** Confirm `duration=permanent` yields a
-  non-expiring refresh token and that the client handles a revoked/invalid token
-  by prompting `--login` again (not crashing).
-- **Rate limit & User-Agent.** Confirm ~100 QPM headroom and that a
-  descriptive UA avoids throttling/blocks.
+- **Login is captcha-heavy.** First headful login may need a manual challenge
+  solve; headless login likely blocked (same class as X). Highest onboarding risk.
+- **Composer selectors drift.** The self-post tab, the **Markdown-mode toggle**,
+  the title/body editors, the **flair picker**, and especially the **"Save Draft"**
+  affordance all need live calibration. Mis-clicking Save Draft must **never** fall
+  through to Post (mirror LinkedIn's "don't guess another button" safeguard).
+- **`post_requirements` capture.** Confirm the composer gateway/GraphQL response
+  that carries requirements, match it by a stable operation/path, and confirm the
+  fields; document that AutoMod filters are *not* covered (necessary-not-
+  sufficient).
+- **JSON read stability.** Confirm `about.json` / `about/rules.json` /
+  `link_flair_v2` / `subreddits/search.json` return the promised fields through
+  the authenticated context, and that private/quarantined subs degrade gracefully
+  rather than erroring the whole run. Watch for read rate-limiting.
+- **Markdown fidelity.** Round-trip the body on new *and* old Reddit (fenced code,
+  tables, headings) to confirm the "keep verbatim, Markdown mode" assumption and
+  validate the PLATFORM_CAPABILITIES render profile empirically.
+- **Native draft semantics.** Confirm "Save Draft" stages a private draft
+  reachable later, and that the verify step can find it reliably.
