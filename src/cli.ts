@@ -8,6 +8,8 @@ import { registerLinkedInDraftCommand } from "./commands/linkedin-draft.js";
 import { registerRedditInspectCommand } from "./commands/reddit-inspect.js";
 import { registerRedditSearchCommand } from "./commands/reddit-search.js";
 import { registerRedditDraftCommand } from "./commands/reddit-draft.js";
+import { registerWechatCheckCommand } from "./commands/wechat-check.js";
+import { registerWechatDraftCommand } from "./commands/wechat-draft.js";
 
 const program = new Command();
 
@@ -58,5 +60,18 @@ registerRedditSearchCommand(reddit);
 
 // --- draft: owned-content publisher (native Reddit self-post drafts, never posts) ---
 registerRedditDraftCommand(reddit);
+
+// WeChat Official Account channel: API-driven (first non-browser channel).
+// check (credentials/token/IP-allowlist preflight) + draft (native article drafts,
+// never posts). No watch loop today.
+const wechat = program
+  .command("wechat")
+  .description("WeChat Official Account channel: check (credentials/IP) + draft (native article drafts, never posts)");
+
+// --- check: credential + token + IP-allowlist preflight (travel-aware) ---
+registerWechatCheckCommand(wechat);
+
+// --- draft: owned-content publisher (native WeChat article drafts, never posts) ---
+registerWechatDraftCommand(wechat);
 
 program.parse();

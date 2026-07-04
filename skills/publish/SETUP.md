@@ -40,6 +40,18 @@ Copy `.env.example` → `.env` (gitignored) and set:
   headless-server / good-fingerprint hosts. Distinct from the one-time first login
   (below), which still needs headful `--inspect`; draft staging still runs headless
   via the persisted session.
+- `WECHAT_APP_ID`, `WECHAT_APP_SECRET` — the Official Account's app credentials
+  (from the 微信开发者平台 / mp.weixin.qq.com admin console). **Only needed for the
+  `wechat` channel.** Unlike X/LinkedIn/Reddit there is **no browser login and no
+  persistent profile** — auth is an app_id/app_secret → cached **stable-token**
+  loop; the token cache lives at `<PUBLISH_DATA_DIR>/wechat-token.json`
+  (machine-local, off Drive).
+- `WECHAT_AUTHOR` (optional) — fallback article author.
+- `WECHAT_NEED_OPEN_COMMENT` (default `1`) / `WECHAT_ONLY_FANS_CAN_COMMENT`
+  (default `0`) — draft comment settings.
+- `WECHAT_PROXY_URL` **or** `WECHAT_SSH_TUNNEL` — the fixed-egress-IP mode (see the
+  **"WeChat channel — credentials + fixed-egress-IP"** section below). Mutually
+  exclusive.
 
 ## Watch config — `watch.yaml`
 
@@ -99,6 +111,70 @@ complete it in the headful window. **Reddit login is captcha-heavy** — expect 
 manual challenge solve on the first headful login. Watch the login complete; the
 warm profile persists for subsequent (including headless) runs. If a step stalls,
 see [calibration.md](./calibration.md).
+
+**WeChat is the exception** — it is **API-driven, so there is NO headful login and
+NO persistent profile**. Its one-time setup is instead: allowlist a fixed egress IP
+once (via an admin WeChat QR scan) and point the CLI at that egress. See the
+**"WeChat channel — credentials + fixed-egress-IP (the gcloud dependency)"**
+section below.
+
+## WeChat channel — credentials + fixed-egress-IP (the gcloud dependency)
+
+WeChat (微信公众号 Official Account) is the **first API-driven channel** — no
+browser, no profile, no headful login. Auth is an `app_id`/`app_secret` →
+**stable-token** loop, cached at `<PUBLISH_DATA_DIR>/wechat-token.json`. The one
+hard operational cost is the **fixed egress IP**.
+
+**Why a fixed egress IP is unavoidable.** WeChat's API rejects calls from any
+source IP not in the account's **IP 白名单 (IP allowlist)** — this includes the
+token fetch itself (rejected with `errcode 40164`). The allowlist has **no edit
+API**: every change requires a manual **admin WeChat QR re-scan**, and it holds at
+most **15 IPs** — so it **cannot be automated**. A traveling laptop (especially on
+a VPN) has no stable raw IP, so allowlisting the laptop is hopeless. The fix: route
+**all** WeChat calls through **one stable egress IP** and allowlist that IP **once**.
+
+**The runtime dependency (stated plainly).** Operating the WeChat channel therefore
+depends on:
+
+- **(a)** an always-on host with a **stable public IP** that can reach
+  `api.weixin.qq.com`. The operator's setup uses a free small cloud VM as an
+  example of such a host — e.g. a GCP `e2-micro` **Always-Free** instance,
+  provisioned with the **`gcloud` CLI** — but any box with a stable public IP works.
+- **(b)** that host kept **running**. A stopped cloud instance that holds a reserved
+  static IP still gets **billed** for the idle address.
+- **(c)** local **SSH access** to it.
+
+If the host is down, `publish wechat check` / `publish wechat draft` fail with
+`40164`.
+
+**Two ways to point the CLI at the egress** (set exactly one):
+
+- `WECHAT_SSH_TUNNEL=<user>@<static-ip>` — the CLI **auto-spawns** its own
+  `ssh -N -D` SOCKS5 tunnel per run (waits until it is ready, tears it down after —
+  no orphan process). Zero-touch. It requires that plain `ssh <user>@<static-ip>`
+  works **non-interactively**: add an `~/.ssh/config` `Host` block for the box
+  (`User`, `IdentityFile`, `IdentitiesOnly yes`) so the right key is selected
+  automatically. This matters when the key is not a default `~/.ssh/id_*` (e.g. a
+  cloud-provider-generated key).
+- `WECHAT_PROXY_URL=socks5://127.0.0.1:<port>` (or an `http(s)://` proxy) — route
+  through a tunnel you start and manage yourself. **Mutually exclusive** with
+  `WECHAT_SSH_TUNNEL`.
+
+**One-time allowlist step (manual, unavoidable).** Sign in to the **微信开发者平台**
+(`developers.weixin.qq.com/platform/` — the console migrated there from
+mp.weixin.qq.com on 2025-12-01) as the account **admin** → 开发管理 →
+开发接口管理 → **IP白名单** → add the fixed egress IP (one entry per line; a single
+IP or a CIDR block; ≤15 total) → 确认修改 → **scan the QR with the admin's WeChat**.
+Then verify with `publish wechat check`.
+
+**Verify.** `publish wechat check` should report ✓ credentials / ✓ token / ✓ IP
+allowlist. Read the error code, don't guess:
+- `40013` / `40125` → bad `app_id` / `app_secret`. **NOT an IP problem — do not
+  touch the allowlist.**
+- `40164` → the egress IP is not in the allowlist (or the egress host is down).
+
+**Node deps for this channel** (pulled in by `npm install`): `marked`, `undici`,
+`socks`, `socks-proxy-agent`.
 
 ## Browser
 

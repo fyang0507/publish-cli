@@ -51,9 +51,39 @@ export interface PublishEnv {
    * this flag mainly skips the wasted first headless attempt. Accepts 1/true/yes.
    */
   REDDIT_READS_HEADFUL: boolean;
+  /** WeChat Official Account app id (API-driven channel; no browser profile). */
+  WECHAT_APP_ID: string;
+  /** WeChat Official Account app secret (never cached to disk). */
+  WECHAT_APP_SECRET: string;
+  /** Fallback article author when none is supplied by flag/frontmatter. */
+  WECHAT_AUTHOR: string;
+  /** `articles[].need_open_comment` for staged drafts (0/1). Default 1. */
+  WECHAT_NEED_OPEN_COMMENT: number;
+  /** `articles[].only_fans_can_comment` for staged drafts (0/1). Default 0. */
+  WECHAT_ONLY_FANS_CAN_COMMENT: number;
+  /**
+   * Fixed-egress-IP mode (WECHAT_DESIGN §3.3). An `http(s)://` or
+   * `socks5://[user:pass@]host:port` proxy through which ALL WeChat API calls are
+   * routed so WeChat always sees one allowlisted IP. Set => Mode A; unset => Mode B
+   * (direct + travel-aware `check`). Infra, not a secret, but same .env hygiene.
+   */
+  WECHAT_PROXY_URL: string;
+  /**
+   * Optional convenience: `[user@]host[:port]` of a fixed-IP box reachable by SSH.
+   * When set, the egress layer spawns `ssh -N -D <localPort>` to it and routes
+   * through the resulting local SOCKS5 proxy (only stock `sshd` needed on the box).
+   * Mutually exclusive with an explicit WECHAT_PROXY_URL.
+   */
+  WECHAT_SSH_TUNNEL: string;
 }
 
 const DEFAULT_TRIAGE_MODEL = "gemini-3.5-flash";
+
+/** Parse an integer env var, falling back to `def` when unset/blank/non-numeric. */
+function envInt(raw: string | undefined, def: number): number {
+  const n = Number.parseInt((raw ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : def;
+}
 
 export const env: PublishEnv = {
   GOOGLE_GENERATIVE_AI_API_KEY: process.env.GOOGLE_GENERATIVE_AI_API_KEY ?? "",
@@ -68,6 +98,13 @@ export const env: PublishEnv = {
   REDDIT_PASSWORD: process.env.REDDIT_PASSWORD ?? "",
   REDDIT_EMAIL: process.env.REDDIT_EMAIL ?? "",
   REDDIT_READS_HEADFUL: /^(1|true|yes)$/i.test(process.env.REDDIT_READS_HEADFUL?.trim() ?? ""),
+  WECHAT_APP_ID: process.env.WECHAT_APP_ID ?? "",
+  WECHAT_APP_SECRET: process.env.WECHAT_APP_SECRET ?? "",
+  WECHAT_AUTHOR: process.env.WECHAT_AUTHOR ?? "",
+  WECHAT_NEED_OPEN_COMMENT: envInt(process.env.WECHAT_NEED_OPEN_COMMENT, 1),
+  WECHAT_ONLY_FANS_CAN_COMMENT: envInt(process.env.WECHAT_ONLY_FANS_CAN_COMMENT, 0),
+  WECHAT_PROXY_URL: process.env.WECHAT_PROXY_URL ?? "",
+  WECHAT_SSH_TUNNEL: process.env.WECHAT_SSH_TUNNEL ?? "",
 };
 
 /**
@@ -99,6 +136,12 @@ export interface DataPaths {
   redditProfileDir: string;
   /** Harvested Reddit cookie cache as JSON. */
   redditCookieCache: string;
+  /**
+   * WeChat access-token cache (token + expiry) as JSON. Machine-local under baseDir
+   * (off any synced drive — a live token is secret-adjacent). WeChat is API-driven,
+   * so there is NO wechat profile dir (the first channel without one).
+   */
+  wechatTokenCache: string;
   /** better-sqlite3 dedupe store — in the data repo (`<dataRepo>/.publish-cli/`) when resolvable, else baseDir. */
   dbFile: string;
 }
@@ -146,6 +189,8 @@ export function dataPaths(): DataPaths {
     liCookieCache: join(baseDir, "li-cookies.json"),
     redditProfileDir,
     redditCookieCache: join(baseDir, "reddit-cookies.json"),
+    // WeChat: API-driven, no browser profile — only a machine-local token cache.
+    wechatTokenCache: join(baseDir, "wechat-token.json"),
     dbFile: join(dbDir, "publish.db"),
   };
   return cachedPaths;

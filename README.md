@@ -1,6 +1,6 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH), **LinkedIn** (PUBLISH — `linkedin draft`) **and Reddit** (PUBLISH — `reddit inspect` / `search` / `draft`, self-posts). Every PUBLISH path is **draft-only and never posts.** See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH), **LinkedIn** (PUBLISH — `linkedin draft`), **Reddit** (PUBLISH — `reddit inspect` / `search` / `draft`, self-posts) **and WeChat** (PUBLISH — `wechat check` / `draft`, article self-posts). Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
 
 ## What it does (X channel)
 
@@ -18,6 +18,17 @@ Reddit self-posts are **contract-gated**: each subreddit imposes its own rules (
 
 - **`publish reddit inspect <sub>...`** / **`publish reddit search "<query>"`** — read-only discovery. `inspect` reports each named subreddit's full posting contract (subscribers, `submission_type`, rules, flair templates, post requirements) with a one-line verdict; `search` lists candidate subreddits for a topic (`--limit`, `--include-nsfw`). Both take `--json` for machine output. Reads are **login-free** and default to a headless browser; on networks where Reddit 403-blocks the headless fingerprint they **auto-retry headful once** (an advisory notes the switch, and headful needs a display but no human). Set `REDDIT_READS_HEADFUL=1` to start reads headful and skip the doomed first attempt; leave it unset on headless-server / good-fingerprint hosts.
 - **`publish reddit draft`** — owned-content publisher. Turns inline text (`--text`) or a markdown file (`--from`) into a single **self-post** for one subreddit (`--subreddit`, `--title`, optional `--flair`/`--nsfw`/`--spoiler`) and stages it as a **native draft on Reddit** via "Save Draft". Because Reddit renders Markdown natively, the body is kept ~verbatim (typed in Markdown mode) rather than flattened. Preflights the target subreddit's contract before staging and **never posts**. `--subreddit`/`--title`/`--flair` may also come from `--from` frontmatter.
+
+## What it does (WeChat channel)
+
+WeChat Official Account (微信公众号) is the **first API-driven channel** — no browser profile, no Playwright. Auth is an `app_id`/`app_secret` → cached-stable-token loop, and every API call is **gated by source IP**, so the toolkit routes through one fixed egress IP (allowlisted once) to stay zero-touch on a traveling / VPN laptop.
+
+- **`publish wechat check`** — read-only preflight. Verifies the configured credentials, mints an access token, and confirms the egress IP the API actually sees is on the account's allowlist (travel-aware — it reports the IP the WeChat servers observe, not the laptop's local one). Stages nothing; `--json` for machine output.
+- **`publish wechat draft`** — owned-content publisher. Turns a canonical base markdown (`--from`, the primary path) or inline text (`--text`) into a single **article** (文章 / `article_type=news`) and stages it as a **native draft in the account's 草稿箱 (draft box)** via the `draft/add` endpoint. Same boundary as every other channel — it **never publishes**. Title ≤64 code points and digest ≤120 are enforced as **errors** (no silent truncation), and a **cover image is required** (`--cover` or `--from` frontmatter). The body renders to **inline-styled HTML** — WeChat strips `<style>` blocks and classes, so every rule is emitted as an inline `style=`. External links default to **bottom citations** (WeChat drops inline hyperlinks); `--keep-links` keeps them inline. Local body images are uploaded to WeChat's CDN and their `<img src>` rewritten. `--dry-run` renders + validates with no network calls; `--out <file.html>` writes the rendered HTML for inspection.
+
+The never-publishes boundary here is **structural, not a guard-rail**: saving a draft (`draft/add`) and publishing (`freepublish/*`) are different API endpoints. Only `draft/add` is ever called; `freepublish/*` and `message/mass/*` (mass-send) are never invoked.
+
+See [docs/WECHAT_DESIGN.md](./docs/WECHAT_DESIGN.md) for the full design and the operator runbook (fixed-egress-IP setup, token cache, rendering pipeline).
 
 ## Install
 
@@ -43,6 +54,11 @@ npx playwright install chromium
   - `LI_USERNAME` / `LI_PASSWORD` / `LI_EMAIL` — LinkedIn credential login (same persistent-profile model as X); `LI_EMAIL` answers LinkedIn's identifier confirmation checkpoint. Only needed for `publish linkedin draft`.
   - `REDDIT_USERNAME` / `REDDIT_PASSWORD` (/ `REDDIT_EMAIL` if the login challenge needs it) — Reddit credential login (same persistent-profile model as X). Only needed for the `reddit` channel. Reddit login is captcha-heavy — complete any challenge in the headful `--inspect` window on first login.
   - `REDDIT_READS_HEADFUL` (optional) — set to `1` to start `reddit inspect` / `search` in a headful browser (skips the doomed headless attempt on hosts where Reddit 403-blocks the headless fingerprint). Reads are login-free, so this needs a display but no human. Leave unset on headless-server / good-fingerprint hosts; reads auto-retry headful once on a block regardless. Distinct from the one-time first login, which still requires headful `--inspect` (captcha). Draft staging still runs headless.
+  - `WECHAT_APP_ID` / `WECHAT_APP_SECRET` — Official Account (公众号) API credentials. Only needed for the `wechat` channel.
+  - `WECHAT_AUTHOR` — fallback article author when `--author` / frontmatter is absent.
+  - `WECHAT_PROXY_URL` **or** `WECHAT_SSH_TUNNEL` — fixed-egress-IP mode. WeChat gates all API calls by source IP, so the toolkit routes traffic through one stable egress IP that is allowlisted once; a traveling / VPN laptop then stays zero-touch. See [docs/WECHAT_DESIGN.md](./docs/WECHAT_DESIGN.md) for the setup.
+  - `WECHAT_NEED_OPEN_COMMENT` (optional, default `1`) / `WECHAT_ONLY_FANS_CAN_COMMENT` (optional, default `0`) — draft comment settings passed to `draft/add`.
+  - WeChat has **no browser profile** — auth is an `app_id`/`app_secret` → cached-stable-token loop, and the token cache lives at `<PUBLISH_DATA_DIR>/wechat-token.json` (machine-local, off Drive).
   - `PUBLISH_DATA_DIR` (optional) — runtime data dir, default `~/.publish-cli`.
 - **Behavior config** lives in `watch.yaml` (copy `watch.yaml.example`): queries, watch Lists, per-origin limit, an optional language allow-list, and the triage rubric. The triage rubric (`triage.persona`, or `--persona` / `--persona-from <file>`) **must be self-contained** — the classifier sees only the rubric plus each candidate post, never the source essay, campaign brief, or surrounding agent context, so spell out the actual selection criteria inline. Validate a config cheaply (no browser) with `publish x watch --validate-config`.
 - **Language filter** — set `allowed_languages: [en, zh]` in `watch.yaml` (or `--languages en,zh`) to restrict candidates by language. Posts known to be outside the list are dropped **before** triage so they don't burn classifier tokens; untagged posts are kept. Empty = no filter; `--languages all` disables a configured one. The dropped count is reported in every output format (`languageFiltered` in JSON).
@@ -84,6 +100,9 @@ publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...]
 publish reddit inspect <subreddit>... [--json] [--inspect]
 publish reddit search "<query>" [--limit <n>] [--include-nsfw] [--json] [--inspect]
 publish reddit draft --subreddit <name> --title <title> (--text <content> | --from <base.md>) [--flair <id|text>] [--nsfw] [--spoiler] [--dry-run] [--inspect]
+
+publish wechat check [--json]
+publish wechat draft (--text <content> | --from <base.md>) [--title <t>] [--author <name>] [--digest <s>] --cover <image.(png|jpg)> [--source-url <url>] [--keep-links] [--out <file.html>] [--dry-run]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.
@@ -91,3 +110,5 @@ Run any subcommand with `--help` for the authoritative flag list.
 ## Status
 
 Working (X channel). The watch loop (poll → dedupe → triage → ranked candidates) and the drafting-only publisher (`draft` / `reply`, staging native X drafts) are implemented and live-verified. The publisher **never posts** — the human-gated send action is out of scope. Open work is tracked in GitHub issues.
+
+The WeChat channel (`check` / `draft`) is implemented and live-verified (2026-07-04), staging native 草稿箱 drafts via `draft/add`; it **never publishes**.

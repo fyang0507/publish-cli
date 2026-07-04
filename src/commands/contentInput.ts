@@ -2,9 +2,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 /**
- * Resolve the canonical content source for `draft` / `reply`. Short posts
- * (tweets, replies) shouldn't require staging a scratch markdown file, so both
- * commands accept EXACTLY ONE of:
+ * Resolve the canonical content source for the drafting commands — `x draft` /
+ * `x reply` / `linkedin draft` / `reddit draft` / `wechat draft` (the resolver is
+ * channel-agnostic; each channel's own generator interprets the returned markdown).
+ * Short posts (tweets, replies) shouldn't require staging a scratch markdown file,
+ * so every consumer accepts EXACTLY ONE of:
  *   --text <content>   inline markdown, used verbatim (the ergonomic path)
  *   --from <base.md>   a canonical markdown file, OR "-" to read stdin (pipes)
  *
