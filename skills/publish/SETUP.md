@@ -25,7 +25,21 @@ Copy `.env.example` → `.env` (gitignored) and set:
   persistent-profile model as X; `LI_EMAIL` answers LinkedIn's identifier
   checkpoint). **Only needed for `publish linkedin draft`.** No 2FA/CAPTCHA is
   automated — if LinkedIn raises one, complete it in the headful `--inspect` window.
+- `REDDIT_USERNAME`, `REDDIT_PASSWORD` (and `REDDIT_EMAIL` if the login challenge
+  needs it) — Reddit credential login (same persistent-profile model as X). **Only
+  needed for the `reddit` channel** (`inspect` / `search` / `draft`). Reddit login
+  is **captcha-heavy** and no CAPTCHA/2FA is automated — run the first login headful
+  (`--inspect`) and solve any challenge in that window.
 - `TRIAGE_MODEL` (optional) — cheap model id; default `gemini-3.5-flash`.
+- `REDDIT_READS_HEADFUL` (optional) — set to `1` to start `reddit inspect` /
+  `reddit search` headful. These reads are **login-free** and default to a headless
+  browser, but Reddit 403-blocks headless Chrome's fingerprint on some
+  networks/machines (a non-JSON "network security" wall); on a block the reads
+  **auto-retry headful once** (with an advisory note). Set this on a host with a
+  bad fingerprint to skip the doomed first attempt; leave unset on
+  headless-server / good-fingerprint hosts. Distinct from the one-time first login
+  (below), which still needs headful `--inspect`; draft staging still runs headless
+  via the persisted session.
 
 ## Watch config — `watch.yaml`
 
@@ -69,20 +83,22 @@ override the symlink target directly.
 
 ## First login (headful)
 
-The browser paths (`watch`, `draft`, `reply`, `linkedin draft`) auto-log-in on
-first use into a persistent profile, then reuse it. **X blocks headless login**,
-so run the first login with `--inspect` (headful):
+The browser paths (`watch`, `draft`, `reply`, `linkedin draft`, and the `reddit`
+commands) auto-log-in on first use into a persistent profile, then reuse it.
+**X blocks headless login**, so run the first login with `--inspect` (headful):
 
 ```bash
-node dist/cli.js x watch --query "some topic" --inspect      # X profile
-node dist/cli.js linkedin draft --text "hello 👋" --inspect  # LinkedIn profile
+node dist/cli.js x watch --query "some topic" --inspect        # X profile
+node dist/cli.js linkedin draft --text "hello 👋" --inspect    # LinkedIn profile
+node dist/cli.js reddit inspect AskReddit --inspect            # Reddit profile
 ```
 
 Each channel has its own profile, so log in to each once. LinkedIn may raise a
 security checkpoint (CAPTCHA / "verify it's you") on the first automated login —
-complete it in the headful window. Watch the login complete; the warm profile
-persists for subsequent (including headless) runs. If a step stalls, see
-[calibration.md](./calibration.md).
+complete it in the headful window. **Reddit login is captcha-heavy** — expect a
+manual challenge solve on the first headful login. Watch the login complete; the
+warm profile persists for subsequent (including headless) runs. If a step stalls,
+see [calibration.md](./calibration.md).
 
 ## Browser
 

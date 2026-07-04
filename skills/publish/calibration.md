@@ -59,3 +59,72 @@ Gotchas found during live calibration (2026-07) — the likely drift points:
   aria-labels — match by text). NEVER click "Discard" or the "Post" button; both
   are documented FORBIDDEN selectors. Verification reopens the composer and matches
   the staged text in the auto-restored editor.
+
+## Reddit (`publish reddit inspect` / `search` / `draft`)
+
+The Reddit channel drifts the same way and is calibrated the same way — re-run with
+`--inspect` and update selectors. Its selectors live in `REDDIT_LOGIN_SELECTORS`
+(`src/reddit/session.ts`) and `REDDIT_COMPOSER_SELECTORS`
+(`src/reddit/draftPoster.ts`); the profile is `~/.publish-cli/reddit-profile`.
+
+Facts found during live calibration (2026-07-04) and likely drift points to check headful:
+
+- **Login (www, captcha-heavy).** `www.reddit.com/login` renders its form inside
+  **shadow-DOM faceplate web components**; the fields are `input[name="username"]`
+  and `input[name="password"]` (Playwright pierces open shadow roots for CSS), and
+  the submit control is a **`type="button"` labeled "Log In"** (not `type=submit`) —
+  the flow falls back to pressing Enter on the focused field. Before the form
+  mounts, www serves a **`js_challenge` interstitial** (URL gains
+  `?js_challenge=1&token=…`) with zero inputs that needs **a few seconds of JS plus
+  a hardened context** to clear — the context sets `locale`/`timezoneId` and launches
+  with `--disable-blink-features=AutomationControlled`. The **first login MUST be
+  headful `--inspect`**: Reddit raises a CAPTCHA that only a human can solve. The
+  optional email/identifier challenge (`identifierChallengeInput`) and the logged-in
+  signal (`loggedInSignal`) may need re-selection; keep the signal a durable marker,
+  not a hashed feed class.
+- **Reads (inspect/search) run LOGGED-OUT — never demand credentials.** Host split
+  (verified): `subreddits/search.json` works on **www**, but `about.json` +
+  `about/rules.json` 403 logged-out on www and must go through **old.reddit.com**;
+  `link_flair_v2` + `post_requirements` **require login** and return a
+  `USER_REQUIRED` envelope logged-out (degrade to empty flairs / permissive
+  requirements + a "validated at draft time" note, never a crash). A raw
+  `context.request.get()` gets **IP-throttled / edge-403'd** (served the HTML wall
+  instead of JSON), so every read is **page-driven** (`page.goto` → parse the nav
+  response, retry once after the challenge delay). Private/quarantined subs degrade
+  to a note, not a whole-run error; watch for read rate-limiting. When the profile
+  already carries a session, the same reads transparently return authed data.
+- **Reads default to a HEADLESS browser, but Reddit 403-blocks headless Chrome's
+  fingerprint on SOME networks/machines** (a non-JSON "network security" wall).
+  Because reads are **login-free**, headful needs NO human — only a display to
+  render into. On a block the reads **auto-retry headful once** (with an advisory
+  note); set **`REDDIT_READS_HEADFUL=1`** to start them headful and skip the doomed
+  first attempt (leave unset on headless-server / good-fingerprint hosts). This is
+  distinct from the one-time first **login**, which still needs headful `--inspect`
+  (captcha) as a setup-stage cost. Draft **staging still runs headless** (reuses the
+  persisted session cookie).
+- **Composer**: the self-post `submit` page/tab, the **Markdown-mode toggle**, the
+  title/body editors, the **flair picker**, and the `nsfw`/`spoiler` toggles all
+  drift and need live calibration.
+- **Markdown mode (works reliably — calibrated 2026-07-04).** "Switch to Markdown"
+  is an **`rpl-menu-item[role=menuitem]`** inside the body toolbar's **"…" (More
+  options) overflow menu**, NOT a `<button>` (the only matching `<button aria-label>`
+  is a permanently-hidden responsive copy — don't target it). The poster matches it
+  by role/text, **confirms the switch engaged** (the reverse toggle flips to
+  "Switch to Rich Text Editor" / a Markdown `<textarea>` appears), and types the
+  body into that `<textarea>`, so a normal draft is staged **in Markdown mode** and
+  renders correctly. The advisory to flip "… → Switch to Markdown" manually is a
+  **fallback** that fires ONLY in the rare case the switch genuinely can't engage —
+  not the expected outcome.
+- **Save/verify**: save is the composer's **"Save Draft"** affordance — the ONLY
+  save path. NEVER locate or click **"Post"** (a documented FORBIDDEN selector); if
+  "Save Draft" doesn't resolve, the flow bails rather than falling through to
+  another button (same safeguard as LinkedIn). Verification captures Reddit's
+  transient **"Draft saved" toast** right after the Save-Draft click ("verified in
+  drafts: yes" is the normal result on success). Do NOT verify by reopening the
+  "Drafts" modal — right after saving it shows a STALE list (the just-saved draft
+  hasn't propagated), so a title match there always fails spuriously.
+- **Eligibility gates (karma / account age)** are AutoMod-enforced and NOT in the
+  JSON, so they only surface authoritatively at draft time — confirm `draft`
+  reliably catches the composer's "not enough karma" / "account too new" /
+  "approved submitters only" / restricted block and returns a plain message rather
+  than failing opaquely or proceeding toward Post.
