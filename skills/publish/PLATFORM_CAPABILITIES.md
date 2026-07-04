@@ -7,6 +7,8 @@ per-platform **renderers** (e.g. issue #5's X Articles renderer).
 
 Method: X Articles = **empirical** (drove the live editor, 2026-06). Reddit =
 research against current docs (snoomark/GFM). X tweet/thread = plaintext (known).
+WeChat article = **empirical** — inline-CSS survival verified live in the WeChat
+草稿箱 (draft box) preview, 2026-07-04.
 
 ## Capability matrix
 
@@ -29,6 +31,29 @@ research against current docs (snoomark/GFM). X tweet/thread = plaintext (known)
 | Emoji | native | ✓ `btn-emoji` | unicode only |
 | Superscript / spoilers | ✗ | ✗ | ✓ (reddit-only; old-reddit CSS-dependent) |
 | Max length | 280 (25k premium) | large | 40,000 chars |
+
+### WeChat article (微信公众号) — API-driven, HTML body
+
+WeChat is the first **API-driven** channel (X/LinkedIn/Reddit are browser-driven)
+and its article body is neither Markdown nor plaintext but **HTML with inline
+styles ONLY** — the draft editor's sanitizer strips `<style>`/`<link>` tags and
+`class` attributes, so only per-element `style="…"` survives. Facts (empirical,
+2026-07-04):
+
+| Feature | WeChat article |
+|---|---|
+| Body format | **HTML, inline styles only** (`<style>`/`<link>`/`class` stripped) |
+| Paragraphs | yes |
+| Headings | ✓ render (emitted as inline-styled HTML) |
+| Bold / italic | ✓ (inline-styled) |
+| Blockquote | ✓ (inline-styled) |
+| Bulleted / ordered lists | ✓ (inline-styled) |
+| Code block | ✓ (inline-styled `<pre>`; no syntax highlighting) |
+| Inline images in body | ✓ **but must be WeChat-hosted** — local images auto-uploaded to the WeChat CDN; **remote images are dropped** |
+| Links | **mostly deactivated** in article bodies (`mp.weixin.qq.com` links kept inline) → send others to **bottom citations** |
+| Cover image | **required** (`thumb_media_id`, uploaded as permanent material) |
+| LaTeX / math | **unknown — verify live** (no assumption made) |
+| Max length | large limit |
 
 **Takeaway:** X **Articles** and Reddit are both *rich* surfaces with a large
 overlap (headings, bold/italic/strike, lists, blockquote, code, tables, links,
@@ -86,6 +111,17 @@ code/tables/images → screenshots or attached media; headings/quotes → plain 
 - Post via **Markdown mode** or the API — the Rich Text editor mangles pasted markdown.
 - Code → 4-space-indented blocks (portable). Tables only if old-reddit raw-pipe
   fallback acceptable. Images → separate image post. Blank-line paragraphs.
+
+**WeChat article** (API-driven — deterministic, no LLM):
+- Render Markdown → **inline-styled HTML** via a `marked` renderer override that
+  attaches a `style="…"` to **every** element — no `<style>` block or `class`
+  survives WeChat's sanitizer. One default typographic look this phase.
+- **External links → bottom numbered citations** by default; `mp.weixin.qq.com`
+  links are kept inline (those stay active).
+- Local `<img>` tags → **uploaded to the WeChat CDN**, `src` rewritten to the
+  returned CDN URL (remote images are dropped by WeChat, so plan for local).
+- **Cover image** → uploaded as **permanent material**; its `thumb_media_id` is
+  required to stage the draft.
 
 ## Caveat
 Reddit old-vs-new gaps and the 40k cap are corroborated across secondary refs, not

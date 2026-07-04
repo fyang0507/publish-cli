@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts; Reddit self-posts) from inline text or a Markdown file. Also inspects/searches subreddits for their posting contracts (facts only). Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, discover subreddit posting rules, or turn Markdown into X-ready, LinkedIn-ready, or Reddit-ready drafts.
+description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts; Reddit self-posts; WeChat Official Account article drafts staged in the 草稿箱 from Markdown) from inline text or a Markdown file. Also inspects/searches subreddits for their posting contracts (facts only). Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, discover subreddit posting rules, or turn Markdown into X-ready, LinkedIn-ready, Reddit-ready, or WeChat-ready drafts.
 ---
 
 `publish` is a CLI that turns Markdown into X (Twitter) drafts and surfaces reply
@@ -29,6 +29,14 @@ send/approval flow are the caller's concern, not this CLI's.
 - **reddit draft** — turn inline text (or a Markdown file) into a native **Reddit
   self-post** draft for one subreddit (title + Markdown body kept ~verbatim,
   optional flair/nsfw/spoiler), preflighting that subreddit's rules.
+- **wechat check** — read-only preflight (the first **API-driven** channel — X,
+  LinkedIn and Reddit are browser-driven): verify credentials, mint an access token
+  (stable-token), and confirm the egress IP the API sees is in the account's IP
+  allowlist (travel-aware). Stages nothing.
+- **wechat draft** — turn canonical Markdown (or inline text) into a native WeChat
+  Official Account **article** draft (文章) staged in the 草稿箱: title +
+  **inline-styled HTML** body + required cover image; external links default to
+  bottom citations; local body images uploaded to WeChat's CDN.
 
 ## When to use
 
@@ -55,6 +63,15 @@ send/approval flow are the caller's concern, not this CLI's.
   reddit draft --subreddit <name> --title "…" --from <file.md>` (or `--text`). The
   CLI reports subreddit facts; **you** decide which subreddit fits (no LLM ranking).
   Because Reddit renders Markdown, the body is kept ~verbatim (not flattened).
+- Publish owned long-form to WeChat → `publish wechat draft --from <file.md> --cover
+  <img>` (or `--text`). The body is **rich inline-styled HTML** (WeChat strips
+  `<style>` and CSS classes, so all styling is inlined; one default look). Title
+  **≤64 code points**, digest **≤120 code points** (over cap is an ERROR, never
+  silent truncation). A **cover image is required.** External links → bottom
+  citations by default (`--keep-links` keeps them inline). Rendering is
+  **deterministic, no LLM**. Stages a native draft in the 草稿箱 and **never posts**.
+  On a new network/proxy, run `publish wechat check` first (the API is
+  IP-allowlist-gated).
 
 Do **not** use it to post/publish (it only drafts), and do not use it to *decide*
 content — supply the Markdown (and, for triage, the free-text persona/rubric) yourself.
@@ -130,6 +147,10 @@ publish reddit inspect <subreddit>... [--json] [--inspect]
 publish reddit search "<query>" [--limit <n>] [--include-nsfw] [--json] [--inspect]
 publish reddit draft --subreddit <name> --title "<title>" (--text <content> | --from <file.md>) \
                  [--flair <id|text>] [--nsfw] [--spoiler] [--dry-run] [--inspect]
+publish wechat check [--json]
+publish wechat draft (--text <content> | --from <file.md>) [--title "<t>"] [--author "<name>"] \
+                 [--digest "<s>"] --cover <image.(png|jpg)> [--source-url <url>] [--keep-links] \
+                 [--out <file.html>] [--dry-run]
 ```
 
 - **create-watch-list** — seeds a List from the accounts `--handle` (default: the
@@ -206,6 +227,32 @@ publish reddit draft --subreddit <name> --title "<title>" (--text <content> | --
   are AutoMod-enforced and only surface authoritatively at draft time. `--dry-run`
   generates + runs the preflight without a browser; `--inspect` runs headful. Stages
   via **"Save Draft"** and never posts. There is **no `--media`** (self-post only).
+- **wechat check** — read-only preflight, the first **API-driven** channel (**no
+  browser**, so **no `--inspect`**). Runs three gates in order — credentials → token
+  → IP-allowlist — printing each as ✓/✗ with an actionable next step: it reads the
+  app credentials, mints/caches a **stable-token**, then calls the API to learn the
+  egress IP it actually sees. On a **40164** (IP not allowlisted) it prints the
+  offending egress IP plus the console URL to add it, so the fix is one paste away
+  (travel-aware — the IP changes with the network). `--json` for machine output.
+  Stages nothing.
+- **wechat draft** — inline `--text` or `--from <file.md>` (`-` = stdin) via the
+  shared resolver. Metadata `--title` / `--author` / `--digest` / `--cover` /
+  `--source-url` fall back to `--from` frontmatter (`coverImage`/`cover`/`image` for
+  the cover, `sourceUrl` for the source link); **title ≤64 code points** and
+  **digest ≤120 code points** are **hard errors** (no silent truncation). The
+  **cover is required** and is uploaded to become the article's `thumb_media_id`. The
+  body is rendered to **inline-styled HTML** (WeChat strips `<style>`/classes);
+  **local body images are uploaded to WeChat's CDN and their `<img src>` rewritten**,
+  while **remote `http(s)` images are flagged and left as-is** (a published article
+  would drop them); an **oversized body image (>1 MB) is an ERROR this phase**.
+  `--dry-run` renders + validates with **NO network** (no token, no upload, no
+  `draft/add`) and, with `--out`, writes the HTML for inspection. It stages via
+  **`draft/add`** and **never publishes** — `freepublish/*` and `message/mass/*` are
+  never called; the boundary is **structural** (separate endpoints, no code path
+  reaches them). Auth is **not** a browser login: an app_id/app_secret →
+  cached-stable-token loop, and the API is **IP-allowlist-gated**, so calls must be
+  routed through one fixed egress IP (allowlisted once) configured via env — see
+  [SETUP.md](./SETUP.md).
 
 ## Platform constraints (what each surface does NOT support)
 
@@ -220,10 +267,17 @@ capability matrix + editor selectors: [`PLATFORM_CAPABILITIES.md`](./PLATFORM_CA
   strikethrough, dividers, LaTeX, embedded posts, inline images + a required **5:2 hero**.
 - **Reddit self-post:** NO inline body images (separate image post); on old reddit,
   fenced code + tables don't render (use 4-space code; avoid tables); post in Markdown mode.
+- **WeChat article:** body is **HTML with inline styles only** — WeChat strips
+  `<style>`, `<link>`, and CSS classes; most **external links are deactivated** in
+  article bodies (default → bottom citations; only `mp.weixin.qq.com` links stay
+  inline); **images must be WeChat-hosted** (local images are auto-uploaded to the
+  CDN; remote `http(s)` images are dropped by a published article → flagged); one
+  default look this phase (no themes); **article self-posts only** (图文/newspic not yet).
 
 ## More
 
 - **Setup & auth** (install, credentials, first login, data dir): [SETUP.md](./SETUP.md)
+- **WeChat setup** (app credentials + the fixed-egress-IP requirement): [SETUP.md](./SETUP.md)
 - **A browser step hangs / times out** (selector drift): [calibration.md](./calibration.md)
 - **Full render capability matrix**: [`PLATFORM_CAPABILITIES.md`](./PLATFORM_CAPABILITIES.md)
 

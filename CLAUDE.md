@@ -1,6 +1,6 @@
 # publish-cli
 
-Per-channel content-distribution toolkit for growing the operator's AI-community audience. Binary: `publish`. **Channels built today: X** (a WATCH loop for borrowed-reach + a drafting-only PUBLISH for owned-content), **LinkedIn** (drafting-only PUBLISH) **and Reddit** (drafting-only PUBLISH — self-posts). Every PUBLISH path is **draft-only — it never posts**.
+Per-channel content-distribution toolkit for growing the operator's AI-community audience. Binary: `publish`. **Channels built today: X** (a WATCH loop for borrowed-reach + a drafting-only PUBLISH for owned-content), **LinkedIn** (drafting-only PUBLISH), **Reddit** (drafting-only PUBLISH — self-posts) **and WeChat** (微信公众号; drafting-only PUBLISH — article self-posts, the first API-driven channel). Every PUBLISH path is **draft-only — it never posts**.
 
 Companion docs: [README.md](./README.md) (usage), [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) (vision/roadmap), [skills/publish/SETUP.md](./skills/publish/SETUP.md) (setup) and [skills/publish/SKILL.md](./skills/publish/SKILL.md) (agent-facing capability layer).
 
@@ -10,7 +10,7 @@ Every publisher stops at a **native draft staged on the platform** (X Unsent, Li
 
 ## What it is
 
-The CLI is **channel-first**: `publish <channel> <action>` (each channel has its own action space). Three channels today: `x`, `linkedin`, and `reddit`.
+The CLI is **channel-first**: `publish <channel> <action>` (each channel has its own action space). Four channels today: `x`, `linkedin`, `reddit`, and `wechat`.
 
 - `publish x create-watch-list` — build/populate the account-watch List from who you follow → prints the id for `watch --x-list`. Never posts (writes List membership only).
 - `publish x watch` — poll queries / Lists → dedupe → cheap-LLM triage (Gemini, low reasoning effort) → ranked reply candidates. Accounts are watched via a List (`--x-list`), never one-by-one. The `x-list` spelling is unified across `watch` and `create-watch-list`.
@@ -19,12 +19,14 @@ The CLI is **channel-first**: `publish <channel> <action>` (each channel has its
 - `publish linkedin draft (--text <s> | --from <md>)` — inline text (primary) or markdown → a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) → **native LinkedIn draft** via "Save as draft"; never posts. LinkedIn has no WATCH capability today (PUBLISH only).
 - `publish reddit inspect <sub>...` / `publish reddit search "<query>"` — read-only discovery: `inspect` reports each named subreddit's posting contract (subscribers, allowed types, rules, flairs, post requirements); `search` lists candidate subreddits. Facts only, no LLM ranking — the agent judges.
 - `publish reddit draft --subreddit <name> --title <t> (--text <s> | --from <md>) [--flair <id|text>]` — canonical markdown (kept ~verbatim; Reddit renders Markdown) → a single **self-post** → **native Reddit draft** via "Save Draft"; never posts. Enforces the target subreddit's contract before staging. Reddit has no WATCH capability today (PUBLISH only).
+- `publish wechat check` — read-only preflight: verify credentials, mint a stable-token, and confirm the egress IP the API sees is in the account's IP allowlist (travel-aware). Never writes.
+- `publish wechat draft --from <base.md> --cover <img> (or --text)` — canonical markdown → title + **inline-styled HTML** body + cover → a single **article** (`article_type=news`) → a **native draft in the 草稿箱** via `draft/add`; never publishes. Enforces title ≤64 / digest ≤120 code points (ERROR over cap), requires a cover, uploads local body images to WeChat's CDN, and default-converts external links to bottom citations. WeChat has no WATCH capability today (PUBLISH only).
 
-Short posts/replies take inline `--text`; `--from` (with `-` = stdin) is for longer, file-based canonical markdown. Both resolve through the shared `src/commands/contentInput.ts` (exactly-one-of validation).
+Short posts/replies take inline `--text`; `--from` (with `-` = stdin) is for longer, file-based canonical markdown (WeChat is long-form — `--from` primary). All resolve through the shared `src/commands/contentInput.ts` (exactly-one-of validation).
 
 ## Stack
 
-TypeScript + Node **ESM** (`"type": "module"`, `module`/`moduleResolution` = `Node16`) — **import local files with the `.js` extension**. `commander` CLI (each command file exports a `register*Command(parent)`). `@google/genai` (Gemini triage/tailoring), `better-sqlite3` (dedupe store), `playwright` (browser), `yaml` (`watch.yaml`), `dotenv` (`.env`).
+TypeScript + Node **ESM** (`"type": "module"`, `module`/`moduleResolution` = `Node16`) — **import local files with the `.js` extension**. `commander` CLI (each command file exports a `register*Command(parent)`). `@google/genai` (Gemini triage/tailoring), `better-sqlite3` (dedupe store), `playwright` (browser), `yaml` (`watch.yaml`), `dotenv` (`.env`). WeChat (API-driven) adds `marked` (markdown → inline-styled HTML) and `undici`/`socks`/`socks-proxy-agent` (the fixed-egress-IP dispatcher + ssh/SOCKS tunnel).
 
 ## X access = one browser, both directions
 
@@ -46,9 +48,17 @@ LinkedIn is a browser-driven PUBLISH channel that mirrors X's persistent-profile
 
 Reddit is a browser-driven PUBLISH channel that mirrors the X/LinkedIn persistent-profile model with a **separate** session (`src/reddit/session.ts`, profile `<PUBLISH_DATA_DIR>/reddit-profile`, cache `reddit-cookies.json`, creds `REDDIT_USERNAME`/`REDDIT_PASSWORD`(/`REDDIT_EMAIL`)) — one unattended credential login, headful `--inspect` for first login / calibration (Reddit login is **captcha-heavy**) — a one-time setup-stage cost. Draft **staging** still runs headless (reuses the persisted session cookie); the never-posts boundary is unchanged. `reddit inspect` / `reddit search` reads are **login-free** and default to a headless browser, but Reddit 403-blocks headless Chrome's fingerprint on SOME networks/machines (a non-JSON "network security" wall); since reads need no human — only a display — they **auto-retry headful once** on a block (with an advisory note), and `REDDIT_READS_HEADFUL=1` starts them headful to skip the doomed first attempt (leave unset on headless-server / good-fingerprint hosts). It reuses by import (`parseBaseMarkdown`/`countChars` from `src/x/content.ts`; `tolerantLocator`/`optionalLocator`/`typeText` from `src/x/draftPoster.ts`; `resolveContentInput`), never by editing X. Composer save = **"Save Draft"** (never "Post" — a documented FORBIDDEN selector). The poster switches the composer to Markdown mode so the body renders as Markdown (calibrated live 2026-07-04): the "Switch to Markdown" control is an `rpl-menu-item[role=menuitem]` inside the body toolbar's "…" (More options) overflow — NOT a `<button>` (the only matching `<button aria-label>` is a permanently-hidden responsive copy) — so the poster matches it by role/text, confirms the switch engaged (the reverse toggle becomes "Switch to Rich Text Editor" / a Markdown `<textarea>` appears), and types the body into that `<textarea>`. A normal draft is therefore staged **in** Markdown mode and renders correctly; the advisory to flip "… → Switch to Markdown" manually now fires ONLY in the rare case the switch genuinely can't engage — a fallback, no longer the expected outcome. After the "Save Draft" click the poster verifies the save via Reddit's transient "Draft saved" toast (reopening the "Drafts" modal shows a stale list, so it is not used), so "verified in drafts: yes" is the normal result on a successful save. Since every draft is human-reviewed pre-post, any residual limitation is surfaced, not silent.
 
+## WeChat is API-driven (the first non-browser channel)
+
+WeChat (微信公众号 / Official Account) is the first channel that does **NOT** use Playwright — it calls the official Official Account API (`api.weixin.qq.com`) over HTTPS. Auth = `WECHAT_APP_ID`/`WECHAT_APP_SECRET` → a cached **stable-token** (`/cgi-bin/stable_token`), cache at `<PUBLISH_DATA_DIR>/wechat-token.json` (machine-local, off Drive). **No browser, no persistent profile, no cookie cache.** See [docs/WECHAT_DESIGN.md](./docs/WECHAT_DESIGN.md).
+
+- **Reuse by import, not by editing X:** `src/wechat/*` imports the channel-agnostic helpers (`parseBaseMarkdown`/`countChars` from `src/x/content.ts`; `resolveContentInput` from `src/commands/contentInput.ts`) and adds a `marked`-based renderer that emits **inline `style=` on every element** — WeChat's draft sanitizer strips `<style>`/`<link>`/CSS classes, so styling MUST be inlined. Deterministic, no LLM. Do NOT relocate/rewrite X's modules for WeChat's sake.
+- **Hard boundary is structural (the API analog of the browser channels' forbidden selectors):** save (`/cgi-bin/draft/add`) and publish (`/cgi-bin/freepublish/submit`) are **different endpoints**. Only `draft/add` (+ `stable_token`, `media/uploadimg`, `material/add_material`, and the read-only `get_api_domain_ip` for the IP check) is ever called. `freepublish/*` and `message/mass/*` are **FORBIDDEN** — never imported/called (a boundary comment in `client.ts` enumerates them). There is no code path that publishes.
+- **IP allowlist (IP白名单):** WeChat gates **ALL** API calls by source IP (including the token fetch itself; an unlisted IP → error `40164`). The allowlist has **no edit API**, requires a manual **admin QR re-scan** per change, and caps at **15 IPs** — so it cannot be automated. The channel instead routes **every** call through **one fixed egress IP allowlisted once** (fixed-egress-IP mode): `WECHAT_SSH_TUNNEL` (the CLI auto-spawns/tears down an `ssh -N -D` SOCKS5 tunnel) or `WECHAT_PROXY_URL` (http(s)/socks5) — a single egress seam in `client.ts`/`egress.ts`. This keeps a traveling / VPN operator zero-touch: the account's egress never changes even as the operator's real IP does. The admin console for the allowlist migrated 2025-12-01 to the 微信开发者平台 (`developers.weixin.qq.com/platform/`). Built + live-verified 2026-07-04.
+
 ## State lives in two homes
 
-- **Machine-local** — the persistent browser profiles + harvested cookie caches (per channel: `x-profile`/`x-cookies.json`, `li-profile`/`li-cookies.json`, `reddit-profile`/`reddit-cookies.json`) — under `PUBLISH_DATA_DIR` (default `~/.publish-cli`). **MUST stay off any cloud-synced path and out of the repo.**
+- **Machine-local** — the persistent browser profiles + harvested cookie caches (per channel: `x-profile`/`x-cookies.json`, `li-profile`/`li-cookies.json`, `reddit-profile`/`reddit-cookies.json`) plus WeChat's stable-token cache (`wechat-token.json`) — under `PUBLISH_DATA_DIR` (default `~/.publish-cli`). **MUST stay off any cloud-synced path and out of the repo.** WeChat is API-driven, so it has **no** browser profile and its draft channel does **no** sqlite dedupe — just the token cache.
 - **Durable** — the SQLite dedupe store — in the **data repo** at `<data_repo>/.publish-cli/`, so it travels with the agent workspace. The agent-skill symlink also targets `<data_repo>/.agents/skills/`.
 - **Data-repo resolution** (`src/dataRepo.ts`): `PUBLISH_DATA_REPO` env → `publish.config.dev.yaml` (`data_repo_path`) → walk up for `.agents/workspace.yaml`. If unresolved, the dedupe DB falls back to `PUBLISH_DATA_DIR` and the symlink step is skipped. **Never hardcode a personal path.**
 - **This repo sits on Google Drive** — churny runtime data off-repo is a correctness requirement, not a preference.
@@ -67,8 +77,8 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 
 | Path | Purpose |
 |---|---|
-| `src/cli.ts` | `publish` program; registers the `x` group (`create-watch-list` / `watch` / `draft` / `reply`), the `linkedin` group (`draft`) and the `reddit` group (`inspect` / `search` / `draft`) |
-| `src/config.ts` | env (X + LinkedIn + Reddit creds, `TRIAGE_MODEL`), `dataPaths()` (x-/li-/reddit-profile + cookie caches), `loadWatchConfig()` |
+| `src/cli.ts` | `publish` program; registers the `x` group (`create-watch-list` / `watch` / `draft` / `reply`), the `linkedin` group (`draft`), the `reddit` group (`inspect` / `search` / `draft`) and the `wechat` group (`check` / `draft`) |
+| `src/config.ts` | env (X + LinkedIn + Reddit + WeChat creds, `TRIAGE_MODEL`, `WECHAT_SSH_TUNNEL`/`WECHAT_PROXY_URL`), `dataPaths()` (x-/li-/reddit-profile + cookie caches + `wechatTokenCache`), `loadWatchConfig()` |
 | `src/dataRepo.ts` | `resolveDataRepo()` — env → dev config → workspace walk-up |
 | `src/session.ts` | X Playwright persistent-profile login; `ensureSession`/`getCookies`/`getBrowserContext` |
 | `src/gemini.ts` | `@google/genai` client: `generate()` + `triage()` |
@@ -85,9 +95,14 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/reddit/reader.ts` | authenticated JSON reads for `inspect` / `search` / draft preflight (`about` / `about/rules` / `link_flair_v2` / `subreddits/search`) + `post_requirements` response capture |
 | `src/reddit/content.ts` | `generateSelfPost` — canonical markdown → title + Markdown body (kept ~verbatim), caps, old-reddit/link advisories (reuses `src/x/content.ts`) |
 | `src/reddit/draftPoster.ts` | Reddit composer automation: stage a native self-post draft via "Save Draft" (never posts) |
-| `src/commands/contentInput.ts` | shared `--text` / `--from` / stdin resolution (exactly-one-of) for `draft` / `reply` / `linkedin draft` / `reddit draft` |
+| `src/wechat/client.ts` | WeChat API backbone: stable-token mint + cache, image uploads, `addDraft`, the single egress seam, `40164` (IP-not-allowlisted) parsing; documents the FORBIDDEN `freepublish/*` / `message/mass/*` endpoints |
+| `src/wechat/egress.ts` | fixed-egress-IP dispatcher — routes API calls through `WECHAT_SSH_TUNNEL` (auto-spawned `ssh -N -D` SOCKS5) or `WECHAT_PROXY_URL` (http(s)/socks5) |
+| `src/wechat/content.ts` | `generateArticle` — canonical markdown → title + inline-styled HTML body (`marked`, `style=` on every element), caps/advisories (reuses `src/x/content.ts`) |
+| `src/wechat/draft.ts` | draft orchestration: upload cover + body images, rewrite image `src`s to CDN URLs, then `draft/add` (never publishes) |
+| `src/commands/contentInput.ts` | shared `--text` / `--from` / stdin resolution (exactly-one-of) for `draft` / `reply` / `linkedin draft` / `reddit draft` / `wechat draft` |
 | `src/commands/{create-watch-list,watch,draft,reply,linkedin-draft}.ts` | command bodies |
 | `src/commands/reddit-{inspect,search,draft}.ts` | Reddit command bodies |
+| `src/commands/wechat-{check,draft}.ts` | WeChat command bodies |
 | `scripts/install-agent-skill-symlinks.js` | post-build: chmod bin + symlink skill into `<data_repo>/.agents/skills` |
 | `skills/publish/` | agent-facing capability layer, shipped as a whole dir (SKILL.md router + SETUP.md + calibration.md + PLATFORM_CAPABILITIES.md). Symlinked into other workspaces, so intra-skill links MUST be `./`-relative — never escape the folder (e.g. `../../docs/…`). |
 
@@ -104,3 +119,5 @@ Playwright prefers system Google Chrome (`channel: 'chrome'`); fall back to `npx
 ## Verify live
 
 Compile-green + code review has repeatedly missed real bugs in the browser flows. **Verify browser reads/drafts against the live platform** (X or LinkedIn, headful `--inspect`) before claiming a flow works. The LinkedIn channel was calibrated this way (2026-07) — its login/composer selectors, like X's, drift and need occasional live re-calibration.
+
+WeChat is API-driven, so "verify live" means exercising the real API and eyeballing the 草稿箱 (drafts) preview — in particular that the **inline CSS survives** WeChat's draft sanitizer (the whole reason styling is inlined) and that the egress IP is allowlisted. Built + live-verified 2026-07-04.

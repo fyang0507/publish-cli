@@ -22,7 +22,11 @@
     "better-sqlite3": "^12.8.0",
     "commander": "^14.0.3",
     "dotenv": "^17.4.0",
+    "marked": "^18.0.5",
     "playwright": "^1.48.0",
+    "socks": "^2.8.9",
+    "socks-proxy-agent": "^10.1.0",
+    "undici": "^8.5.0",
     "yaml": "^2.8.3"
   },
   "devDependencies": {
