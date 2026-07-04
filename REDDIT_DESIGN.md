@@ -242,6 +242,15 @@ reads **through the authenticated browser context** — cookies attached — via
 (§4) calls the same reader. One reads layer, three consumers. No dedupe/SeenStore
 (that is a WATCH concern).
 
+**Headless vs headful (reads).** Reads default to a **headless** browser, but Reddit
+403-blocks headless Chrome's fingerprint on some networks/machines (a non-JSON
+"network security" wall). Reads are **login-free**, so headful needs no human — only
+a display: `inspect`/`search` **auto-retry headful once** on a block (with an
+advisory note), and `REDDIT_READS_HEADFUL=1` starts them headful to skip the doomed
+first attempt (leave unset on headless-server / good-fingerprint hosts). This is
+distinct from the one-time first **login**, which still needs headful `--inspect`
+(captcha); draft **staging** still runs headless on the persisted session cookie.
+
 ### 3.4 Content generation — reuse X's parser, keep the Markdown
 
 Reddit is Markdown-native, so `src/reddit/content.ts` is closer to passthrough
@@ -323,9 +332,11 @@ mirroring X's/LinkedIn's `stagePost` and reusing their shared primitives
    documented forbidden selector (mirrors X's `tweetButton` and LinkedIn's Post).
    Same safeguard as LinkedIn: if the Save-Draft affordance doesn't resolve, bail
    — never fall through to another button.
-8. **Verify:** reopen the drafts list and match the staged title/leading body
-   (port the X/LinkedIn "match the staged item, don't trust a blind success"
-   hardening).
+8. **Verify:** capture Reddit's transient **"Draft saved" toast** right after the
+   Save-Draft click (reopening the drafts list shows a *stale* list — the just-saved
+   draft hasn't propagated — so a toast match, not a drafts-list match, is the
+   reliable signal; still the X/LinkedIn "match the staged item, don't trust a blind
+   success" hardening).
 9. Return `{ kind: "self", verified, subreddit, flair, note }` with the
    old-reddit/link advisories folded into `note`.
 
@@ -337,6 +348,9 @@ is trustworthy until run headful (`--inspect`) against real Reddit.
 
 - `PublishEnv`: `REDDIT_USERNAME`, `REDDIT_PASSWORD` (+ `REDDIT_EMAIL` if the login
   challenge needs it) — added to `.env.example`. No OAuth client id/secret/token.
+  Also `REDDIT_READS_HEADFUL` (optional, `1`/`true`/`yes`): start `inspect`/`search`
+  (and `draft` preflight) headful to skip the doomed headless attempt on hosts whose
+  fingerprint Reddit 403-blocks (see §3.3). Unset by default.
 - `DataPaths`: `redditProfileDir` (`<baseDir>/reddit-profile`), `redditCookieCache`
   (`<baseDir>/reddit-cookies.json`) — machine-local, **off Google Drive**, same
   posture as the X/LinkedIn profiles. `mkdirSync` the profile like the others.

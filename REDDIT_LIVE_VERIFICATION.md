@@ -53,49 +53,55 @@ action"). Three commits added this session:
    matching `<html>`); `capturePostRequirements` reads the response body before the
    page closes (was ~always null).
 
-## Known limitation (surfaced, not silent): Markdown mode is unreliable
+## Markdown mode — now works reliably (fixed, live-verified 2026-07-04)
 
-Reddit's new `<shreddit-composer>` stores the body as a structured rich-text
-document and hydrates its **"Switch to Markdown"** toggle inconsistently (it lives
-in the body toolbar's "More options … " overflow and depends on RTE-toolbar
-hydration timing / composer state). `switchToMarkdownMode` is now a robust
-best-effort (waits for toolbar hydration, tries the inline button then the overflow
-menu), **but it often can't engage in the real flow** — so the body is entered in
-the rich editor where markdown syntax (`**bold**`, lists, fenced code) renders
-**literally**.
+Root cause found + fixed: the **"Switch to Markdown"** control is an
+`rpl-menu-item[role=menuitem]` inside the body toolbar's **"…" (More options)**
+overflow — NOT a `<button>` (the only matching `<button aria-label>` is a
+permanently-hidden responsive copy, which is why earlier attempts couldn't engage).
+`switchToMarkdownMode` now matches it by role/text, **confirms the switch engaged**
+(the reverse toggle becomes "Switch to Rich Text Editor" / a Markdown `<textarea>`
+appears), and types the body into that `<textarea>`. So a normal draft is now staged
+**in Markdown mode** and renders correctly.
 
-When it can't engage, `stageDraft` emits an advisory telling the operator to open
-the draft and flip **"… → Switch to Markdown"** before posting. Since every draft
-is human-reviewed pre-post, this is acceptable, but it's the main quality gap.
+The advisory telling the operator to flip **"… → Switch to Markdown"** manually now
+fires **only** in the rare case the switch genuinely can't engage — it is a fallback,
+no longer the expected outcome.
 
 ## Further action / dev needed
 
 1. **PR #27 is still a draft.** Review the two calibration commits (`849361b`,
    `ec82f72`) and, when happy, mark it ready-for-review / merge. (I did not flip it
    or merge — outward-facing state left to you.)
-2. **Markdown-mode engagement** is the biggest open item. Options to explore:
-   - Detect hydration more reliably (e.g. wait on a specific composer-ready signal)
-     and/or open a **fresh** submit tab so an auto-restored draft doesn't perturb the
-     RTE state.
-   - Investigate whether typing raw markdown then toggling AFTER typing preserves it,
-     or whether a paste path renders markdown.
-   - If it stays unreliable, consider making the advisory even louder, or a
-     `--require-markdown` flag that fails the stage if the toggle can't engage.
-3. **`verifyDraftSaved` always reports "unconfirmed"** (`src/reddit/draftPoster.ts`)
-   — it navigates to `submit?type=TEXT` (the composer), not a real drafts list. The
-   actual drafts UI is a **dialog** opened by the "Drafts" button (rows carry an
-   edit `svg[icon-name="edit"]` and delete `svg[icon-name="delete"]`), with no clean
-   list URL. Non-fatal (the draft does land), but the verification signal is dead;
-   calibrate it to open the Drafts dialog and match the title if you want a real
-   confirmation.
-4. **Headless reads are 403-blocked on this machine's fingerprint.** `inspect` /
-   `search` without `--inspect` hit the "network security" wall; a headful real
-   Chrome passes. Decide whether the read commands should default to headful, or
-   document that `--inspect` is required for reads here.
-5. **Selector drift.** All composer selectors are calibrated to 2026-07-03 and
-   Reddit's shell drifts; expect periodic re-calibration via `--inspect`. Every
-   fragile selector is commented "CALIBRATED LIVE 2026-07-03 … NEEDS LIVE
-   CALIBRATION" in `src/reddit/draftPoster.ts` / `session.ts` / `reader.ts`.
+2. **Markdown-mode engagement — DONE (live-verified 2026-07-04).** Root cause was
+   that the "Switch to Markdown" control is an `rpl-menu-item[role=menuitem]` in the
+   body toolbar's "…" overflow, not a `<button>`. `switchToMarkdownMode` now matches
+   it by role/text, confirms the switch engaged, and types into the Markdown
+   `<textarea>`; a normal draft stages in Markdown mode and renders correctly. See
+   "Markdown mode — now works reliably" above.
+3. **Draft-saved verification — DONE (live-verified 2026-07-04).** Root cause:
+   reopening the composer "Drafts" modal right after saving showed a **stale** list
+   (the just-saved draft hadn't propagated), so title-matching there always failed.
+   Fixed by verifying via Reddit's transient **"Draft saved" toast**, captured right
+   after the Save-Draft click. "verified in drafts: yes" is now the normal result on
+   a successful save.
+4. **Headless-reads 403 — DONE (live-verified 2026-07-04).** `reddit inspect` /
+   `reddit search` default to a headless browser, but Reddit 403-blocks headless
+   Chrome's fingerprint on **some** networks/machines (a non-JSON "network security"
+   wall). Reads are **login-free**, so headful needs no human — only a display to
+   render into. New behavior: reads **auto-retry headful once** on a block (with an
+   advisory note), and **`REDDIT_READS_HEADFUL=1`** starts them headful to skip the
+   doomed first attempt (leave unset on headless-server / good-fingerprint hosts).
+   This is distinct from the one-time first **login**, which still needs headful
+   `--inspect` (captcha) as a setup-stage cost. Draft **staging** still runs headless
+   (reuses the persisted session cookie); the never-posts boundary is unchanged.
+5. **Selector drift.** Composer selectors are calibrated to 2026-07-03, with the
+   Markdown-toggle / More-options / body-editor / Markdown-confirm / Save-confirm
+   selectors **re-calibrated 2026-07-04** (fixing #2/#3 — see their code comments
+   "RE-CALIBRATED LIVE 2026-07-04"). Reddit's shell drifts; expect periodic
+   re-calibration via `--inspect`. Every fragile selector is commented "CALIBRATED
+   LIVE …/RE-CALIBRATED LIVE … NEEDS LIVE CALIBRATION" in
+   `src/reddit/draftPoster.ts` / `session.ts` / `reader.ts`.
 
 ## Guardrails preserved
 

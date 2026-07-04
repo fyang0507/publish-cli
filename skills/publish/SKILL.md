@@ -182,6 +182,11 @@ publish reddit draft --subreddit <name> --title "<title>" (--text <content> | --
   flair required? would the title pass?). `search` takes a free-text query and lists
   shallow candidates (`--limit`, default 25; `--include-nsfw` to include over-18
   subs). Both emit a human report by default or a structured array with `--json`.
+  These reads are **login-free** and run in a **headless** browser by default; on
+  hosts where Reddit 403-blocks the headless fingerprint they **auto-retry headful
+  once** (with an advisory note), and `REDDIT_READS_HEADFUL=1` starts them headful to
+  skip the doomed first attempt (leave it unset on headless-server / good-fingerprint
+  hosts). Draft staging stays headless (reuses the persisted session cookie).
   They compose: `search` → agent picks names → `inspect` those → agent decides →
   `draft`.
 - **reddit draft** — inline `--text` or `--from <file.md>` (`-` = stdin); one

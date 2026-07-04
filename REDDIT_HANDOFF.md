@@ -1,4 +1,4 @@
-# Reddit channel — handoff (updated 2026-07-03: LIVE-VERIFIED ✅)
+# Reddit channel — handoff (updated 2026-07-04: LIVE-VERIFIED ✅)
 
 Self-contained pickup notes. Read this, then
 [REDDIT_DESIGN.md](./REDDIT_DESIGN.md) for the full design.
@@ -19,15 +19,26 @@ LIVE-VERIFIED end-to-end** on branch `worktree-reddit-channel-design` (PR #27).
   `<shreddit-composer>` (see commit `ec82f72`): `loggedInSignal`, the flair-list
   endpoint, the body editor, and the flair modal.
 
-**Known limitation (surfaced, not silent):** Reddit's new composer hydrates its
-"Switch to Markdown" toggle unreliably, so the body is often entered in the rich
-editor and markdown renders literally; `stageDraft` emits an advisory telling the
-operator to flip "… → Switch to Markdown" in the draft before posting. Every draft
-is human-reviewed pre-post, so this is acceptable.
+**Markdown mode — now works reliably (item #2 DONE, live-verified 2026-07-04):**
+the "Switch to Markdown" control is an `rpl-menu-item[role=menuitem]` inside the
+body toolbar's "…" (More options) overflow — NOT a `<button>` (the only matching
+`<button aria-label>` is a permanently-hidden responsive copy). `stageDraft` now
+matches it by role/text, confirms the switch engaged (the reverse toggle becomes
+"Switch to Rich Text Editor" / a Markdown `<textarea>` appears), and types the body
+into that `<textarea>`, so a normal draft is staged **in Markdown mode and renders
+correctly**. The advisory to flip "… → Switch to Markdown" manually now fires ONLY
+in the rare case the switch genuinely can't engage — a fallback, no longer the
+expected outcome.
 
-Note: the 403 "network security" wall blocks the **headless** read path but a
-**headful** real Chrome (persistent profile) passes — always verify live with
-`--inspect`.
+Note (reads, item #4 DONE, live-verified 2026-07-04): on some networks/machines
+Reddit 403-blocks headless Chrome's fingerprint (a non-JSON "network security"
+wall) on the read path. Reads are **login-free**, so `inspect`/`search` now
+**auto-retry headful once** on a block (with an advisory note), and
+`REDDIT_READS_HEADFUL=1` starts them headful to skip the doomed first attempt
+(leave unset on headless-server / good-fingerprint hosts). This is distinct from the
+one-time first **login**, which still needs headful `--inspect` (captcha) and is a
+setup-stage cost only. Draft **staging still runs headless** on the persisted
+session cookie; the never-posts boundary is unchanged.
 
 ## Where things live
 

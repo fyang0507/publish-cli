@@ -270,6 +270,13 @@ export interface StageDraftOptions extends EnsureSessionOptions {
 
 export interface StageDraftResult {
   kind: "self";
+  /**
+   * Whether the "Save Draft" affordance resolved and was clicked. FALSE means the
+   * draft was NOT staged (the poster bailed rather than guess another button) — the
+   * caller MUST treat this as a failure, not a success. Distinct from `verified`,
+   * which is the (best-effort) "Draft saved" toast confirmation of a click.
+   */
+  saved: boolean;
   /** Whether the post-save verification matched the staged title/leading body. */
   verified: boolean;
   /** The target subreddit (without the r/ prefix). */
@@ -561,6 +568,7 @@ export async function stageDraft(
     if (block) {
       return {
         kind: "self",
+        saved: false,
         verified: false,
         subreddit: sub,
         blocked: block,
@@ -620,7 +628,7 @@ export async function stageDraft(
     );
     if (!markdown) {
       noteParts.push(
-        "Could NOT switch the composer to Markdown mode (Reddit's new composer hydrates that toggle unreliably) — the body was entered in the RICH editor, so Markdown syntax (**bold**, lists, fenced code) will render LITERALLY. Before posting, open the draft and use the body toolbar's “… → Switch to Markdown” so it renders as intended.",
+        "Could NOT switch the composer to Markdown mode THIS RUN (the toggle normally engages — this is a rare fallback; the composer DOM may have drifted) — the body was entered in the RICH editor, so Markdown syntax (**bold**, lists, fenced code) will render LITERALLY. Before posting, open the draft and use the body toolbar's “… → Switch to Markdown” so it renders as intended.",
       );
     }
     if (flairApplied) noteParts.push(`flair applied: ${flairApplied}.`);
@@ -639,6 +647,7 @@ export async function stageDraft(
 
     return {
       kind: "self",
+      saved,
       verified,
       subreddit: sub,
       flair: flairApplied,

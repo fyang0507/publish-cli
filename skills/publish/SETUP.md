@@ -31,6 +31,15 @@ Copy `.env.example` → `.env` (gitignored) and set:
   is **captcha-heavy** and no CAPTCHA/2FA is automated — run the first login headful
   (`--inspect`) and solve any challenge in that window.
 - `TRIAGE_MODEL` (optional) — cheap model id; default `gemini-3.5-flash`.
+- `REDDIT_READS_HEADFUL` (optional) — set to `1` to start `reddit inspect` /
+  `reddit search` headful. These reads are **login-free** and default to a headless
+  browser, but Reddit 403-blocks headless Chrome's fingerprint on some
+  networks/machines (a non-JSON "network security" wall); on a block the reads
+  **auto-retry headful once** (with an advisory note). Set this on a host with a
+  bad fingerprint to skip the doomed first attempt; leave unset on
+  headless-server / good-fingerprint hosts. Distinct from the one-time first login
+  (below), which still needs headful `--inspect`; draft staging still runs headless
+  via the persisted session.
 
 ## Watch config — `watch.yaml`
 

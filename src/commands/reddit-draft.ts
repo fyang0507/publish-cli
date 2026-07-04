@@ -104,10 +104,18 @@ export function registerRedditDraftCommand(reddit: Command): void {
       // exactly once at the end (reader + composer share getBrowserContext).
       const { BrowserRedditReader } = await import("../reddit/reader.js");
       const { closeSession } = await import("../reddit/session.js");
+      const { env } = await import("../config.js");
+
+      // The preflight reads hit Reddit's headless-403 fingerprint wall on the same
+      // hosts as inspect/search (design #4), so honor REDDIT_READS_HEADFUL here too —
+      // otherwise `draft` would fail preflight on a host where reads were made to
+      // work. (No silent headless→headful auto-retry mid-draft: the composer shares
+      // this session, so we pick the mode up front instead.)
+      const headful = !!opts.inspect || env.REDDIT_READS_HEADFUL;
 
       let exitCode = 0;
       try {
-        const reader = new BrowserRedditReader({ inspect: opts.inspect });
+        const reader = new BrowserRedditReader({ inspect: headful });
         await reader.init();
 
         // Reader-backed preflight (§4) — the same reads the composer would need.
@@ -129,7 +137,7 @@ export function registerRedditDraftCommand(reddit: Command): void {
           // resolved flair id straight through to the composer.
           const { stageDraft } = await import("../reddit/draftPoster.js");
           const result = await stageDraft(post, {
-            inspect: opts.inspect,
+            inspect: headful,
             flairId: preflight.resolvedFlair?.id,
             flairText: preflight.resolvedFlair?.text,
           });
@@ -137,6 +145,16 @@ export function registerRedditDraftCommand(reddit: Command): void {
           if (result.blocked) {
             // Eligibility block (§4.1) — reported plainly, draft NOT staged.
             console.error(`\n✗ ${result.blocked}`);
+            exitCode = 1;
+          } else if (!result.saved) {
+            // The "Save Draft" affordance never resolved — the poster bailed rather
+            // than guess another button (never falls through to Post). Nothing was
+            // staged, so this is a FAILURE, not a green ✓ (would otherwise read as a
+            // success to any agent keying on the ✓ / exit code).
+            console.error(
+              `\n✗ Could NOT stage a draft to r/${result.subreddit} — nothing was saved (NEVER posted).\n` +
+                `  ${result.note}`,
+            );
             exitCode = 1;
           } else {
             console.log(
