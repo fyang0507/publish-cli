@@ -40,6 +40,17 @@ export interface PublishEnv {
   REDDIT_PASSWORD: string;
   /** Used to answer Reddit's email/identifier confirmation challenge. */
   REDDIT_EMAIL: string;
+  /**
+   * When truthy, `reddit inspect` / `reddit search` launch a HEADFUL browser by
+   * default. Reddit's edge 403-blocks headless Chrome's fingerprint on some
+   * networks/machines (the reads then hit a non-JSON "network security" wall);
+   * a real headful Chrome passes. Reads are login-free, so this needs NO human —
+   * it just needs a display to render into. Leave unset on well-fingerprinted /
+   * headless-server hosts (where headless reads work and a headful browser would
+   * need a virtual display). The reads also AUTO-RETRY headful once on a block, so
+   * this flag mainly skips the wasted first headless attempt. Accepts 1/true/yes.
+   */
+  REDDIT_READS_HEADFUL: boolean;
 }
 
 const DEFAULT_TRIAGE_MODEL = "gemini-3.5-flash";
@@ -56,6 +67,7 @@ export const env: PublishEnv = {
   REDDIT_USERNAME: process.env.REDDIT_USERNAME ?? "",
   REDDIT_PASSWORD: process.env.REDDIT_PASSWORD ?? "",
   REDDIT_EMAIL: process.env.REDDIT_EMAIL ?? "",
+  REDDIT_READS_HEADFUL: /^(1|true|yes)$/i.test(process.env.REDDIT_READS_HEADFUL?.trim() ?? ""),
 };
 
 /**

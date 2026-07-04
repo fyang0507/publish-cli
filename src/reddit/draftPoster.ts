@@ -56,10 +56,19 @@ export const REDDIT_COMPOSER_SELECTORS = {
   // post type (see selfPostTab below).
   submitUrl: (sub: string) => `https://www.reddit.com/r/${sub}/submit`,
 
-  // The drafts list. Reopened after saving to VERIFY the draft actually landed.
-  // BEST-EFFORT — Reddit exposes drafts under the submit/composer surface; the
-  // exact URL/route NEEDS LIVE CALIBRATION.
-  draftsUrl: "https://www.reddit.com/submit?type=TEXT",
+  // Reddit's transient "Draft saved" confirmation toast — the RELIABLE save signal.
+  // RE-CALIBRATED LIVE 2026-07-04: reopening the composer-header "Drafts" modal
+  // right after saving shows a STALE list (the just-saved draft has NOT propagated —
+  // the header still reads the pre-save count), so matching the staged title there
+  // races and always reported "unconfirmed". This toast fires the moment Reddit
+  // accepts the save; we capture it right after the click when it is freshest.
+  // Text-exact so it can't collide with the "Save Draft" button. NEEDS LIVE
+  // CALIBRATION.
+  saveConfirmToast: [
+    '//*[normalize-space()="Draft saved"]',
+    ':text-is("Draft saved")',
+    '[role="status"]:has-text("Draft saved")',
+  ],
 
   // The "Post" / text self-post tab within the composer, in case the submit page
   // does not default to it. BEST-EFFORT / NEEDS LIVE CALIBRATION.
@@ -69,27 +78,40 @@ export const REDDIT_COMPOSER_SELECTORS = {
     '//*[@role="tab"][contains(normalize-space(),"Post")]',
   ],
 
-  // A stable member of the body RTE formatting toolbar, used only as a "toolbar
-  // has hydrated" signal (the toolbar mounts a few seconds after the composer, and
-  // looking for the Markdown toggle before then silently fails). CALIBRATED LIVE
-  // 2026-07-03. NEEDS LIVE CALIBRATION.
-  rteToolbarReady: ['button[aria-label*="Bold" i]:visible', 'button:has-text("Bold"):visible'],
-  // The body toolbar's "More options" (…) overflow button — one place the "Switch
-  // to Markdown" control lives (at other viewports it is an inline toolbar
-  // button). CALIBRATED LIVE 2026-07-03; renders once the body is focused.
-  // NEEDS LIVE CALIBRATION.
-  composerMoreOptions: ['button[aria-label*="More options" i]:visible'],
+  // "Toolbar has hydrated" signal. RE-CALIBRATED LIVE 2026-07-04: the body
+  // formatting toolbar collapses its right-hand controls into a "More options" (…)
+  // overflow at ≤~1280px, and its buttons carry TEXT (not aria-label) — the old
+  // `button[aria-label*="Bold"]` matched 0 and this silently no-op'd. Wait for the
+  // overflow (…) button, or a text-labelled Bold, as the ready signal. NEEDS LIVE
+  // CALIBRATION.
+  rteToolbarReady: ['button[aria-label="More options"]:visible', 'button:has-text("Bold"):visible'],
+  // The body toolbar's "More options" (…) overflow button — the overflow that holds
+  // the "Switch to Markdown" control. RE-CALIBRATED LIVE 2026-07-04: exactly one
+  // such button in the composer; renders once the body is focused. NEEDS LIVE
+  // CALIBRATION.
+  composerMoreOptions: ['button[aria-label="More options"]:visible'],
   // Switch the body editor into Markdown mode so the typed body is treated as
-  // Markdown (Reddit's editor defaults to the rich/WYSIWYG mode, which renders
-  // markdown syntax literally). CALIBRATED LIVE 2026-07-03: this is a MENU ITEM
-  // inside composerMoreOptions (opened after focusing the body), not a top-level
-  // button. The body stays the same div[name="body"] element in either mode, so
-  // switching never breaks body typing. BEST-EFFORT / NEEDS LIVE CALIBRATION.
+  // Markdown (Reddit's editor defaults to the rich "fancy pants" mode, which
+  // renders markdown syntax literally). RE-CALIBRATED LIVE 2026-07-04: after the …
+  // overflow opens, this is a VISIBLE `rpl-menu-item[role="menuitem"]` labelled
+  // "Switch to Markdown" — NOT a <button> (the only <button aria-label="Switch to
+  // Markdown"> is a permanently-`hidden` responsive copy, which is why the old
+  // button-scoped selectors + tolerantLocator's .first() locked onto the hidden
+  // node and timed out). Match the menuitem by role/text. BEST-EFFORT / NEEDS LIVE
+  // CALIBRATION.
   markdownToggle: [
-    'button:has-text("Switch to Markdown"):visible',
-    '//button[contains(normalize-space(),"Switch to Markdown")]',
-    'button[aria-label*="Switch to Markdown" i]',
-    'button:has-text("Markdown Mode"):visible',
+    '[role="menuitem"]:has-text("Switch to Markdown")',
+    'rpl-menu-item:has-text("Switch to Markdown")',
+    '//*[@role="menuitem"][contains(normalize-space(),"Switch to Markdown")]',
+  ],
+  // Confirms the switch ACTUALLY engaged. CALIBRATED LIVE 2026-07-04: in Markdown
+  // mode the reverse toggle reads "Switch to Rich Text Editor" and the body becomes
+  // a plain `<textarea placeholder="Body text (optional)">` (the rich div[name=body]
+  // goes hidden). Either signal confirms. NEEDS LIVE CALIBRATION.
+  markdownConfirm: [
+    '[aria-label="Switch to Rich Text Editor"]',
+    '[role="menuitem"]:has-text("Switch to Rich Text Editor")',
+    'textarea[placeholder*="Body text" i]:visible',
   ],
 
   // The title input. NEEDS LIVE CALIBRATION.
@@ -117,6 +139,17 @@ export const REDDIT_COMPOSER_SELECTORS = {
     'textarea[name="body"]',
     'textarea[placeholder*="body" i]',
     '//div[@role="textbox"][@name="body"]',
+  ],
+  // The body target AFTER switching to Markdown mode. CALIBRATED LIVE 2026-07-04:
+  // Markdown mode swaps the rich `div[name="body"]` (which goes hidden) for a plain
+  // `<textarea placeholder="Body text (optional)">` (its `name` attr is null, so we
+  // match on placeholder). stageDraft leads body resolution with these when the
+  // Markdown switch succeeded, so typing doesn't stall waiting out the now-hidden
+  // rich div. NEEDS LIVE CALIBRATION.
+  bodyEditorMarkdown: [
+    'textarea[placeholder*="Body text" i]:visible',
+    'textarea[placeholder*="body" i]:visible',
+    'textarea[name="body"]:visible',
   ],
 
   // Open the flair picker. NEEDS LIVE CALIBRATION.
@@ -318,53 +351,52 @@ async function detectEligibilityBlock(page: Page, sub: string): Promise<string |
 
 /**
  * Switch the body editor into Markdown mode so the typed body is treated as
- * Markdown rather than rendered literally by the rich editor. CALIBRATED LIVE
- * 2026-07-03 for the new <shreddit-composer>: focus the body (so its toolbar
- * renders) → open the "More options" (…) overflow menu → click "Switch to
- * Markdown". The body stays the SAME div[name="body"] element in either mode, so
- * this never breaks the subsequent body typing.
+ * Markdown rather than rendered literally by the rich editor. RE-CALIBRATED LIVE
+ * 2026-07-04 for the <shreddit-composer>: focus the body (so its toolbar mounts) →
+ * open the "More options" (…) overflow → click the "Switch to Markdown"
+ * `rpl-menu-item` → CONFIRM the switch engaged (reverse toggle now reads "Switch to
+ * Rich Text Editor" and/or a Markdown `<textarea>` is visible). The switch is NOT
+ * sticky (reverts to rich mode on every fresh composer), so we do it each draft.
  *
- * Best-effort throughout: if the body/menu/toggle doesn't resolve (viewport,
- * hydration, or the composer is already in Markdown mode), we close any menu we
- * opened and return false — the caller then types into the rich editor and emits
- * an advisory. NEVER throws.
+ * Prior versions failed because (a) the toggle is a `rpl-menu-item`, not a
+ * <button>, and the only matching <button> is a permanently-hidden responsive copy
+ * that tolerantLocator's `.first()` locked onto and timed out on; (b) the "toolbar
+ * ready" signal keyed on a non-existent aria-labelled Bold button. Both fixed.
+ *
+ * Best-effort throughout: if the body/menu/toggle doesn't resolve, we close any
+ * menu we opened and return false — the caller then types into the rich editor and
+ * emits an advisory. We only return true when the switch is CONFIRMED. NEVER throws.
  */
 async function switchToMarkdownMode(page: Page): Promise<boolean> {
-  // The RTE formatting toolbar hydrates a few seconds AFTER the composer mounts,
-  // and interacting before it does can suppress it. Wait for a stable toolbar
-  // member ("Bold") to appear FIRST — looking for the toggle too early was why
-  // this silently no-op'd. Best-effort: continue even if Bold never resolves.
+  // Focus the body so its formatting toolbar (and the … overflow) mounts.
+  const body = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.bodyEditor, 6_000);
+  if (body) await body.click().catch(() => {});
+  // Wait for the toolbar overflow to hydrate before probing the menu.
   await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.rteToolbarReady, 5_000);
 
-  // Path 1: at some viewports the toggle is an inline toolbar button.
-  let toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 1_500);
-  if (toggle) {
-    await toggle.click().catch(() => {});
-    await page.waitForTimeout(400);
-    return true;
-  }
-
-  // Path 2: otherwise it lives in the body toolbar's "More options" (…) overflow
-  // menu, which renders once the body is focused. Retry against hydration jitter;
-  // close any menu we open but don't use. Kept SHORT — Reddit's new composer
-  // hydrates this toggle unreliably, so we do not want to stall a working draft
-  // waiting on a control that may never mount (the caller degrades gracefully).
-  const body = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.bodyEditor, 4_000);
-  if (body) await body.click().catch(() => {});
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const more = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.composerMoreOptions, 3_000);
-    if (more) {
-      await more.click().catch(() => {});
-      await page.waitForTimeout(400);
-      toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 2_500);
-      if (toggle) {
-        await toggle.click().catch(() => {});
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // The toggle may already be exposed (wide viewport / menu still open); else
+    // open the … overflow that holds it.
+    let toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 1_200);
+    if (!toggle) {
+      const more = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.composerMoreOptions, 2_500);
+      if (more) {
+        await more.click().catch(() => {});
         await page.waitForTimeout(400);
-        return true;
+        toggle = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownToggle, 2_500);
       }
-      await page.keyboard.press("Escape").catch(() => {});
     }
-    await page.waitForTimeout(700);
+    if (toggle) {
+      await toggle.click().catch(() => {});
+      await page.waitForTimeout(600);
+      // Only claim success once the mode ACTUALLY flipped — guards against a
+      // no-op click on a stale/misparsed node.
+      const confirmed = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.markdownConfirm, 2_500);
+      if (confirmed) return true;
+    }
+    // Close any menu we opened but couldn't use, then retry against jitter.
+    await page.keyboard.press("Escape").catch(() => {});
+    await page.waitForTimeout(500);
   }
   return false;
 }
@@ -484,44 +516,20 @@ async function setToggleOn(page: Page, candidates: readonly string[]): Promise<b
  * could Post. We bail (return null) and leave it to a human. There is NO fall
  * through to Post.
  */
-async function saveDraftReddit(page: Page): Promise<boolean> {
+async function saveDraftReddit(page: Page): Promise<{ clicked: boolean; confirmed: boolean }> {
   const save = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.saveDraftButton, 6_000);
   if (!save) {
     // The "Save Draft" affordance didn't appear — do NOT guess another button
     // (a wrong click could post). Bail. NEVER fall through to Post.
-    return false;
+    return { clicked: false, confirmed: false };
   }
   await save.click();
-  await page.waitForTimeout(1_000);
-  return true;
-}
-
-/**
- * Verify a draft was ACTUALLY saved by reopening the drafts list and matching the
- * staged title + leading body (ports the X/LinkedIn "match the staged item, don't
- * trust a blind success" hardening — the same false-positive trap). Non-fatal —
- * returns false (unconfirmed) if inconclusive; never throws.
- */
-async function verifyDraftSaved(page: Page, title: string, body: string): Promise<boolean> {
-  const titleNeedle = normalizeForMatch(title).slice(0, 60);
-  const bodyNeedle = normalizeForMatch(body).slice(0, 40);
-  if (!titleNeedle) return false;
-  try {
-    await page.goto(REDDIT_COMPOSER_SELECTORS.draftsUrl, { waitUntil: "domcontentloaded" });
-    const deadline = Date.now() + 8_000;
-    while (Date.now() < deadline) {
-      const pageText = normalizeForMatch((await page.locator("body").innerText().catch(() => "")) || "");
-      // Require the staged title; the leading body is a bonus signal (drafts list
-      // may only show titles), so match title AND (body if we had one).
-      const titleHit = pageText.includes(titleNeedle);
-      const bodyHit = !bodyNeedle || pageText.includes(bodyNeedle);
-      if (titleHit && bodyHit) return true;
-      await page.waitForTimeout(500);
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  // Confirm via the "Draft saved" toast, captured HERE (freshest right after the
+  // click). This is the reliable save signal — the drafts modal shows a stale list
+  // at this point (see saveConfirmToast). Non-fatal: a missing toast only means the
+  // save is unconfirmed, never that we should retry/guess another button.
+  const toast = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast, 6_000);
+  return { clicked: true, confirmed: !!toast };
 }
 
 /**
@@ -570,11 +578,16 @@ export async function stageDraft(
     await titleInput.press("Backspace");
     await typeText(page, titleInput, post.title);
 
-    // Body.
+    // Body. When the Markdown switch succeeded, the rich div[name="body"] is hidden
+    // and the body is a plain <textarea> — lead with the Markdown-mode selectors so
+    // typing doesn't stall waiting out the now-hidden rich editor.
     if (post.body.trim()) {
+      const bodyCandidates = markdown
+        ? [...REDDIT_COMPOSER_SELECTORS.bodyEditorMarkdown, ...REDDIT_COMPOSER_SELECTORS.bodyEditor]
+        : REDDIT_COMPOSER_SELECTORS.bodyEditor;
       const bodyEditor = await tolerantLocator(
         page,
-        REDDIT_COMPOSER_SELECTORS.bodyEditor,
+        bodyCandidates,
         `Reddit self-post body editor for r/${sub}`,
         OPEN_TIMEOUT,
       );
@@ -595,9 +608,9 @@ export async function stageDraft(
     if (post.nsfw) await setToggleOn(page, REDDIT_COMPOSER_SELECTORS.nsfwToggle);
     if (post.spoiler) await setToggleOn(page, REDDIT_COMPOSER_SELECTORS.spoilerToggle);
 
-    // Save Draft (never Post; bail if the affordance doesn't resolve).
-    const saved = await saveDraftReddit(page);
-    const verified = saved ? await verifyDraftSaved(page, post.title, post.body) : false;
+    // Save Draft (never Post; bail if the affordance doesn't resolve). The
+    // "Draft saved" toast (captured inside saveDraftReddit) is the verification.
+    const { clicked: saved, confirmed: verified } = await saveDraftReddit(page);
 
     const noteParts: string[] = [];
     noteParts.push(

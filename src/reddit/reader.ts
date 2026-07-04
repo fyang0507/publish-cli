@@ -39,6 +39,7 @@
  */
 
 import { getBrowserContext, closeSession } from "./session.js";
+import { env } from "../config.js";
 import type { BrowserContext, Page, Response } from "playwright";
 
 // ---------------------------------------------------------------------------
@@ -624,6 +625,59 @@ export class BrowserRedditReader implements RedditReader {
 
   async close(): Promise<void> {
     await closeSession();
+  }
+}
+
+/** Outcome of a read run, including whether a headful fallback kicked in. */
+export interface ReadRunResult<T> {
+  value: T;
+  /** The browser ran headful for the successful attempt. */
+  usedHeadful: boolean;
+  /** A headless attempt was 403-blocked and we transparently retried headful. */
+  retriedHeadful: boolean;
+}
+
+/**
+ * Run a read operation with a HEADLESS→HEADFUL fallback (design item #4). Reddit's
+ * edge 403-blocks headless Chrome's fingerprint on some networks (the reads hit a
+ * non-JSON "network security" wall); a real headful Chrome passes. Reads are
+ * login-free, so headful needs NO human — only a display to render into.
+ *
+ * Policy:
+ *  - Start headful when the caller asked (`--inspect`) or `REDDIT_READS_HEADFUL` is
+ *    set (skips a known-doomed headless attempt on this machine).
+ *  - Otherwise start headless; on a `RedditReadBlockedError`, close the context and
+ *    retry ONCE headful. Any other error propagates unchanged.
+ *
+ * `op` MUST throw `RedditReadBlockedError` on a block for the retry to trigger —
+ * callers that swallow per-item errors should rethrow blocks (a wall is global, not
+ * per-item). Each attempt gets a fresh reader (init + guaranteed close).
+ */
+export async function withReadFallback<T>(
+  opts: { inspect?: boolean },
+  op: (reader: BrowserRedditReader) => Promise<T>,
+): Promise<ReadRunResult<T>> {
+  const startHeadful = !!opts.inspect || env.REDDIT_READS_HEADFUL;
+
+  const attempt = async (inspect: boolean): Promise<T> => {
+    const reader = new BrowserRedditReader({ inspect });
+    try {
+      await reader.init();
+      return await op(reader);
+    } finally {
+      await reader.close().catch(() => {});
+    }
+  };
+
+  try {
+    return { value: await attempt(startHeadful), usedHeadful: startHeadful, retriedHeadful: false };
+  } catch (err) {
+    if (err instanceof RedditReadBlockedError && !startHeadful) {
+      // Headless was walled — retry headful once (the fix for this machine's
+      // fingerprint). closeSession already ran in attempt()'s finally.
+      return { value: await attempt(true), usedHeadful: true, retriedHeadful: true };
+    }
+    throw err;
   }
 }
 

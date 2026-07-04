@@ -40,26 +40,35 @@ export function registerRedditSearchCommand(reddit: Command): void {
     .option("--limit <n>", "Cap results (default 25)", (v) => parseInt(v, 10), 25)
     .option("--include-nsfw", "Include over-18 subreddits (default: excluded)")
     .option("--json", "Machine-readable output (default: human report)")
-    .option("--inspect", "Headful browser for selector calibration (reads run logged-out; no login required)")
+    .option(
+      "--inspect",
+      "Force a headful browser (reads run logged-out; no login required). Reads also auto-retry headful on a 403 block; set REDDIT_READS_HEADFUL=1 to start headful.",
+    )
     .action(async (query: string, opts: RedditSearchOptions) => {
-      const { BrowserRedditReader } = await import("../reddit/reader.js");
-      const reader = new BrowserRedditReader({ inspect: opts.inspect });
+      const { withReadFallback } = await import("../reddit/reader.js");
 
       let hits: import("../reddit/reader.js").SubredditSearchHit[] = [];
       let failed: string | null = null;
+      let retriedHeadful = false;
       try {
-        await reader.init();
-        hits = await reader.search(query, {
-          limit: opts.limit,
-          includeNsfw: opts.includeNsfw,
-        });
+        // Headless→headful fallback (design #4): Reddit 403-blocks headless Chrome's
+        // fingerprint on some networks; reads are login-free so a headful retry needs
+        // no human. Throws (RedditReadBlockedError) if even headful is walled.
+        const run = await withReadFallback({ inspect: opts.inspect }, (reader) =>
+          reader.search(query, { limit: opts.limit, includeNsfw: opts.includeNsfw }),
+        );
+        hits = run.value;
+        retriedHeadful = run.retriedHeadful;
       } catch (err) {
         // e.g. RedditReadBlockedError — report the block, don't pretend "0 found".
         failed = (err as Error).message;
-      } finally {
-        await reader.close();
       }
 
+      if (retriedHeadful) {
+        console.error(
+          "note: the headless read was 403-blocked on this network; retried with a headful browser (set REDDIT_READS_HEADFUL=1 to skip the doomed first attempt).",
+        );
+      }
       if (failed) {
         console.error(`✗ reddit search failed: ${failed}`);
         process.exit(1);

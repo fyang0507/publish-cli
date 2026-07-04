@@ -95,30 +95,52 @@ export function registerRedditInspectCommand(reddit: Command): void {
     .command("inspect <subreddits...>")
     .description("Report each named subreddit's full posting contract (facts only, no LLM)")
     .option("--json", "Machine-readable output (default: human report)")
-    .option("--inspect", "Headful browser for selector calibration (reads run logged-out; no login required)")
+    .option(
+      "--inspect",
+      "Force a headful browser (reads run logged-out; no login required). Reads also auto-retry headful on a 403 block; set REDDIT_READS_HEADFUL=1 to start headful.",
+    )
     .action(async (subreddits: string[], opts: RedditInspectOptions) => {
-      const { BrowserRedditReader } = await import("../reddit/reader.js");
-      const reader = new BrowserRedditReader({ inspect: opts.inspect });
+      const { withReadFallback, RedditReadBlockedError } = await import("../reddit/reader.js");
 
       type ContractResult =
         | { subreddit: string; contract: import("../reddit/reader.js").SubredditContract }
         | { subreddit: string; error: string };
 
-      const results: ContractResult[] = [];
-      try {
-        await reader.init();
-        for (const name of subreddits) {
-          const sub = name.replace(/^\/?r\//i, "").trim();
+      let results: ContractResult[] = [];
+      let retriedHeadful = false;
+      const cleanNames = subreddits.map((name) => name.replace(/^\/?r\//i, "").trim());
+
+      // Read each sub; a per-sub error degrades to a note (§9), but a global 403
+      // wall (RedditReadBlockedError) is RETHROWN so withReadFallback can retry the
+      // whole run headful (design #4) rather than reporting every sub as blocked.
+      const readAll = async (
+        reader: import("../reddit/reader.js").BrowserRedditReader,
+      ): Promise<ContractResult[]> => {
+        const out: ContractResult[] = [];
+        for (const sub of cleanNames) {
           try {
-            const contract = await reader.inspectSubreddit(sub);
-            results.push({ subreddit: sub, contract });
+            out.push({ subreddit: sub, contract: await reader.inspectSubreddit(sub) });
           } catch (err) {
-            // One bad name must not abort the whole run (§9 graceful degrade).
-            results.push({ subreddit: sub, error: (err as Error).message });
+            if (err instanceof RedditReadBlockedError) throw err; // global wall — retry headful
+            out.push({ subreddit: sub, error: (err as Error).message });
           }
         }
-      } finally {
-        await reader.close();
+        return out;
+      };
+
+      try {
+        const run = await withReadFallback({ inspect: opts.inspect }, readAll);
+        results = run.value;
+        retriedHeadful = run.retriedHeadful;
+      } catch (err) {
+        // A block that survived even headful (or other fatal) — surface it per sub.
+        results = cleanNames.map((sub) => ({ subreddit: sub, error: (err as Error).message }));
+      }
+
+      if (retriedHeadful) {
+        console.error(
+          "note: the headless reads were 403-blocked on this network; retried with a headful browser (set REDDIT_READS_HEADFUL=1 to skip the doomed first attempt).",
+        );
       }
 
       if (opts.json) {
