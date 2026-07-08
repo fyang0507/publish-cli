@@ -33,6 +33,33 @@ step stalled and the current on-screen DOM, update the relevant selector list, a
 rebuild. In unattended runs, route the failure through your environment's
 error-reporting path rather than retrying blindly.
 
+The read op **names** matched in `src/x/reader.ts` (verify headful if a read
+returns empty — the payload envelope is stable but the op name can be renamed):
+
+- `SearchTimeline` — `x watch` search queries.
+- `ListLatestTweetsTimeline` — `x watch` List member timelines.
+- `UserTweets` — `x history --include posts` (the profile Posts tab).
+- `UserTweetsAndReplies` — `x history` posts + replies (the profile /with_replies
+  tab). Live-verified 2026-07-08.
+
+If `x history` returns nothing, open the profile headful (`--inspect`), read the
+`/graphql/` op name off the network panel, and update the `ops` array in
+`fetchUserTimeline`.
+
+`x history` **fails loud rather than reporting a false-empty history** (a campaign
+agent must never mistake a failed read for "nothing published yet"). Two guards in
+`fetchUserTimeline`/`collect` throw instead of printing "0 items":
+
+- **"X returned no usable profile data"** — no genuine timeline response was seen
+  (op-name drift, a logged-out session, a non-existent/suspended handle, or a
+  GraphQL error/rate-limit envelope `{errors:[…]}`). Re-check the op name and the
+  session (`--inspect` to re-login); if transient (rate limit), retry later.
+- **"NONE were attributable to @handle"** — tweets WERE captured but not one matched
+  the handle, i.e. X moved the author/`screen_name` field again (it lives in
+  `user_results.core`/`legacy`). Re-calibrate the `authorHandle` extraction in
+  `extractTweets` (this is the history analog of the watch loop's language-field
+  drift guard).
+
 ## LinkedIn (`publish linkedin draft`)
 
 The LinkedIn channel drifts the same way and is calibrated the same way — re-run

@@ -211,6 +211,7 @@ The session module is the foundation everything else depends on. It performs **u
 **Fetch methods → normalized posts**
 - **`fetchSearch(query)`** — recent posts matching a search query (origin = query).
 - **`fetchListTimeline(listId)`** — the merged recent timeline of every member of an X List in ONE fetch (origin = `list:<id>`). This is the account-watch path: N accounts in a List cost one page load instead of N profile loads (there is no per-account fetch — that doesn't scale and reads as bot traffic).
+- **`fetchUserTimeline(handle, { withReplies })`** — a single user's OWN profile timeline (origin = `me:<handle>`), used by the `history` reader (§6.2.1). Captures the `UserTweets` (Posts tab) or `UserTweetsAndReplies` (/with_replies tab) operations, and keeps only tweets AUTHORED by `handle` — reposts (the RT wrapper is the operator's own tweet object with a nested `retweeted_status_result`) and others' quoted tweets are dropped.
 - Both map every result to a **normalized post** shape kept in one place so the rest of the loop stays client-agnostic:
   **`{ id, author, text, createdAt, url, metrics }`** (metrics = likes / reposts / replies / views where available), plus an `origin` for provenance.
 
@@ -247,6 +248,15 @@ lists:
 - A **ranked list of follow-up candidates** emitted in two forms:
   - **human-readable text** by default (ranked, with score, origin, author, link, reason, and suggested angle), and
   - **machine JSON** under **`--json`** (for the task layer), rendered from the same stable schema.
+
+### 6.2.1 X History (read-only — own published posts + replies)
+
+`publish x history` answers **"what have I already published?"** so a scheduled/agent-driven campaign that publishes variations of a theme over several days can **avoid repeating itself**. It reuses the §6.2 reader (`fetchUserTimeline`) pointed at the operator's own profile.
+
+- **Live read only, no persistence.** There is no local record of what has been drafted/published (the tool only ever stages drafts; a human posts them), so **X is the single source of truth** — the command reads the live profile every run and writes no state. Because this tool **never posts**, `history` reflects what is LIVE on X only: a draft staged-but-not-yet-posted does not appear until a human posts it.
+- **Own authored content only.** Reposts and others' quoted/nested tweets are filtered out (see `fetchUserTimeline`), so the output is the operator's own writing (originals, replies, and the operator's side of a quote-tweet).
+- **Inputs/flags:** `--handle` (default `X_USERNAME`), `--limit` (default 50), `--include posts|replies|all` (default `all`; `posts` uses the Posts tab, else /with_replies), `--since <iso>` (drop older items), `--format text|json|markdown` (`--json` alias), `--out <file>`, `--inspect`.
+- **Output** (newest first): per item `{ id, url, type (post|reply), selfThread, text, createdAt, conversationId, replyTo, metrics }`. JSON is the primary agent-facing shape; text/markdown are human digests.
 
 ### 6.3 X Publisher (creates NATIVE DRAFTS ON X — never posts)
 
