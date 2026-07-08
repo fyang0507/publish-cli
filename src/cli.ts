@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { registerWatchCommand } from "./commands/watch.js";
 import { registerDraftCommand } from "./commands/draft.js";
 import { registerReplyCommand } from "./commands/reply.js";
+import { registerHistoryCommand } from "./commands/history.js";
 import { registerCreateWatchListCommand } from "./commands/create-watch-list.js";
 import { registerLinkedInDraftCommand } from "./commands/linkedin-draft.js";
 import { registerRedditInspectCommand } from "./commands/reddit-inspect.js";
@@ -23,7 +24,7 @@ program
 // channel built today; add a sibling `publish <channel> ...` group per platform.
 const x = program
   .command("x")
-  .description("X channel: create-watch-list + watch + draft + reply");
+  .description("X channel: create-watch-list + watch + draft + reply + history");
 
 // --- create-watch-list: build the account-based watch List (precursor to `watch --x-list`) ---
 registerCreateWatchListCommand(x);
@@ -36,6 +37,9 @@ registerDraftCommand(x);
 
 // --- reply: targeted reply drafts (watcher -> publisher loop; never posts) ---
 registerReplyCommand(x);
+
+// --- history: read the operator's OWN published posts + replies (never posts) ---
+registerHistoryCommand(x);
 
 // LinkedIn channel: PUBLISH only today (native post drafts, never posts). Watch
 // (borrowed-reach) is a separate, future design.

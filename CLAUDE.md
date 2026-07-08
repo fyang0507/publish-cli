@@ -16,6 +16,7 @@ The CLI is **channel-first**: `publish <channel> <action>` (each channel has its
 - `publish x watch` — poll queries / Lists → dedupe → cheap-LLM triage (Gemini, low reasoning effort) → ranked reply candidates. Accounts are watched via a List (`--x-list`), never one-by-one. The `x-list` spelling is unified across `watch` and `create-watch-list`.
 - `publish x draft` — canonical markdown (`--from`) or inline `--text` → tweet / thread / article → **native X draft**.
 - `publish x reply --to <id|url> (--text <s> | --from <md>)` — stage a native reply draft (overflow → thread); never posts.
+- `publish x history [--handle <h>] [--include posts|replies|all] [--since <iso>] [--limit <n>]` — read-only: read the operator's OWN published posts + replies live from X (reusing the browser GraphQL-capture reader), filtering out reposts / others' quoted tweets, so a multi-day campaign agent can see what it already published and avoid repeating itself. Writes no state; reflects only what is LIVE on X (staged-but-unposted drafts don't appear). Never posts.
 - `publish linkedin draft (--text <s> | --from <md>)` — inline text (primary) or markdown → a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) → **native LinkedIn draft** via "Save as draft"; never posts. LinkedIn has no WATCH capability today (PUBLISH only).
 - `publish reddit inspect <sub>...` / `publish reddit search "<query>"` — read-only discovery: `inspect` reports each named subreddit's posting contract (subscribers, allowed types, rules, flairs, post requirements); `search` lists candidate subreddits. Facts only, no LLM ranking — the agent judges.
 - `publish reddit draft --subreddit <name> --title <t> (--text <s> | --from <md>) [--flair <id|text>]` — canonical markdown (kept ~verbatim; Reddit renders Markdown) → a single **self-post** → **native Reddit draft** via "Save Draft"; never posts. Enforces the target subreddit's contract before staging. Reddit has no WATCH capability today (PUBLISH only).
@@ -77,14 +78,14 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 
 | Path | Purpose |
 |---|---|
-| `src/cli.ts` | `publish` program; registers the `x` group (`create-watch-list` / `watch` / `draft` / `reply`), the `linkedin` group (`draft`), the `reddit` group (`inspect` / `search` / `draft`) and the `wechat` group (`check` / `draft`) |
+| `src/cli.ts` | `publish` program; registers the `x` group (`create-watch-list` / `watch` / `draft` / `reply` / `history`), the `linkedin` group (`draft`), the `reddit` group (`inspect` / `search` / `draft`) and the `wechat` group (`check` / `draft`) |
 | `src/config.ts` | env (X + LinkedIn + Reddit + WeChat creds, `TRIAGE_MODEL`, `WECHAT_SSH_TUNNEL`/`WECHAT_PROXY_URL`), `dataPaths()` (x-/li-/reddit-profile + cookie caches + `wechatTokenCache`), `loadWatchConfig()` |
 | `src/dataRepo.ts` | `resolveDataRepo()` — env → dev config → workspace walk-up |
 | `src/session.ts` | X Playwright persistent-profile login; `ensureSession`/`getCookies`/`getBrowserContext` |
 | `src/gemini.ts` | `@google/genai` client: `generate()` + `triage()` |
 | `src/db.ts` | `better-sqlite3` `SeenStore` (dedupe), db in the data repo |
 | `src/langFilter.ts` | channel-agnostic language allow-list filter for watch pipelines (operates on a minimal `{lang?}` shape; reused by import, like `db.ts`/`config.ts`) |
-| `src/x/reader.ts` | `BrowserReader` — GraphQL response capture (search / list timelines) |
+| `src/x/reader.ts` | `BrowserReader` — GraphQL response capture (search / list / own-profile timelines); `fetchUserTimeline` (own-authored posts+replies, drops reposts) backs `x history` |
 | `src/x/triage.ts` | cheap-LLM triage → ranked candidates |
 | `src/x/content.ts` | canonical-markdown parser → tweet / thread / article blocks (shared by LinkedIn) |
 | `src/x/draftPoster.ts` | composer automation: stage native tweet/thread/article/reply drafts (exports shared locator/typing primitives) |
@@ -100,7 +101,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/wechat/content.ts` | `generateArticle` — canonical markdown → title + inline-styled HTML body (`marked`, `style=` on every element), caps/advisories (reuses `src/x/content.ts`) |
 | `src/wechat/draft.ts` | draft orchestration: upload cover + body images, rewrite image `src`s to CDN URLs, then `draft/add` (never publishes) |
 | `src/commands/contentInput.ts` | shared `--text` / `--from` / stdin resolution (exactly-one-of) for `draft` / `reply` / `linkedin draft` / `reddit draft` / `wechat draft` |
-| `src/commands/{create-watch-list,watch,draft,reply,linkedin-draft}.ts` | command bodies |
+| `src/commands/{create-watch-list,watch,draft,reply,history,linkedin-draft}.ts` | command bodies |
 | `src/commands/reddit-{inspect,search,draft}.ts` | Reddit command bodies |
 | `src/commands/wechat-{check,draft}.ts` | WeChat command bodies |
 | `scripts/install-agent-skill-symlinks.js` | post-build: chmod bin + symlink skill into `<data_repo>/.agents/skills` |

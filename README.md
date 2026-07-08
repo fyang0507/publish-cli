@@ -7,6 +7,7 @@ A per-channel content-distribution toolkit for growing the operator's audience i
 - **`publish x watch`** — borrowed-reach loop. Polls search queries and watch Lists (accounts are watched via a List, not one-by-one), dedupes seen posts, triages each new post with a cheap Gemini model for follow-up worthiness, and emits ranked candidates (human-readable, or `--json`).
 - **`publish x create-watch-list`** — builds the account-watch List from the accounts you follow (a List reads all its members in one fetch, so it's the scalable account path). Precursor to `watch --x-list`.
 - **`publish x draft`** — owned-content publisher. Turns a canonical base markdown into an X-ready **tweet / thread / article** and stages it as a **native draft on X**. It **never posts** — the send action is human-gated and out of scope here.
+- **`publish x history`** — read-only. Reads your OWN published posts + replies from X (live, filtering out reposts and others' quoted tweets) so an agent can see what it has already put out and avoid repeating itself across a multi-day campaign. Emits text / `--json` / markdown.
 
 ## What it does (LinkedIn channel)
 
@@ -94,6 +95,7 @@ publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-
 publish x watch [--query <q>...] [--x-list <id>...] [--languages en,zh] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
 publish x draft --format tweet|thread|article (--text <content> | --from <base.md>) [--inspect]
 publish x reply --to <id|url> (--text <content> | --from <base.md>) [--long] [--dry-run] [--force] [--inspect]
+publish x history [--handle <h>] [--limit <n>] [--include posts|replies|all] [--since <iso>] [--format text|json|markdown] [--json] [--out <file>] [--inspect]
 
 publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
 
@@ -109,6 +111,6 @@ Run any subcommand with `--help` for the authoritative flag list.
 
 ## Status
 
-Working (X channel). The watch loop (poll → dedupe → triage → ranked candidates) and the drafting-only publisher (`draft` / `reply`, staging native X drafts) are implemented and live-verified. The publisher **never posts** — the human-gated send action is out of scope. Open work is tracked in GitHub issues.
+Working (X channel). The watch loop (poll → dedupe → triage → ranked candidates), the drafting-only publisher (`draft` / `reply`, staging native X drafts), and the read-only `history` reader (own published posts + replies, live-verified 2026-07-08) are implemented and live-verified. The publisher **never posts** — the human-gated send action is out of scope. Open work is tracked in GitHub issues.
 
 The WeChat channel (`check` / `draft`) is implemented and live-verified (2026-07-04), staging native 草稿箱 drafts via `draft/add`; it **never publishes**.

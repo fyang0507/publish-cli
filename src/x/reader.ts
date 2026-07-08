@@ -48,6 +48,14 @@ export interface XPost {
   /** Parent tweet's author id, if a reply (legacy.in_reply_to_user_id_str). */
   replyToUserId?: string;
   /**
+   * True when this is a REPOST (retweet). X models a retweet as the retweeter's
+   * OWN tweet object (author = the retweeter, full_text = "RT @orig: …") with a
+   * `legacy.retweeted_status_result` pointing at the original. So filtering a
+   * profile timeline by author alone does NOT drop reposts — this flag does.
+   * Used by the history reader to keep only the operator's own AUTHORED content.
+   */
+  isRepost?: boolean;
+  /**
    * Language code X assigned to the tweet (legacy.lang), e.g. "en", "zh", "fr",
    * or an undetermined sentinel ("und", "qme"). Free on the captured payload;
    * consumed by the channel-agnostic language filter (src/langFilter.ts).
@@ -73,6 +81,25 @@ export interface XReader {
    * bot traffic, so accounts are watched via a List (see create-watch-list).
    */
   fetchListTimeline(listId: string, limit: number): Promise<XPost[]>;
+  /**
+   * Read a single user's OWN profile timeline — used by `x history` so an agent
+   * can see what the operator has already published (and avoid repeating itself
+   * across a multi-day campaign). Unlike the watch paths, this filters to tweets
+   * AUTHORED by `handle`, dropping reposts and others' quoted tweets.
+   *
+   * @param handle profile to read (without leading @).
+   * @param opts.withReplies read the /with_replies tab (posts + replies) vs the
+   *   default Posts tab (originals only). Defaults to true.
+   * @param opts.match extra predicate AND-ed into the author/repost filter so
+   *   `limit` counts only items that pass it (e.g. an include-type filter).
+   * @returns `posts` plus `sawTimeline` (false ⇒ the read failed / no such
+   *   profile, which the caller must not treat as an empty history).
+   */
+  fetchUserTimeline(
+    handle: string,
+    limit: number,
+    opts?: { withReplies?: boolean; match?: (p: XPost) => boolean },
+  ): Promise<{ posts: XPost[]; sawTimeline: boolean }>;
   /** Release the browser session (call once when done). */
   close(): Promise<void>;
 }
@@ -134,6 +161,75 @@ export class BrowserReader implements XReader {
     return this.collect(url, ["ListLatestTweetsTimeline"], `list:${clean}`, limit);
   }
 
+  /**
+   * Read the operator's own profile timeline (posts, or posts + replies) and keep
+   * ONLY tweets they authored.
+   *
+   * WHY THE FILTER: a profile GraphQL payload also carries reposts (the RT
+   * wrapper is the operator's OWN tweet object, so a handle match alone keeps it)
+   * and nested quoted tweets (authored by someone else). For "what have I
+   * published?" we want only the operator's own WRITING, so `keep` requires the
+   * handle to match AND the item to not be a repost. This keeps originals,
+   * replies, and the operator's side of a quote-tweet; it drops reposts and
+   * others' nested quoted tweets.
+   *
+   * OP NAMES (need live calibration, like the search/list ops): the Posts tab
+   * emits `UserTweets`; the Replies tab (/with_replies) emits
+   * `UserTweetsAndReplies`, which covers posts AND replies in one fetch.
+   *
+   * @param opts.match an extra caller predicate AND-ed into `keep` (e.g. the
+   *   `history` include filter). Pushing it here — rather than filtering after the
+   *   fetch — keeps `limit` honest: collect() scrolls until `limit` items that pass
+   *   ALL filters are collected, instead of returning the newest `limit` raw items
+   *   and then dropping most of them (which silently under-returns).
+   * @returns `sawTimeline` — whether any matching op response was seen. False ⇒
+   *   the read failed (no such profile / suspended / logged out), which the caller
+   *   MUST distinguish from a genuinely empty timeline (both yield 0 posts).
+   */
+  async fetchUserTimeline(
+    handle: string,
+    limit: number,
+    opts: { withReplies?: boolean; match?: (p: XPost) => boolean } = {},
+  ): Promise<{ posts: XPost[]; sawTimeline: boolean }> {
+    const clean = handle.replace(/^@/, "").trim();
+    const wanted = clean.toLowerCase();
+    const withReplies = opts.withReplies !== false; // default true
+    const url = withReplies
+      ? `https://x.com/${encodeURIComponent(clean)}/with_replies`
+      : `https://x.com/${encodeURIComponent(clean)}`;
+    const ops = withReplies ? ["UserTweetsAndReplies"] : ["UserTweets"];
+    const match = opts.match;
+    const stats = { sawResponse: false, rawCount: 0 };
+    // Count handle matches SEPARATELY from the repost/type sub-filters so we can tell
+    // "no post survived the include/repost filter" (a legit empty result) from "not one
+    // captured tweet was even attributable to this handle" (author-field drift).
+    let handleMatched = 0;
+    const posts = await this.collect(url, ops, `me:${clean}`, limit, {
+      keep: (p) => {
+        const mine = p.authorHandle.toLowerCase() === wanted;
+        if (mine) handleMatched++;
+        return mine && !p.isRepost && (match ? match(p) : true);
+      },
+      stats,
+    });
+
+    // Drift guard (mirrors watch.ts's language-field guard): authorHandle comes from
+    // user_results.core/legacy, a field X has already relocated once. If we captured
+    // tweets off the wire but NONE matched this handle, the author field almost
+    // certainly moved again — the own-author filter is silently INERT and would report
+    // a full profile as empty, making a campaign agent repeat itself. Fail loudly.
+    if (stats.rawCount > 0 && handleMatched === 0) {
+      throw new Error(
+        `Read @${clean}'s timeline (${stats.rawCount} tweets seen) but NONE were attributable to ` +
+          `@${clean} — X likely moved the author/screen_name field again. The own-author filter is ` +
+          `currently INERT; re-calibrate the authorHandle extraction in src/x/reader.ts. NOT ` +
+          `reporting this as an empty history.`,
+      );
+    }
+
+    return { posts, sawTimeline: stats.sawResponse };
+  }
+
   async close(): Promise<void> {
     await closeSession();
   }
@@ -142,16 +238,39 @@ export class BrowserReader implements XReader {
    * Navigate to `url`, capture matching GraphQL responses, and scroll until we
    * have `limit` posts or the feed stops growing. Tolerant: a navigation/parse
    * hiccup yields whatever was captured rather than throwing.
+   *
+   * @param opts.keep optional predicate; only posts for which it returns true are
+   *   KEPT (count toward `limit`). Used by the profile-timeline path to keep only
+   *   the operator's own authored tweets, dropping reposts and nested quoted
+   *   tweets. NOTE the scroll-stop is driven by RAW feed growth (every unique
+   *   tweet seen off the wire), NOT the kept count — otherwise a run of dropped
+   *   items (e.g. a burst of reposts) spanning >3 scroll rounds would stall the
+   *   loop early and under-return, even though the feed is still producing real
+   *   content below. We scroll until `limit` KEPT posts OR the raw feed genuinely
+   *   stops growing.
+   * @param opts.stats optional out-param; collect() sets `sawResponse` (did any
+   *   matching op response parse — false ⇒ the read failed / profile not found /
+   *   logged out, distinct from a genuinely empty timeline) and `rawCount` (unique
+   *   tweets seen off the wire, pre-`keep`).
    */
   private async collect(
     url: string,
     ops: string[],
     origin: string,
     limit: number,
+    opts: {
+      keep?: (p: XPost) => boolean;
+      stats?: { sawResponse: boolean; rawCount: number };
+    } = {},
   ): Promise<XPost[]> {
     const context: BrowserContext = await getBrowserContext({ inspect: this.inspect });
     const page: Page = await context.newPage();
     const byId = new Map<string, XPost>();
+    const keep = opts.keep;
+    // Every UNIQUE tweet id seen off the wire, BEFORE `keep` — drives the
+    // scroll-stop so a burst of filtered-out items doesn't falsely look stagnant.
+    const rawIds = new Set<string>();
+    let sawResponse = false;
 
     const isOpResponse = (r: Response): boolean =>
       r.url().includes("/graphql/") && ops.some((op) => r.url().includes(op));
@@ -160,9 +279,25 @@ export class BrowserReader implements XReader {
       if (!isOpResponse(resp)) return;
       try {
         const json = await resp.json();
+        // "Parsed OK" is NOT proof the read succeeded: X serves throttled/errored
+        // reads as parseable JSON — a GraphQL error envelope ({errors:[…]}, often at
+        // HTTP 200). Detect that so an errored read isn't mistaken for an empty one.
+        const isObj = !!json && typeof json === "object" && !Array.isArray(json);
+        const hasErrors = isObj && Array.isArray((json as any).errors) && (json as any).errors.length > 0;
+        let extractedAny = false;
         for (const post of extractTweets(json, origin)) {
+          extractedAny = true;
+          rawIds.add(post.id);
+          if (keep && !keep(post)) continue;
           if (!byId.has(post.id)) byId.set(post.id, post);
         }
+        // Count this as "saw the timeline" only for a GENUINE payload: it yielded
+        // tweets, OR it's a clean object response with no error array (a legitimately
+        // EMPTY but readable timeline). A pure error envelope (errors + no tweets), or a
+        // null/array/primitive body, is a FAILED read — leave sawResponse false so the
+        // caller throws instead of reporting an empty history. sawResponse OR-accumulates,
+        // so one real page after an early error still counts.
+        if (extractedAny || (isObj && !hasErrors)) sawResponse = true;
       } catch {
         // Non-JSON / parse error — skip this response.
       }
@@ -176,20 +311,26 @@ export class BrowserReader implements XReader {
         .waitForResponse(isOpResponse, { timeout: 30_000 })
         .catch(() => {/* no results / slow — fall through to whatever we have */});
 
-      // Scroll to lazy-load more until we hit the limit or the feed stops growing.
-      let lastSize = -1;
+      // Scroll to lazy-load more until we hit the limit or the RAW feed stops
+      // growing (see opts.keep note — stagnation is measured on rawIds, not byId,
+      // so filtered items like reposts don't prematurely halt the scroll).
+      let lastRaw = -1;
       let stagnantRounds = 0;
       while (byId.size < limit && stagnantRounds < 3) {
         await page.mouse.wheel(0, 3200);
         await page.waitForTimeout(1500);
-        if (byId.size === lastSize) {
+        if (rawIds.size === lastRaw) {
           stagnantRounds++;
         } else {
           stagnantRounds = 0;
-          lastSize = byId.size;
+          lastRaw = rawIds.size;
         }
       }
     } finally {
+      if (opts.stats) {
+        opts.stats.sawResponse = sawResponse;
+        opts.stats.rawCount = rawIds.size;
+      }
       page.off("response", onResponse);
       await page.close().catch(() => {});
     }
@@ -277,6 +418,9 @@ function extractTweets(root: unknown, origin: string): XPost[] {
         legacy.in_reply_to_status_id_str != null ? String(legacy.in_reply_to_status_id_str) : undefined;
       const replyToUserId =
         legacy.in_reply_to_user_id_str != null ? String(legacy.in_reply_to_user_id_str) : undefined;
+      // A retweet carries a nested `retweeted_status_result` (the original). Its
+      // presence marks this wrapper as a repost, not the author's own writing.
+      const isRepost = legacy.retweeted_status_result != null;
       // X's own language classification, already on the wire — used by the
       // channel-agnostic language filter to drop wrong-audience posts pre-triage.
       const lang: string | undefined =
@@ -295,6 +439,7 @@ function extractTweets(root: unknown, origin: string): XPost[] {
         conversationId,
         replyToStatusId,
         replyToUserId,
+        isRepost,
         lang,
         metrics: {
           likes: legacy.favorite_count,

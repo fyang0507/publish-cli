@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts; Reddit self-posts; WeChat Official Account article drafts staged in the 草稿箱 from Markdown) from inline text or a Markdown file. Also inspects/searches subreddits for their posting contracts (facts only). Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, discover subreddit posting rules, or turn Markdown into X-ready, LinkedIn-ready, Reddit-ready, or WeChat-ready drafts.
+description: Capability layer for the `publish` CLI — grow an audience by building an X account-watch List from who you follow, finding posts worth replying to, reading your own published X post/reply history, and staging native drafts (X single tweet, thread, or long-form Article, and replies; LinkedIn feed posts; Reddit self-posts; WeChat Official Account article drafts staged in the 草稿箱 from Markdown) from inline text or a Markdown file. Also inspects/searches subreddits for their posting contracts (facts only). Never posts; leaves drafts one click from publishing. Use when an agent needs to build/populate an X List, monitor X for reply opportunities, review what it has already published on X (to avoid repeating a multi-day campaign), discover subreddit posting rules, or turn Markdown into X-ready, LinkedIn-ready, Reddit-ready, or WeChat-ready drafts.
 ---
 
 `publish` is a CLI that turns Markdown into X (Twitter) drafts and surfaces reply
@@ -20,6 +20,9 @@ send/approval flow are the caller's concern, not this CLI's.
 - **draft** — turn a Markdown file into a native X draft: a single **tweet**, a
   numbered **thread**, or a long-form **Article**.
 - **reply** — stage a native **reply** draft targeted at a specific tweet.
+- **history** — read your OWN published posts + replies from X (live, read-only),
+  so an agent can see what it has already put out and avoid repeating itself across
+  a multi-day campaign. Filters reposts and others' quoted tweets out.
 - **linkedin draft** — turn inline text (or a Markdown file) into a native
   **LinkedIn post** draft (single post, 3000-char cap, optional attached media).
 - **reddit inspect / search** — read-only subreddit discovery (facts only, no LLM
@@ -47,6 +50,9 @@ send/approval flow are the caller's concern, not this CLI's.
   account (N profile loads don't scale and read as bot traffic).
 - Find X posts worth engaging with, then stage a reply → `publish x watch`, then
   `publish x reply --to <tweet>`.
+- Before publishing another variation in a multi-day campaign, check what you've
+  already posted → `publish x history --since <date> --json`, then have the agent
+  compare against it so it doesn't repeat itself.
 - Publish owned content to X from Markdown → `publish x draft`.
 - Long-form → `publish x draft --format article`. Note: **an X Article requires a
   5:2 aspect-ratio hero image to publish.**
@@ -142,6 +148,8 @@ publish x watch  [--query <q>...] [--x-list <id>...] [--languages en,zh] \
                  [--format text|json|markdown] [--json] [--out <file>] [--inspect]
 publish x draft  --format tweet|thread|article (--text <content> | --from <file.md>) [--long] [--dry-run] [--inspect]
 publish x reply  --to <id|url> (--text <content> | --from <file.md>) [--long] [--dry-run] [--force] [--inspect]
+publish x history [--handle <h>] [--limit <n>] [--include posts|replies|all] [--since <iso>] \
+                 [--format text|json|markdown] [--json] [--out <file>] [--inspect]
 publish linkedin draft (--text <content> | --from <file.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
 publish reddit inspect <subreddit>... [--json] [--inspect]
 publish reddit search "<query>" [--limit <n>] [--include-nsfw] [--json] [--inspect]
@@ -196,6 +204,17 @@ publish wechat draft (--text <content> | --from <file.md>) [--title "<t>"] [--au
 - Content generation is **deterministic** (character-fit, thread splitting, code/link
   advisories). An Article body is pasted as rich HTML the editor converts natively;
   a tweet/thread/reply is typed into the composer and saved as an unsent draft.
+- **history** — **read-only**, never drafts or posts, writes no local state. Reads
+  the profile of `--handle` (default the logged-in `X_USERNAME`) live through the
+  browser (same GraphQL-capture mechanism as `watch`), keeping only tweets that
+  handle **authored** — **reposts and others' quoted tweets are excluded**, so what
+  you get is the operator's own writing. `--include posts|replies|all` (default
+  `all`); `--limit <n>` (default 50); `--since <iso>` drops older items; output
+  `--format text|json|markdown` (`--json` alias), `--out <file>`. Each item reports
+  its type (`post`/`reply`), text, timestamp, url, and — for replies — the
+  in-reply-to target. **Because this tool never posts, `history` reflects what is
+  LIVE on X only** — a draft staged-but-not-yet-posted won't appear until a human
+  posts it. Use it as the pre-draft "have I already said this?" check in a campaign.
 - **linkedin draft** — inline `--text` (primary) or `--from <file.md>` (`-` = stdin);
   single post, **3000-char cap** (over cap → leading segment + warning, never silent
   truncation); deterministic markdown→plain-text with emoji passthrough; `--media`
