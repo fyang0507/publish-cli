@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { parse as parseYaml } from "yaml";
@@ -34,6 +34,12 @@ function expandHome(p: string): string {
   return p;
 }
 
+/** Resolve a config value relative to the config file, not the caller's cwd. */
+export function resolveConfigRelativePath(configPath: string, value: string): string {
+  const expanded = expandHome(value.trim());
+  return isAbsolute(expanded) ? expanded : resolve(dirname(configPath), expanded);
+}
+
 function cliRepoRoot(): string {
   // src/dataRepo.ts and dist/dataRepo.js both sit one level under the repo root.
   const thisDir = dirname(fileURLToPath(import.meta.url));
@@ -44,7 +50,8 @@ function cliRepoRoot(): string {
  * Locate publish.config.dev.yaml next to the CLI, if present, and read its
  * `data_repo_path` (or null if absent/blank). This is the sticky dev override so
  * the build-time symlink step (whose cwd is the CLI repo, not the workspace)
- * still finds the data repo without an env var.
+ * still finds the data repo without an env var. Relative values are based on
+ * the config file's directory.
  */
 export function locateDevConfig(): DevConfigLocation | null {
   const path = join(cliRepoRoot(), DEV_CONFIG_FILENAME);
@@ -60,7 +67,7 @@ export function locateDevConfig(): DevConfigLocation | null {
 
   const raw = (parsed as Record<string, unknown>).data_repo_path;
   if (typeof raw !== "string" || raw.trim() === "") return { path, dataRepoPath: null };
-  return { path, dataRepoPath: expandHome(raw.trim()) };
+  return { path, dataRepoPath: resolveConfigRelativePath(path, raw) };
 }
 
 function findWorkspaceMarker(startDir: string): string | null {
