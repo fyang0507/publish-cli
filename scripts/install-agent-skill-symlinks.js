@@ -13,7 +13,7 @@
  */
 
 import { chmodSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 
 chmodSync("dist/cli.js", 0o755);
 
@@ -29,11 +29,17 @@ try {
   mkdirSync(skillsTargetDir, { recursive: true });
 
   for (const skill of skills) {
-    const dest = join(skillsTargetDir, skill);
+    const dest = resolve(skillsTargetDir, skill);
     const source = resolve("skills", skill);
+    // Emit a RELATIVE link target. An absolute target bakes this machine's
+    // current checkout path into the *data repo*, so moving or re-cloning
+    // publish-cli silently leaves a dangling skill symlink behind in a repo
+    // that never gets rebuilt. A relative target survives any move that keeps
+    // the two repos in the same relative position, and fails loudly otherwise.
+    const target = relative(dirname(dest), source);
     rmSync(dest, { recursive: true, force: true });
-    symlinkSync(source, dest, "dir");
-    console.log(`Agent skill symlink installed -> ${dest} -> ${source}`);
+    symlinkSync(target, dest, "dir");
+    console.log(`Agent skill symlink installed -> ${dest} -> ${target}`);
   }
 } catch (err) {
   console.log(
