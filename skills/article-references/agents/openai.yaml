@@ -1,0 +1,4 @@
+interface:
+  display_name: "Article References"
+  short_description: "Research and format compact source references"
+  default_prompt: "Use $article-references to add or clean up citations in this article."

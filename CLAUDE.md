@@ -105,6 +105,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/commands/reddit-{inspect,search,draft}.ts` | Reddit command bodies |
 | `src/commands/wechat-{check,draft}.ts` | WeChat command bodies |
 | `scripts/install-agent-skill-symlinks.js` | post-build: chmod bin + symlink skill into `<data_repo>/.agents/skills` |
+| `skills/article-references/` | compact essay-reference research, source-selection, formatting, and safe Notion update workflow |
 | `skills/publish/` | agent-facing capability layer, shipped as a whole dir (SKILL.md router + SETUP.md + calibration.md + PLATFORM_CAPABILITIES.md). Symlinked into other workspaces, so intra-skill links MUST be `./`-relative — never escape the folder (e.g. `../../docs/…`). |
 
 ## Build & checks

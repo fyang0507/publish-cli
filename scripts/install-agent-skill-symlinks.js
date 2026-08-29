@@ -25,7 +25,7 @@ try {
     skillsTargetDir = join(dataRepo, ".agents", "skills");
   }
 
-  const skills = ["publish"];
+  const skills = ["article-references", "publish"];
   mkdirSync(skillsTargetDir, { recursive: true });
 
   for (const skill of skills) {
