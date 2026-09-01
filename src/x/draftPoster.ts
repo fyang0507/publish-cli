@@ -691,7 +691,7 @@ function modifier(): "Meta" | "Control" {
 // Article cover — deterministic discovery + ratio inspection (never rejection)
 // ---------------------------------------------------------------------------
 
-interface HeroImage {
+export interface HeroImage {
   path?: string;
   width?: number;
   height?: number;
@@ -712,7 +712,7 @@ const HERO_NAME_HINTS = ["hero", "cover", "banner", "og", "5x2", "5-2"];
  *
  * Returns a HeroImage describing what was found. Deterministic + verifiable.
  */
-function resolveHeroImage(basePath?: string): HeroImage {
+export function resolveHeroImage(basePath?: string): HeroImage {
   if (!basePath) return { reason: "No base path was provided to locate the article asset folder." };
   const dir = dirname(basePath);
   if (!existsSync(dir)) return { reason: `Article folder not found: ${dir}` };
@@ -734,7 +734,8 @@ function resolveHeroImage(basePath?: string): HeroImage {
   }
   if (candidates.length === 0) return { reason: `No image files in ${dir}.` };
 
-  // Rank: named-hint images first, then by best 5:2 fit.
+  // Rank: exact 5:2 first, then named hints, then closest ratio, then lexical
+  // path. The final key makes selection deterministic when candidates tie.
   const scored = candidates
     .map((p) => {
       const dims = readImageSize(p);
@@ -748,7 +749,8 @@ function resolveHeroImage(basePath?: string): HeroImage {
       if (a.named !== b.named) return a.named ? -1 : 1;
       const da = a.ratio === undefined ? Infinity : Math.abs(a.ratio - HERO_RATIO);
       const db = b.ratio === undefined ? Infinity : Math.abs(b.ratio - HERO_RATIO);
-      return da - db;
+      if (da !== db) return da - db;
+      return a.p.localeCompare(b.p);
     });
 
   const best = scored[0];

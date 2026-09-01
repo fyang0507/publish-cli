@@ -52,13 +52,11 @@ account signal. Inspect `evidence.note` to see when the headful retry occurred.
 ## What it does
 
 - **channel info** — `publish <channel> info [--json]` returns every configured
-  format in a versioned static-capability envelope plus separate bounded
-  readiness. Treat it as the channel execution oracle: it assigns CLI/agent/human/
-  platform responsibility, explains excluded capabilities, names content/media
-  specifications, and supplies an ordered workflow with verification and a hard
-  stop. This applies even when execution belongs to an agent browser or human
-  handoff rather than a CLI draft command. Non-ready auth remains exit 0; follow
-  the sanitized `nextStep`.
+  format as three free-text sections: the CLI boundary, authentication method,
+  and platform specification/gotchas, plus separate bounded readiness. Treat
+  those sections as the channel execution oracle, including when execution
+  belongs to an agent browser or human handoff rather than a CLI draft command.
+  Non-ready auth remains exit 0; follow the sanitized `nextStep`.
 - **auth check** — passive, sanitized authentication readiness for one or more
   channels; returns local evidence, positive live proof, status, and an executable
   recovery step. Never logs in.

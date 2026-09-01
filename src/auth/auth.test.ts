@@ -431,6 +431,7 @@ test("wechat: fresh-machine missing credentials returns executable setup nextSte
   assert.equal(result.requiresHuman, true);
   assert.match(result.nextStep?.instruction ?? "", /WECHAT_APP_ID/);
   assert.match(result.nextStep?.instruction ?? "", /WECHAT_PROXY_URL/);
+  assert.match(result.nextStep?.instruction ?? "", /publish wechat check/);
 });
 
 test("wechat: expired token is renewed automatically and reported in healed", async () => {

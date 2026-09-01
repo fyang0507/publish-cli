@@ -33,7 +33,7 @@ function nextStep(
     return {
       executor: "operator",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
-      instruction: "Set valid WECHAT_APP_ID and WECHAT_APP_SECRET in .env plus exactly one of WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL, then run publish auth check --platform wechat.",
+      instruction: "Set valid WECHAT_APP_ID and WECHAT_APP_SECRET in .env plus exactly one of WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL, then run the canonical single-channel preflight: publish wechat check.",
       continueInSameContext: false,
     };
   }
@@ -43,7 +43,7 @@ function nextStep(
       executor: "human",
       entryUrl: "https://developers.weixin.qq.com/platform/",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
-      instruction: `Add the observed egress IP${ip ? ` ${ip}` : ""} to IP白名单 and approve with the admin WeChat QR scan; then rerun publish auth check --platform wechat.`,
+      instruction: `Add the observed egress IP${ip ? ` ${ip}` : ""} to IP白名单 and approve with the admin WeChat QR scan; then rerun publish wechat check.`,
       continueInSameContext: false,
     };
   }
@@ -51,14 +51,14 @@ function nextStep(
     return {
       executor: "operator",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
-      instruction: "Restore WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL connectivity to api.weixin.qq.com, then rerun publish auth check --platform wechat.",
+      instruction: "Restore WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL connectivity to api.weixin.qq.com, then rerun publish wechat check.",
       continueInSameContext: false,
     };
   }
   return {
     executor: "operator",
     workflowRef: WECHAT_SETUP_WORKFLOW_REF,
-    instruction: "Inspect the sanitized WeChat probe stage and egress configuration, then rerun publish auth check --platform wechat; do not assume readiness without an authenticated API success.",
+    instruction: "Inspect the sanitized WeChat probe stage and egress configuration, then rerun publish wechat check; do not assume readiness without an authenticated API success.",
     continueInSameContext: false,
   };
 }

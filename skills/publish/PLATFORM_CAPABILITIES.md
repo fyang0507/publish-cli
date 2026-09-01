@@ -10,10 +10,10 @@ research against current docs (snoomark/GFM). X tweet/thread = plaintext (known)
 WeChat article = **empirical** — inline-CSS survival verified live in the WeChat
 草稿箱 (draft box) preview, 2026-07-04.
 
-For operational limits and readiness, the machine-readable source is
-`publish <channel> info --json`. Its versioned envelope separates evidence-aware
-`capabilities` from passive `readiness`; documented values, live conflicts,
-observed lower bounds, actual maxima, and `null` unknowns remain distinct.
+For operational limits and readiness, use `publish <channel> info [--json]`.
+Its versioned envelope separates the three Markdown guidance sections from
+passive `readiness`. Unknown or server-authoritative limits remain explicit in
+the prose rather than being inferred.
 
 ## Xiaohongshu discovery boundary
 
@@ -25,10 +25,10 @@ in that same context. The long-article terminal state is a browser-local draft,
 not a cloud draft; it disappears if browser data is cleared and must be reopened
 before a workflow claims persistence. The CLI does not implement selectors,
 import, composer, or draft execution. `publish xhs info` itself is the execution
-oracle: its responsibility boundary, format fields/specifications, ordered
-workflow, verification criteria, and stop condition tell any capable headful
-browser agent how to import, optionally run one-click layout/topics, save, and
-reopen the draft. Never click a final, private, or scheduled publish action.
+oracle: its free-text boundary, authentication, and platform-guidance sections
+tell a capable headful browser agent how to import, optionally run one-click
+layout/topics, save, and reopen the draft. Never click a final, private, or
+scheduled publish action.
 
 ## 1point3acres discovery boundary
 

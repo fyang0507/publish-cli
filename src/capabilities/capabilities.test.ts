@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AUTH_PLATFORMS, createAuthProbeRegistry, type AuthReadiness } from "../auth/index.js";
 import { executeChannelInfo, renderChannelInfo } from "../commands/channel-info.js";
@@ -11,17 +11,15 @@ import { generatePost } from "../linkedin/content.js";
 import { generateContent } from "../x/content.js";
 import { generateArticle } from "../wechat/content.js";
 import {
-  CHANNEL_CAPABILITIES,
-  CHANNEL_CAPABILITY_SCHEMA_VERSION,
   CHANNEL_INFO_SCHEMA_VERSION,
-  GENERIC_CAPABILITY_WORKFLOW_REF,
-  ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
-  XHS_CAPABILITY_WORKFLOW_REF,
+  CHANNEL_INFO_SOURCE_SCHEMA_VERSION,
+  CHANNEL_INFO_SOURCES,
   LINKEDIN_POST_MAX_UTF16_CODE_UNITS,
   X_STANDARD_POST_MAX_WEIGHTED_LENGTH,
   countUtf16CodeUnits,
   countXWeightedLength,
   createServerValidationReceipt,
+  parseChannelInfoMarkdown,
   validateWechatLocalImage,
   validateLinkedInPostText,
   validateXPostText,
@@ -43,181 +41,151 @@ function ready(channel: (typeof AUTH_PLATFORMS)[number]): AuthReadiness {
   };
 }
 
-function collectFacts(value: unknown, facts: Array<{ value: unknown; evidence: Record<string, unknown> }> = []) {
-  if (!value || typeof value !== "object") return facts;
-  const record = value as Record<string, unknown>;
-  if ("value" in record && "evidence" in record) {
-    facts.push(record as { value: unknown; evidence: Record<string, unknown> });
-  }
-  for (const child of Array.isArray(value) ? value : Object.values(record)) collectFacts(child, facts);
-  return facts;
-}
-
-function resolveDotPath(value: unknown, path: string): unknown {
-  return path.split(".").reduce<unknown>((cursor, key) =>
-    cursor && typeof cursor === "object" ? (cursor as Record<string, unknown>)[key] : undefined,
-  value);
-}
-
-test("registry is complete, versioned, JSON-serializable, and evidence-aware", () => {
-  assert.deepEqual(Object.keys(CHANNEL_CAPABILITIES).sort(), [...AUTH_PLATFORMS].sort());
+test("Markdown registry contains exactly one minimal source for every channel", () => {
+  assert.deepEqual(Object.keys(CHANNEL_INFO_SOURCES).sort(), [...AUTH_PLATFORMS].sort());
   for (const channel of AUTH_PLATFORMS) {
-    const entry = CHANNEL_CAPABILITIES[channel];
-    assert.equal(entry.schemaVersion, CHANNEL_CAPABILITY_SCHEMA_VERSION);
-    assert.equal(entry.channel, channel);
-    assert.doesNotThrow(() => JSON.stringify(entry));
-    assert.ok(entry.state.recovery.length > 0, `${channel} has state recovery guidance`);
-    for (const role of ["cli", "agent", "human", "platform"] as const) {
-      assert.ok(entry.responsibility[role].length > 0, `${channel} defines ${role} responsibility`);
-    }
-    assert.ok(entry.responsibility.rationale.length > 0, `${channel} explains its design boundary`);
-    assert.ok(entry.excludedCapabilities.length > 0, `${channel} explains unsupported capabilities`);
-    for (const format of entry.formats) {
-      assert.ok(format.usage.length > 0, `${channel}/${format.id} has invocation guidance`);
-      assert.ok(format.humanHighlights.length > 0, `${channel}/${format.id} has human highlights`);
-      assert.equal(format.workflow.owner, entry.executionMode, `${channel}/${format.id} names the execution owner`);
-      assert.ok(format.workflow.preconditions.length > 0, `${channel}/${format.id} has preconditions`);
-      assert.ok(format.workflow.steps.length > 0, `${channel}/${format.id} has executable steps`);
-      assert.equal(new Set(format.workflow.steps.map((step) => step.id)).size, format.workflow.steps.length);
-      assert.ok(format.workflow.steps.every((step) => step.instruction && step.verification));
-      for (const step of format.workflow.steps) {
-        assert.ok(step.evidenceRefs.length > 0, `${channel}/${format.id}/${step.id} cites evidence`);
-        for (const evidenceRef of step.evidenceRefs) {
-          if (evidenceRef === "readiness" || evidenceRef === "auth") continue;
-          const resolved = resolveDotPath(format, evidenceRef);
-          assert.notEqual(resolved, undefined, `${channel}/${format.id} resolves ${evidenceRef}`);
-          assert.ok(collectFacts(resolved).length > 0, `${channel}/${format.id} ${evidenceRef} is evidence-bearing`);
-        }
-      }
-      assert.ok(format.workflow.successCriteria.length > 0, `${channel}/${format.id} has success criteria`);
-      assert.match(format.workflow.terminalBoundary, /Stop/i);
-      assert.ok(format.workflow.stopConditions.length > 1, `${channel}/${format.id} has explicit stops`);
-      assert.equal(new Set(format.workflow.stopConditions.map((item) => item.id)).size, format.workflow.stopConditions.length);
-      assert.deepEqual(
-        [...new Set(format.workflow.stopConditions.map((item) => item.outcome))].sort(),
-        ["abort", "needs_human", "success_terminal"],
-      );
-    }
-    const facts = collectFacts(entry);
-    assert.ok(facts.length > 0, `${channel} has evidence facts`);
-    for (const item of facts) {
-      assert.match(String(item.evidence.kind), /^(implementation_contract|official_documentation|live_positive_fixture|read_only_api|unknown)$/);
-      assert.ok(String(item.evidence.source).length > 0);
-      assert.match(String(item.evidence.lastVerified), /^\d{4}-\d{2}-\d{2}$/);
-      if (item.value === null) assert.equal(item.evidence.kind, "unknown");
-      if (item.evidence.kind === "unknown") assert.equal(item.value, null);
-    }
+    const source = CHANNEL_INFO_SOURCES[channel];
+    assert.equal(source.schemaVersion, CHANNEL_INFO_SOURCE_SCHEMA_VERSION);
+    assert.equal(source.channel, channel);
+    assert.ok(source.displayName);
+    assert.ok(source.cliBoundary);
+    assert.ok(source.authentication);
+    assert.ok(source.platformGuidance);
+    assert.doesNotThrow(() => JSON.stringify(source));
   }
-  assert.equal(CHANNEL_CAPABILITIES.wechat.auth.continueInSameContext, false);
-  assert.equal(CHANNEL_CAPABILITIES["1point3acres"].auth.continueInSameContext, true);
 });
 
-test("registry returns every configured format at once", () => {
-  const expected: Record<string, string[]> = {
-    x: ["tweet", "thread", "article"],
-    linkedin: ["post"],
-    reddit: ["self_post"],
-    wechat: ["article"],
-    xhs: ["long_article"],
-    "1point3acres": ["text_thread"],
-  };
-  for (const channel of AUTH_PLATFORMS) {
-    assert.deepEqual(CHANNEL_CAPABILITIES[channel].formats.map((format) => format.id), expected[channel]);
-  }
+test("Markdown parser requires only the three sections and rejects silent omissions", () => {
+  const valid = `---
+schemaVersion: publish.channel-info-source/v1
+channel: x
+displayName: X
+---
+# X
 
-  const article = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article");
-  assert.equal(article?.fields.find((field) => field.name === "coverAsset")?.required, false);
+## CLI boundary
+
+CLI guidance.
+
+## Authentication
+
+Auth guidance.
+
+## Platform specification and gotchas
+
+Platform guidance.
+`;
+  assert.deepEqual(parseChannelInfoMarkdown(valid, "fixture", "x"), {
+    schemaVersion: CHANNEL_INFO_SOURCE_SCHEMA_VERSION,
+    channel: "x",
+    displayName: "X",
+    cliBoundary: "CLI guidance.",
+    authentication: "Auth guidance.",
+    platformGuidance: "Platform guidance.",
+  });
+
+  assert.throws(
+    () => parseChannelInfoMarkdown(valid.replace("## Authentication", "## Login"), "fixture"),
+    /expected exactly these H2 sections/,
+  );
+  assert.throws(
+    () => parseChannelInfoMarkdown(valid.replace("# X\n", "# X\nUnmapped prose.\n"), "fixture"),
+    /put all guidance inside/,
+  );
+  assert.throws(() => parseChannelInfoMarkdown(valid, "fixture", "reddit"), /expected channel/);
 });
 
-test("invocation guidance maps every advertised override and implicit resolution rule", () => {
-  const xTweet = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "tweet")!;
-  for (const option of ["--long", "--dry-run", "--inspect"]) {
-    assert.match(xTweet.usage, new RegExp(option));
-  }
+test("free-text guidance preserves the complete channel responsibility and specification oracle", () => {
+  const x = `${CHANNEL_INFO_SOURCES.x.cliBoundary}\n${CHANNEL_INFO_SOURCES.x.authentication}\n${CHANNEL_INFO_SOURCES.x.platformGuidance}`;
+  assert.match(x, /publish x draft --format tweet/);
+  assert.match(x, /publish x draft --format thread/);
+  assert.match(x, /publish x draft --format article/);
+  assert.match(x, /5:2/);
+  assert.match(x, /280/);
+  assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
+  assert.match(x, /PUBLISH_DATA_DIR\/x-profile/);
+  assert.match(x, /no separate side-effect-free CLI login command/i);
+  assert.match(x, /publish x draft .*--inspect/s);
+  assert.match(x, /lexical full path/);
+  assert.match(x, /absolute distance 0\.02/);
 
-  const xThread = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "thread")!;
-  for (const option of ["--dry-run", "--inspect"]) {
-    assert.match(xThread.usage, new RegExp(option));
-  }
+  const linkedin = `${CHANNEL_INFO_SOURCES.linkedin.authentication}\n${CHANNEL_INFO_SOURCES.linkedin.platformGuidance}`;
+  assert.match(linkedin, /3,?000/);
+  assert.match(linkedin, /3:1/);
+  assert.match(linkedin, /4:5/);
+  assert.match(linkedin, /PUBLISH_DATA_DIR\/li-profile/);
+  assert.match(linkedin, /publish linkedin draft .*--inspect/s);
 
-  const xArticle = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article");
-  assert.match(xArticle?.usage ?? "", /--format article --from/);
-  assert.match(xArticle?.usage ?? "", /--dry-run/);
-  assert.match(xArticle?.usage ?? "", /--inspect/);
-  assert.ok(xArticle?.humanHighlights.some((item) => /ranks 5:2 images first/.test(item)));
-  assert.ok(xArticle?.humanHighlights.some((item) => /first Markdown H1/.test(item)));
+  const reddit = `${CHANNEL_INFO_SOURCES.reddit.cliBoundary}\n${CHANNEL_INFO_SOURCES.reddit.authentication}\n${CHANNEL_INFO_SOURCES.reddit.platformGuidance}`;
+  assert.match(reddit, /publish reddit inspect/);
+  assert.match(reddit, /publish reddit search/);
+  assert.match(reddit, /Save Draft/);
+  assert.match(reddit, /PUBLISH_DATA_DIR\/reddit-profile/);
+  assert.match(reddit, /publish reddit draft .*--inspect/s);
 
-  const reddit = CHANNEL_CAPABILITIES.reddit.formats[0];
-  for (const option of ["--nsfw", "--spoiler", "--dry-run", "--inspect"]) {
-    assert.match(reddit.usage, new RegExp(option));
-  }
+  const wechat = `${CHANNEL_INFO_SOURCES.wechat.cliBoundary}\n${CHANNEL_INFO_SOURCES.wechat.authentication}\n${CHANNEL_INFO_SOURCES.wechat.platformGuidance}`;
+  assert.match(wechat, /publish wechat draft/);
+  assert.match(wechat, /32.*16.*120.*字/s);
+  assert.match(wechat, /2\.35:1/);
+  assert.match(wechat, /1:1/);
+  assert.match(wechat, /Markdown file|--from/);
+  assert.match(wechat, /WECHAT_SSH_TUNNEL=publisher@203\.0\.113\.10/);
+  assert.match(wechat, /WECHAT_PROXY_URL=socks5:\/\//);
+  assert.match(wechat, /canonical single-channel preflight/);
+  assert.match(wechat, /same underlying readiness probe/);
 
-  const linkedin = CHANNEL_CAPABILITIES.linkedin.formats[0];
-  for (const option of ["--media", "--bold", "--dry-run", "--inspect"]) {
-    assert.match(linkedin.usage, new RegExp(option));
-  }
+  const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
+  assert.match(xhs, /creator\.xiaohongshu\.com/);
+  assert.match(xhs, /\.md|Markdown/);
+  assert.match(xhs, /64/);
+  assert.match(xhs, /10,?000/);
+  assert.match(xhs, /1,?000/);
+  assert.match(xhs, /browser-local/i);
+  assert.match(xhs, /copy its first Markdown H1/);
+  assert.match(xhs, /Plain long article is the default/);
+  assert.match(xhs, /下一步 triggers platform image generation/);
+  assert.match(xhs, /With no requested topics, add none/);
+  assert.match(xhs, /human may separately decide to publish manually/);
 
-  const wechat = CHANNEL_CAPABILITIES.wechat.formats[0];
-  for (const option of ["--title", "--author", "--digest", "--cover", "--source-url", "--keep-links", "--out", "--dry-run"]) {
-    assert.match(wechat.usage, new RegExp(option));
-  }
-  assert.match(wechat.fields.find((field) => field.name === "title")?.description ?? "", /after resolution/);
-  assert.match(wechat.fields.find((field) => field.name === "cover")?.description ?? "", /frontmatter/);
+  const acres = `${CHANNEL_INFO_SOURCES["1point3acres"].cliBoundary}\n${CHANNEL_INFO_SOURCES["1point3acres"].authentication}\n${CHANNEL_INFO_SOURCES["1point3acres"].platformGuidance}`;
+  assert.match(acres, /human.*normal browser|normal.*human.*browser/is);
+  assert.match(acres, /98/);
+  assert.match(acres, /29/);
+  assert.match(acres, /28/);
+  assert.match(acres, /保存草稿/);
 });
 
-test("workflow success claims stay bounded to observed receipts", () => {
-  const tweet = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "tweet")!;
-  assert.match(tweet.workflow.successCriteria.join(" "), /verified=yes/);
-  assert.match(tweet.workflow.stopConditions.find((item) => item.id === "stage_unconfirmed")?.action ?? "", /Do not claim/);
+test("X Article cover selection has a deterministic lexical tie-break", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-x-cover-selection-"));
+  try {
+    const basePath = join(dir, "article.md");
+    writeFileSync(basePath, "# Article\n");
+    const pngHeader = (width: number, height: number) => {
+      const buffer = Buffer.alloc(24);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer);
+      buffer.writeUInt32BE(width, 16);
+      buffer.writeUInt32BE(height, 20);
+      return buffer;
+    };
+    writeFileSync(join(dir, "z-cover.png"), pngHeader(1500, 600));
+    writeFileSync(join(dir, "a-cover.png"), pngHeader(1500, 600));
 
-  const thread = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "thread")!;
-  assert.match(thread.workflow.successCriteria.join(" "), /first-row receipt.*bounded evidence/);
-  assert.doesNotMatch(thread.workflow.successCriteria.join(" "), /all numbered rows were staged/);
-
-  const linkedin = CHANNEL_CAPABILITIES.linkedin.formats[0];
-  assert.match(linkedin.workflow.successCriteria.join(" "), /media.*visibly confirmed/);
-
-  const reddit = CHANNEL_CAPABILITIES.reddit.formats[0];
-  assert.match(reddit.workflow.successCriteria.join(" "), /no stronger reopen\/persistence claim/);
-  assert.match(reddit.workflow.stopConditions.find((item) => item.id === "save_unconfirmed")?.action ?? "", /do not claim persistence/i);
+    const { resolveHeroImage } = await import("../x/draftPoster.js");
+    const selected = resolveHeroImage(basePath);
+    assert.equal(selected.path, join(dir, "a-cover.png"));
+    assert.equal(selected.width, 1500);
+    assert.equal(selected.height, 600);
+    assert.equal(selected.ratioOk, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
-test("documented values, live conflicts, lower bounds, actual maxima, and unknowns remain separate", () => {
-  const x = CHANNEL_CAPABILITIES.x.formats[0].constraints as any;
-  assert.equal(x.premiumLongPost.platformMaxLength.value, 25000);
-  assert.deepEqual(x.premiumLongPost.liveDraftFixtures.value, [281, 500]);
-  assert.equal(x.premiumLongPost.maxDraftableLength.value, null);
-
-  const linkedin = CHANNEL_CAPABILITIES.linkedin.formats[0].constraints as any;
-  assert.equal(linkedin.images.documentedMaximumCount.value, 20);
-  assert.equal(linkedin.images.observedAcceptedCountAtLeast.value, 21);
-  assert.equal(linkedin.images.actualMaximumCount.value, null);
-  assert.equal(linkedin.draft.successfulMediaSaveObserved.value, false);
-  assert.equal(linkedin.draft.mediaPersistence.value, null);
-
-  const wechat = CHANNEL_CAPABILITIES.wechat.formats[0].constraints as any;
-  assert.equal(wechat.textFields.title.documentedMaximumZi.value, 32);
-  assert.equal(wechat.textFields.title.measurement.value, null);
-  assert.deepEqual(wechat.htmlContent.conflictingDocumentedStatements.value, [
-    "not over 2 kb",
-    "fewer than 20,000 characters",
-    "under 1 MB",
-  ]);
-  assert.equal(wechat.htmlContent.effectiveMaximum.value, null);
-
-  const reddit = CHANNEL_CAPABILITIES.reddit.formats[0].constraints as any;
-  assert.equal(reddit.transportContract.configuredTitleLimitCodePoints, 300);
-  assert.equal(reddit.platformLimits.actualTitleMaximumCodePoints.value, null);
-  assert.equal(reddit.dynamicCommunityContract.inspectable.command, "publish reddit inspect <subreddit>");
-  assert.ok(reddit.dynamicCommunityContract.composerOnly.includes("karma eligibility"));
-  assert.deepEqual(reddit.dynamicCommunityContract.unverifiableStatically, ["complete AutoMod behavior"]);
-});
-
-test("info keeps static capabilities separate, sanitizes probe failure, and always exits zero", async () => {
+test("info keeps Markdown guidance separate from readiness, sanitizes failures, and exits zero", async () => {
   const success = await executeChannelInfo("x", async () => ready("x"));
   assert.equal(success.exitCode, 0);
   assert.equal(success.envelope.schemaVersion, CHANNEL_INFO_SCHEMA_VERSION);
-  assert.equal(success.envelope.capabilities.formats.length, 3);
+  assert.equal(success.envelope.info.channel, "x");
   assert.equal(success.envelope.readiness.ready, true);
 
   const notReadyReceipt = ready("reddit");
@@ -225,156 +193,58 @@ test("info keeps static capabilities separate, sanitizes probe failure, and alwa
   notReadyReceipt.status = "login_required";
   const notReady = await executeChannelInfo("reddit", async () => notReadyReceipt);
   assert.equal(notReady.exitCode, 0);
-  assert.equal(notReady.envelope.capabilities.channel, "reddit");
+  assert.equal(notReady.envelope.info.channel, "reddit");
   assert.equal(notReady.envelope.readiness.ready, false);
 
   const failure = await executeChannelInfo("linkedin", async () => {
     throw new Error("raw token SECRET_VALUE");
   }, () => Date.parse(CHECKED_AT));
   assert.equal(failure.exitCode, 0);
-  assert.equal(failure.envelope.capabilities.channel, "linkedin");
+  assert.equal(failure.envelope.info.channel, "linkedin");
   assert.equal(failure.envelope.readiness.status, "probe_inconclusive");
   assert.doesNotMatch(JSON.stringify(failure.envelope), /SECRET_VALUE|raw token/);
 });
 
-test("human info is readiness-first, concise, and actionable while JSON owns full evidence", () => {
+test("human info is readiness-first and renders the three Markdown sections", () => {
   const readiness = ready("wechat");
   readiness.healed = ["token_refreshed"];
   const rendered = renderChannelInfo({
     schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
     channel: "wechat",
-    capabilities: CHANNEL_CAPABILITIES.wechat,
+    info: CHANNEL_INFO_SOURCES.wechat,
     readiness,
   });
-  assert.ok(rendered.indexOf("Readiness: ready") < rendered.indexOf("Static capabilities:"));
+  assert.ok(rendered.indexOf("Readiness: ready") < rendered.indexOf("## CLI boundary"));
   assert.match(rendered, /Healed: token_refreshed/);
   assert.match(rendered, /Exit behavior: info returns 0 even when not ready/);
-  assert.match(rendered, /cover \(required\)/);
-  assert.match(rendered, /Use: publish wechat draft/);
-  assert.match(rendered, /Cover formats: BMP\/PNG\/JPEG\/JPG\/GIF/);
-  assert.match(rendered, /Exact byte boundaries are unknown\/server-authoritative/);
-  assert.match(rendered, /32\/16\/120 字/);
-  assert.match(rendered, /WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL/);
-  assert.match(rendered, /serverAuthoritative:/);
-  assert.match(rendered, /Responsibility boundary:/);
-  assert.match(rendered, /Workflow owner: cli_transport/);
-  assert.match(rendered, /Execute:\n\s+1\. \[agent\]/);
-  assert.match(rendered, /Verify: The API probe is authenticated/);
-  assert.match(rendered, /Terminal boundary: Stop in 草稿箱/);
-  assert.match(rendered, /ip_not_allowlisted \[needs_human; human\]/);
-  assert.match(rendered, /2\.35:1 and 1:1/);
-  assert.match(rendered, /Excluded, deferred, or external capabilities:/);
-  assert.match(rendered, /Forbidden actions:\n  - freepublish\/\*/);
-  assert.match(rendered, /Evidence: use --json/);
-  assert.ok(rendered.split("\n").length < 120);
+  assert.match(rendered, /## CLI boundary/);
+  assert.match(rendered, /## Authentication/);
+  assert.match(rendered, /## Platform specification and gotchas/);
+  assert.match(rendered, /freepublish\/\*/);
 });
 
-test("agent-owned entries use shipped channel references and truthful context boundaries", async () => {
-  assert.ok(existsSync(resolve(process.cwd(), GENERIC_CAPABILITY_WORKFLOW_REF.split("#")[0])));
-  assert.ok(existsSync(resolve(process.cwd(), XHS_CAPABILITY_WORKFLOW_REF.split("#")[0])));
-  assert.ok(existsSync(resolve(process.cwd(), ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF.split("#")[0])));
-  const registry = createAuthProbeRegistry({ now: () => Date.parse(CHECKED_AT) });
-  const xhs = await registry.xhs();
-  const acres = await registry["1point3acres"]();
-  assert.equal(xhs.status, "agent_check_required");
-  assert.equal(xhs.nextStep?.entryUrl, CHANNEL_CAPABILITIES.xhs.auth.entryUrl);
-  assert.equal(xhs.nextStep?.workflowRef, XHS_CAPABILITY_WORKFLOW_REF);
-  assert.equal(xhs.nextStep?.continueInSameContext, true);
-  assert.equal(acres.status, "agent_check_required");
-  assert.equal(acres.nextStep?.executor, "human");
-  assert.equal(acres.verificationMode, "human_handoff");
-  assert.equal(acres.nextStep?.entryUrl, CHANNEL_CAPABILITIES["1point3acres"].auth.entryUrl);
-  assert.equal(acres.nextStep?.workflowRef, ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF);
-  assert.equal(acres.nextStep?.continueInSameContext, true);
-  assert.equal(CHANNEL_CAPABILITIES["1point3acres"].executionMode, "human_handoff");
-  assert.match(CHANNEL_CAPABILITIES["1point3acres"].auth.mode, /human-owned normal-browser/);
-  assert.doesNotMatch(CHANNEL_CAPABILITIES["1point3acres"].auth.mode, /agent-owned/);
-  assert.match(CHANNEL_CAPABILITIES.xhs.formats[0].terminalState, /browser-local/);
-  assert.match(CHANNEL_CAPABILITIES.xhs.formats[0].terminalState, /not a cloud draft/);
-});
-
-test("agent_check_required renders as an actionable external preflight with consistent ownership", async () => {
+test("external readiness descriptors remain actionable without a typed static workflow", async () => {
   const registry = createAuthProbeRegistry({ now: () => Date.parse(CHECKED_AT) });
   const xhsReadiness = await registry.xhs();
   const xhsRendered = renderChannelInfo({
     schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
     channel: "xhs",
-    capabilities: CHANNEL_CAPABILITIES.xhs,
+    info: CHANNEL_INFO_SOURCES.xhs,
     readiness: xhsReadiness,
   });
-  assert.match(xhsRendered, /Readiness: external preflight required \(agent_check_required\)/);
+  assert.match(xhsRendered, /external preflight required \(agent_check_required\)/);
   assert.match(xhsRendered, /Next: Open the creator portal with the browser agent/);
-  assert.match(xhsRendered, /1\. \[agent\] Open the capability entry URL/);
-  assert.match(xhsRendered, /Supplemental reference: .*not required; the executable workflow is embedded below/);
+  assert.match(xhsRendered, /continue.*same browser context/is);
 
   const acresReadiness = await registry["1point3acres"]();
   const acresRendered = renderChannelInfo({
     schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
     channel: "1point3acres",
-    capabilities: CHANNEL_CAPABILITIES["1point3acres"],
+    info: CHANNEL_INFO_SOURCES["1point3acres"],
     readiness: acresReadiness,
   });
-  assert.match(acresRendered, /Next: Have the human open 1point3acres in a normal authorized browser/);
-  assert.match(acresRendered, /Authentication: human-owned normal-browser/);
-  assert.doesNotMatch(acresRendered, /Authentication: agent-owned/);
-});
-
-test("agent-browser and handoff info are standalone execution oracles", () => {
-  const xhs = CHANNEL_CAPABILITIES.xhs.formats[0];
-  const xhsConstraints = xhs.constraints as any;
-  assert.deepEqual(xhsConstraints.import.acceptedExtensions.value, [".md", ".docx", ".txt"]);
-  assert.equal(xhsConstraints.editor.titleVisibleMaximum.value, 64);
-  assert.equal(xhsConstraints.editor.bodyVisibleMaximum.value, 10000);
-  assert.equal(xhsConstraints.oneClickLayout.finalCaptionVisibleMaximum.value, 1000);
-  assert.equal(xhsConstraints.oneClickLayout.finalTitleMaximum.value, null);
-  assert.deepEqual(xhsConstraints.deferredImageTextPreparation.recommendedAspectRatioRange.value, {
-    tallest: "3:4",
-    widest: "2:1",
-  });
-  assert.deepEqual(xhs.workflow.steps.map((step) => step.id), [
-    "authenticate",
-    "import",
-    "set_title",
-    "choose_output_branch",
-    "complete_post_layout",
-    "save",
-    "reopen",
-  ]);
-  assert.doesNotMatch(`${xhs.usage} ${xhs.summary}`, /issue #35|future|not implemented in #32/i);
-
-  const acres = CHANNEL_CAPABILITIES["1point3acres"].formats[0];
-  const acresConstraints = acres.constraints as any;
-  assert.equal(acresConstraints.curatedDestinations.workplaceReflection.forumId, 98);
-  assert.equal(acresConstraints.curatedDestinations.chineseLife.forumId, 29);
-  assert.equal(acresConstraints.curatedDestinations.jobSearch.forumId, 28);
-  assert.deepEqual(Object.keys(acresConstraints.curatedDestinations.jobSearch.requiredMetadata), [
-    "jobYear",
-    "jobCategory",
-    "major",
-    "experienceRange",
-    "regionRequired",
-  ]);
-  assert.equal(acresConstraints.composer.title.measurement.value, null);
-  assert.equal(acresConstraints.composer.body.maximum.value, null);
-  assert.match(acres.workflow.steps.find((step) => step.id === "save_draft")?.instruction ?? "", /保存草稿/);
-  assert.doesNotMatch(`${acres.usage} ${acres.summary}`, /issue #37|future|not implemented in #32/i);
-});
-
-test("channel media specifications are discoverable without inferring unknown maxima", () => {
-  const xCover = (CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article")?.constraints as any).cover;
-  assert.equal(xCover.recommendedAspectRatio.value, "5:2");
-  assert.equal(xCover.maximumBytes.value, null);
-
-  const linkedinImages = (CHANNEL_CAPABILITIES.linkedin.formats[0].constraints as any).images;
-  assert.deepEqual(linkedinImages.documentedAspectRatioRange.value, { widest: "3:1", tallest: "4:5" });
-  assert.equal(linkedinImages.actualAcceptedAspectRatioRange.value, null);
-
-  const wechatCover = (CHANNEL_CAPABILITIES.wechat.formats[0].constraints as any).cover;
-  assert.deepEqual(wechatCover.supportedCropRatios.value, ["2.35:1", "1:1"]);
-  assert.equal(wechatCover.requiredInputAspectRatio.value, null);
-  const wechatPaths = (CHANNEL_CAPABILITIES.wechat.formats[0].constraints as any).pathResolution;
-  assert.equal(wechatPaths.markdownRelativeBodyImages.value, "directory containing the --from Markdown file");
-  assert.equal(wechatPaths.absolutePathsAccepted.value, true);
+  assert.match(acresRendered, /normal authorized browser/i);
+  assert.doesNotMatch(acresRendered, /agent-owned authentication/i);
 });
 
 test("X uses official twitter-text fixtures from issue #40", () => {
@@ -529,7 +399,7 @@ test("WeChat leaves unknown 字 measurement to the server and omits derived dige
   }
 });
 
-test("info CLI has no --format and non-ready agent-owned info exits zero", () => {
+test("info CLI has no --format and non-ready external info exits zero", () => {
   const rootHelp = spawnSync(process.execPath, [CLI_PATH, "--help"], { encoding: "utf8" });
   assert.equal(rootHelp.status, 0);
   for (const channel of AUTH_PLATFORMS) assert.match(rootHelp.stdout, new RegExp(`\\b${channel}\\b`));
@@ -548,7 +418,7 @@ test("info CLI has no --format and non-ready agent-owned info exits zero", () =>
 
   const xhs = spawnSync(process.execPath, [CLI_PATH, "xhs", "info", "--json"], { encoding: "utf8" });
   assert.equal(xhs.status, 0, xhs.stderr);
-  const receipt = JSON.parse(xhs.stdout) as { capabilities: { formats: unknown[] }; readiness: { ready: boolean } };
-  assert.equal(receipt.capabilities.formats.length, 1);
+  const receipt = JSON.parse(xhs.stdout) as { info: { platformGuidance: string }; readiness: { ready: boolean } };
+  assert.match(receipt.info.platformGuidance, /Markdown|\.md/);
   assert.equal(receipt.readiness.ready, false);
 });

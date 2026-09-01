@@ -5,14 +5,15 @@ A per-channel content-distribution toolkit for growing the operator's audience i
 ## Discover channel capabilities
 
 Run `publish <channel> info` (or `--json`) before channel work. It returns every
-configured format at once in a versioned envelope with `capabilities` kept
-separate from side-effect-bounded `readiness`. Browser probes are passive;
+configured format at once as three human-editable Markdown sections: the CLI
+boundary, authentication method, and platform specification/gotchas. Static
+`info` is kept separate from side-effect-bounded `readiness` in the versioned
+JSON envelope. Browser probes are passive;
 WeChat may perform its normal token exchange and report `token_refreshed`.
 Missing auth and probe failures remain exit 0
-so static limits and recovery steps are always available. The capability payload
-is an execution oracle: responsibility lines, exclusions, format/media specs,
-ordered steps, verification, and stop conditions are complete even when the work
-continues outside the CLI. There is no `--format`.
+so static limits and recovery steps are always available. The Markdown files in
+[`capabilities/`](./capabilities/) are the runtime source and can be coedited
+without changing TypeScript. There is no `--format`.
 
 ```bash
 publish x info --json

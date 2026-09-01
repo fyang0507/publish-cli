@@ -6,6 +6,7 @@
     "publish": "dist/cli.js"
   },
   "files": [
+    "capabilities/",
     "dist/",
     "docs/AUTH_READINESS.md",
     "docs/PRODUCT_SPEC.md",

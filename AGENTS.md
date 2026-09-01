@@ -57,7 +57,7 @@ recovery path pass.
 
 The CLI is **channel-first**: `publish <channel> <action>` (each channel has its own action space). X, LinkedIn, Reddit, and WeChat have CLI transports; Xiaohongshu and 1point3acres currently expose static capability/readiness boundaries only.
 
-- `publish <channel> info [--json]` — versioned static capability discovery plus passive readiness for `x`, `linkedin`, `reddit`, `wechat`, `xhs`, and `1point3acres`. Returns every configured format at once, succeeds even when auth is not ready, and never logs in or opens a composer.
+- `publish <channel> info [--json]` — versioned Markdown guidance plus passive readiness for `x`, `linkedin`, `reddit`, `wechat`, `xhs`, and `1point3acres`. Returns every configured format at once under three free-text sections (CLI boundary, authentication, and platform specification/gotchas), succeeds even when auth is not ready, and never logs in or opens a composer.
 
 - `publish x create-watch-list` — build/populate the account-watch List from who you follow → prints the id for `watch --x-list`. Never posts (writes List membership only).
 - `publish x watch` — poll queries / Lists → dedupe → cheap-LLM triage (Gemini, low reasoning effort) → ranked reply candidates. Accounts are watched via a List (`--x-list`), never one-by-one. The `x-list` spelling is unified across `watch` and `create-watch-list`.
@@ -128,7 +128,8 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/cli.ts` | `publish` program; registers the `x` group (`create-watch-list` / `watch` / `draft` / `reply` / `history`), the `linkedin` group (`draft`), the `reddit` group (`inspect` / `search` / `draft`) and the `wechat` group (`check` / `draft`) |
 | `src/config.ts` | env (X + LinkedIn + Reddit + WeChat creds, `TRIAGE_MODEL`, `WECHAT_SSH_TUNNEL`/`WECHAT_PROXY_URL`), `dataPaths()` (x-/li-/reddit-profile + cookie caches + `wechatTokenCache`), `loadWatchConfig()` |
 | `src/dataRepo.ts` | `resolveDataRepo()` — env → dev config → workspace walk-up |
-| `src/capabilities/` | Versioned, evidence-backed static channel registry plus reusable confirmed measurement/validation helpers |
+| `capabilities/` | Human-editable Markdown source for each channel's CLI boundary, authentication method, and platform specification/gotchas; loaded directly at runtime |
+| `src/capabilities/` | Minimal Markdown loader/schema plus reusable confirmed measurement/validation helpers |
 | `src/session.ts` | X Playwright persistent-profile login; `ensureSession`/`getCookies`/`getBrowserContext` |
 | `src/gemini.ts` | `@google/genai` client: `generate()` + `triage()` |
 | `src/db.ts` | `better-sqlite3` `SeenStore` (dedupe), db in the data repo |
@@ -149,7 +150,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/wechat/content.ts` | `generateArticle` — canonical markdown → title + inline-styled HTML body (`marked`, `style=` on every element), with unresolved `字` limits left server-authoritative |
 | `src/wechat/draft.ts` | draft orchestration: upload cover + body images, rewrite image `src`s to CDN URLs, then `draft/add` (never publishes) |
 | `src/commands/contentInput.ts` | shared `--text` / `--from` / stdin resolution (exactly-one-of) for `draft` / `reply` / `linkedin draft` / `reddit draft` / `wechat draft` |
-| `src/commands/channel-info.ts` | Shared `publish <channel> info [--json]` command; static capabilities plus passive shared-auth readiness |
+| `src/commands/channel-info.ts` | Shared `publish <channel> info [--json]` command; Markdown guidance plus passive shared-auth readiness |
 | `src/commands/{create-watch-list,watch,draft,reply,history,linkedin-draft}.ts` | command bodies |
 | `src/commands/reddit-{inspect,search,draft}.ts` | Reddit command bodies |
 | `src/commands/wechat-{check,draft}.ts` | WeChat command bodies |
