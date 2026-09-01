@@ -1,6 +1,6 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH), **LinkedIn** (PUBLISH — `linkedin draft`), **Reddit** (PUBLISH — `reddit inspect` / `search` / `draft`, self-posts) **and WeChat** (PUBLISH — `wechat check` / `draft`, article self-posts). Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./PRODUCT_SPEC.md) for the full vision and roadmap, and [CLAUDE.md](./CLAUDE.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH), **LinkedIn** (PUBLISH — `linkedin draft`), **Reddit** (PUBLISH — `reddit inspect` / `search` / `draft`, self-posts) **and WeChat** (PUBLISH — `wechat check` / `draft`, article self-posts). Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for the full vision and roadmap, and [AGENTS.md](./AGENTS.md) for the high-level agent orientation.
 
 ## What it does (X channel)
 
@@ -91,6 +91,9 @@ The source of truth for content is caller-supplied local markdown, passed to the
 ```bash
 publish --help
 
+publish auth check --platform x --platform reddit [--json]
+publish auth check --all [--json]
+
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
 publish x watch [--query <q>...] [--x-list <id>...] [--languages en,zh] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
 publish x draft --format tweet|thread|article (--text <content> | --from <base.md>) [--inspect]
@@ -108,6 +111,13 @@ publish wechat draft (--text <content> | --from <base.md>) [--title <t>] [--auth
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.
+
+`auth check` is passive and sanitized: it never logs in, submits credentials, or
+opens a composer. Exit `0` means all requested platforms are ready, `1` means at
+least one needs its returned `nextStep`, and `2` means invalid usage. Empty
+profile directories are not authentication evidence; browser readiness requires
+a positive live signal. WeChat may automatically renew its short-lived token and
+reports that as `healed: ["token_refreshed"]`.
 
 ## Status
 

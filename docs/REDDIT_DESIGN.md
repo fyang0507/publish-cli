@@ -51,7 +51,7 @@ Two things make Reddit unlike either channel we ship:
 
 Because the subreddit is a contract, publishing is a **two-phase** flow, and the
 judgment of *where* to post stays with the **consuming agent**, not this repo
-(CLAUDE.md public-repo posture — editorial judgment lives in the agent
+(AGENTS.md public-repo posture — editorial judgment lives in the agent
 workspace):
 
 1. **Agent proposes** candidate subreddits for a piece of content — from its own
@@ -213,7 +213,7 @@ headful `--inspect` for first login / calibration. It is a **separate** session
 (profile `<PUBLISH_DATA_DIR>/reddit-profile`, cache `reddit-cookies.json`, creds
 `REDDIT_USERNAME` / `REDDIT_PASSWORD`) and does **not** share X's session — same
 "structural sibling, don't force a premature factory" posture as LinkedIn
-(CLAUDE.md). It exposes the browser-channel surface the reader and composer
+(AGENTS.md). It exposes the browser-channel surface the reader and composer
 consume: `ensureSession` / `getBrowserContext` / `getCookies` / `closeSession`.
 
 Reddit's **login is captcha-heavy**, so first login is headful (`--inspect`) and
@@ -341,7 +341,7 @@ mirroring X's/LinkedIn's `stagePost` and reusing their shared primitives
    old-reddit/link advisories folded into `note`.
 
 Every selector lives in one `REDDIT_COMPOSER_SELECTORS` block, commented
-**best-effort / needs live calibration**. Per CLAUDE.md "Verify live," none of it
+**best-effort / needs live calibration**. Per AGENTS.md "Verify live," none of it
 is trustworthy until run headful (`--inspect`) against real Reddit.
 
 ## 6. Config & state additions
@@ -372,7 +372,7 @@ is trustworthy until run headful (`--inspect`) against real Reddit.
 | `src/cli.ts` | register the `reddit` group (mirror the `linkedin` block) |
 | `src/config.ts` | `REDDIT_*` creds + `redditProfileDir` / `redditCookieCache` in `DataPaths`/`dataPaths()` |
 
-Channel-agnostic reuse (imported, not edited, per CLAUDE.md "reuse by import"):
+Channel-agnostic reuse (imported, not edited, per AGENTS.md "reuse by import"):
 `src/x/content.ts` (parser), `src/x/draftPoster.ts` (locator/typing primitives),
 `src/commands/contentInput.ts` (input). Reddit is now a near-structural twin of
 LinkedIn — session + content + composer + commands — differing mainly in the
@@ -396,7 +396,7 @@ reader layer (subreddit facts) and Markdown-verbatim content.
 
 ## 9. Open calibration risks
 
-Per CLAUDE.md "Verify live" — compile-green is not proof for a browser flow. Run
+Per AGENTS.md "Verify live" — compile-green is not proof for a browser flow. Run
 headful (`--inspect`) against real Reddit before claiming any of this works:
 
 - **Login is captcha-heavy.** First headful login may need a manual challenge

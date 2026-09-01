@@ -11,6 +11,7 @@ import { registerRedditSearchCommand } from "./commands/reddit-search.js";
 import { registerRedditDraftCommand } from "./commands/reddit-draft.js";
 import { registerWechatCheckCommand } from "./commands/wechat-check.js";
 import { registerWechatDraftCommand } from "./commands/wechat-draft.js";
+import { registerAuthCheckCommand } from "./commands/auth-check.js";
 
 const program = new Command();
 
@@ -18,6 +19,12 @@ program
   .name("publish")
   .description("Per-channel content distribution toolkit")
   .version("0.1.0");
+
+const auth = program
+  .command("auth")
+  .description("Passive authentication readiness checks and recovery descriptors");
+
+registerAuthCheckCommand(auth);
 
 // Channel-first: each channel groups its OWN action space, because those spaces
 // diverge (X needs create-watch-list; other channels won't). X is the only

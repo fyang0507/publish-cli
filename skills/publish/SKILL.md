@@ -9,8 +9,35 @@ stage) and stops at a **native draft, one click from publishing** — it **never
 posts**. *What* to say, *whether* a post is worth replying to, and any
 send/approval flow are the caller's concern, not this CLI's.
 
+## Auth first — required before channel work
+
+Before reading, drafting, or implementing a channel, run the passive readiness
+probe. It never calls an automatic login path, submits credentials, or opens a
+composer:
+
+```bash
+publish auth check --platform x --platform reddit --json
+publish auth check --all --json
+```
+
+A profile directory or cookie/token cache is only local evidence. Proceed only
+on `status: ready`, which requires a positive live UI/API signal. For any other
+status, execute the sanitized `nextStep`. Browser-channel recovery is owned by
+the browser agent: open `entryUrl`, let the operator complete CAPTCHA/QR/2FA as
+needed, positively verify authentication, and continue in that **same browser
+context**. Never interpret selector drift, an unfamiliar page, or a network
+failure as logout. Never copy cookies between machines.
+
+WeChat may renew an expired stable token as part of its normal credential
+exchange; the receipt reports that explicitly as `healed: ["token_refreshed"]`.
+`xhs` and `1point3acres` intentionally return `agent_check_required` because
+their authenticated browser contexts are agent-owned.
+
 ## What it does
 
+- **auth check** — passive, sanitized authentication readiness for one or more
+  channels; returns local evidence, positive live proof, status, and an executable
+  recovery step. Never logs in.
 - **create-watch-list** — build/populate an X **List** from the accounts you
   follow (the **precursor to account-based watching**): enumerate Following, create
   a (private by default) List, add every followed account, verify member count.
@@ -140,6 +167,7 @@ of people, build a List once, then keep it fresh:
 ## Commands (complements `publish --help`)
 
 ```bash
+publish auth check (--platform <name>...) | --all [--json]
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--description <t>] \
                  [--x-list <id>] [--private|--public] [--limit <n>] [--dry-run] [--json] [--inspect]
 publish x watch  [--query <q>...] [--x-list <id>...] [--languages en,zh] \

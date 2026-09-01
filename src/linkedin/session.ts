@@ -30,7 +30,7 @@
  * Selector drift: LinkedIn's login DOM changes like X's. All login selectors are
  * centralized in LI_LOGIN_SELECTORS below and every one is BEST-EFFORT and NEEDS
  * LIVE CALIBRATION — run with `--inspect` (headful) to watch the flow and update
- * them. None of this is trustworthy until verified live (CLAUDE.md "Verify live").
+ * them. None of this is trustworthy until verified live (AGENTS.md "Verify live").
  */
 
 import { writeFileSync, readFileSync, existsSync } from "node:fs";

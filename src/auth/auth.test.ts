@@ -1,0 +1,475 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  evaluateBrowserReadiness,
+  hasMeaningfulProfileState,
+  inspectBrowserLocalEvidence,
+  probePassiveBrowserAuth,
+  waitForBrowserSignal,
+  type BrowserSignalPage,
+  type PassiveBrowserProbeConfig,
+} from "./browser.js";
+import { createAuthProbeRegistry, probeAuthPlatforms } from "./registry.js";
+import type { BrowserLocalEvidence } from "./types.js";
+import { probeWechatAuth } from "./wechat.js";
+import type { CheckResult, WeChatClient } from "../wechat/client.js";
+import { executeAuthCheck } from "../commands/auth-check.js";
+
+const CHECKED_AT = "2026-08-30T20:55:00.000Z";
+const NOW = Date.parse(CHECKED_AT);
+
+function browserConfig(platform: "x" | "linkedin" | "reddit"): PassiveBrowserProbeConfig {
+  return {
+    platform,
+    profileDir: `/tmp/${platform}-profile`,
+    cookieCache: `/tmp/${platform}-cookies.json`,
+    requiredCookieNames: ["auth"],
+    entryUrl: `https://${platform}.example.test/`,
+    authenticatedSelectors: ["#authenticated"],
+    loggedOutSelectors: ["#logged-out"],
+    challengeSelectors: ["#challenge"],
+    loggedOutUrlPatterns: [/login/],
+    challengeUrlPatterns: [/challenge/],
+    workflowRef: `${platform}#authentication`,
+    loginInstruction: "Log in and continue in the same context.",
+    challengeInstruction: "Complete the challenge and continue in the same context.",
+  };
+}
+
+const LONG_IDLE: BrowserLocalEvidence = {
+  profilePresent: true,
+  profileAgeDays: 60,
+  cookieCachePresent: true,
+  cookieCacheAgeDays: 60,
+  requiredCookiesPresent: true,
+  declaredExpired: false,
+};
+const ZERO: BrowserLocalEvidence = {
+  profilePresent: false,
+  cookieCachePresent: false,
+  requiredCookiesPresent: false,
+  declaredExpired: false,
+};
+const EXPIRED: BrowserLocalEvidence = {
+  ...LONG_IDLE,
+  declaredExpired: true,
+};
+
+class DelayedSignalPage implements BrowserSignalPage {
+  elapsedMs = 0;
+
+  constructor(private readonly visibleAt: Record<string, number>) {}
+
+  url(): string {
+    return "https://fixture.example.test/";
+  }
+
+  locator(selector: string) {
+    return {
+      first: () => ({
+        isVisible: async () => {
+          const threshold = this.visibleAt[selector];
+          return threshold != null && this.elapsedMs >= threshold;
+        },
+      }),
+    };
+  }
+
+  async waitForTimeout(milliseconds: number): Promise<void> {
+    this.elapsedMs += milliseconds;
+  }
+}
+
+test("browser backend signal loop catches delayed X-style authenticated state", async () => {
+  const page = new DelayedSignalPage({ "#authenticated": 300 });
+  const result = await waitForBrowserSignal(page, browserConfig("x"), {
+    budgetMs: 500,
+    pollMs: 100,
+    now: () => page.elapsedMs,
+  });
+  assert.deepEqual(result, { kind: "authenticated" });
+  assert.equal(page.elapsedMs, 300);
+});
+
+test("browser backend signal loop catches delayed Reddit-style logged-out state", async () => {
+  const page = new DelayedSignalPage({ "#logged-out": 400 });
+  const result = await waitForBrowserSignal(page, browserConfig("reddit"), {
+    budgetMs: 500,
+    pollMs: 100,
+    now: () => page.elapsedMs,
+  });
+  assert.deepEqual(result, { kind: "logged_out" });
+  assert.equal(page.elapsedMs, 400);
+});
+
+test("browser backend signal loop catches delayed challenge state", async () => {
+  const page = new DelayedSignalPage({ "#challenge": 200 });
+  const result = await waitForBrowserSignal(page, browserConfig("x"), {
+    budgetMs: 500,
+    pollMs: 100,
+    now: () => page.elapsedMs,
+  });
+  assert.equal(result?.kind, "challenge");
+});
+
+test("challenge wins when authenticated and challenge signals overlap", async () => {
+  const page = new DelayedSignalPage({ "#authenticated": 0, "#challenge": 0 });
+  const observation = await waitForBrowserSignal(page, browserConfig("reddit"), {
+    budgetMs: 500,
+    now: () => page.elapsedMs,
+  });
+  assert.equal(observation?.kind, "challenge");
+  const readiness = evaluateBrowserReadiness(
+    browserConfig("reddit"),
+    LONG_IDLE,
+    observation!,
+    CHECKED_AT,
+  );
+  assert.equal(readiness.status, "human_challenge_required");
+});
+
+test("browser signal polling uses one total budget rather than multiplying by selectors", async () => {
+  const page = new DelayedSignalPage({});
+  const result = await waitForBrowserSignal(page, browserConfig("x"), {
+    budgetMs: 350,
+    pollMs: 100,
+    now: () => page.elapsedMs,
+  });
+  assert.equal(result, undefined);
+  assert.equal(page.elapsedMs, 350);
+});
+
+for (const platform of ["x", "linkedin", "reddit"] as const) {
+  test(`${platform}: long-idle local state still requires and accepts positive live proof`, () => {
+    const result = evaluateBrowserReadiness(
+      browserConfig(platform),
+      LONG_IDLE,
+      { kind: "authenticated" },
+      CHECKED_AT,
+    );
+    assert.equal(result.status, "ready");
+    assert.equal(result.evidence.profileAgeDays, 60);
+    assert.equal(result.evidence.liveProbe, "authenticated");
+  });
+
+  test(`${platform}: fresh-machine zero state recovers through an agent-owned same-context login`, () => {
+    const result = evaluateBrowserReadiness(
+      browserConfig(platform),
+      ZERO,
+      { kind: "logged_out" },
+      CHECKED_AT,
+    );
+    assert.equal(result.status, "login_required");
+    assert.equal(result.nextStep?.executor, "agent_browser");
+    assert.equal(result.nextStep?.continueInSameContext, true);
+  });
+
+  test(`${platform}: declared-expired cache is invalid evidence but the profile is still probed`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), `publish-auth-${platform}-`));
+    try {
+      const profileDir = join(dir, "profile");
+      mkdirSync(join(profileDir, "Default"), { recursive: true });
+      writeFileSync(join(profileDir, "Default", "Preferences"), "{}");
+      const cookieCache = join(dir, "cookies.json");
+      writeFileSync(cookieCache, JSON.stringify([{ name: "auth", expires: NOW / 1000 - 1 }]));
+      let probed = false;
+      const result = await probePassiveBrowserAuth(
+        { ...browserConfig(platform), profileDir, cookieCache },
+        {
+          probe: async () => {
+            probed = true;
+            return { kind: "logged_out" };
+          },
+        },
+        NOW,
+      );
+      assert.equal(probed, true);
+      assert.equal(result.evidence.declaredExpired, true);
+      assert.equal(result.status, "login_required");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`${platform}: network failure is never reclassified as logout`, () => {
+    const result = evaluateBrowserReadiness(
+      browserConfig(platform),
+      EXPIRED,
+      { kind: "network_error", note: "navigation failed" },
+      CHECKED_AT,
+    );
+    assert.equal(result.status, "network_error");
+    assert.equal(result.evidence.liveProbe, "network_error");
+  });
+
+  test(`${platform}: missing selectors remain probe_inconclusive`, () => {
+    const result = evaluateBrowserReadiness(
+      browserConfig(platform),
+      EXPIRED,
+      { kind: "inconclusive", note: "no known signal" },
+      CHECKED_AT,
+    );
+    assert.equal(result.status, "probe_inconclusive");
+    assert.notEqual(result.status, "login_required");
+  });
+}
+
+test("empty profile directories are not meaningful local evidence", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-auth-empty-"));
+  try {
+    const profileDir = join(dir, "profile");
+    mkdirSync(profileDir);
+    assert.equal(hasMeaningfulProfileState(profileDir), false);
+    const evidence = inspectBrowserLocalEvidence(
+      { profileDir, cookieCache: join(dir, "missing.json"), requiredCookieNames: ["auth"] },
+      NOW,
+    );
+    assert.equal(evidence.profilePresent, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function fakeWechatClient(result: CheckResult): Pick<WeChatClient, "checkAccess" | "close"> {
+  return { checkAccess: async () => result, close: async () => {} };
+}
+
+test("wechat: ready long-idle valid token uses positive API proof without healing", async () => {
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => true,
+    inspectTokenCache: () => ({ present: true, expired: false }),
+    createClient: async () =>
+      fakeWechatClient({
+        ok: true,
+        egressDescription: "fixture",
+        tokenRefreshed: false,
+        tokenCacheBeforeCheck: { present: true, expired: false },
+      }),
+    now: () => NOW,
+  });
+  assert.equal(result.status, "ready");
+  assert.deepEqual(result.healed, []);
+  assert.equal(result.evidence.liveProbe, "api_authenticated");
+});
+
+test("wechat: fresh-machine missing credentials returns executable setup nextStep", async () => {
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => false,
+    inspectTokenCache: () => ({ present: false, expired: false }),
+    now: () => NOW,
+  });
+  assert.equal(result.status, "credentials_missing");
+  assert.match(result.nextStep?.instruction ?? "", /WECHAT_APP_ID/);
+});
+
+test("wechat: expired token is renewed automatically and reported in healed", async () => {
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => true,
+    inspectTokenCache: () => ({ present: true, expired: true }),
+    createClient: async () =>
+      fakeWechatClient({
+        ok: true,
+        egressDescription: "fixture",
+        tokenRefreshed: true,
+        tokenCacheBeforeCheck: { present: true, expired: true },
+      }),
+    now: () => NOW,
+  });
+  assert.equal(result.status, "ready");
+  assert.deepEqual(result.healed, ["token_refreshed"]);
+});
+
+test("wechat: rejected credentials, IP rejection, network, and inconclusive remain distinct", async () => {
+  const cases: Array<[CheckResult, string]> = [
+    [
+      {
+        ok: false,
+        stage: "credentials",
+        errcode: 40125,
+        errmsg: "invalid secret",
+        egressDescription: "fixture",
+      },
+      "credentials_rejected",
+    ],
+    [
+      {
+        ok: false,
+        stage: "ip",
+        errcode: 40164,
+        errmsg: "invalid ip 203.0.113.7",
+        egressIp: "203.0.113.7",
+        egressDescription: "fixture",
+      },
+      "ip_not_allowlisted",
+    ],
+    [
+      {
+        ok: false,
+        stage: "network",
+        errmsg: "network failed",
+        egressDescription: "fixture",
+      },
+      "network_error",
+    ],
+    [
+      {
+        ok: false,
+        stage: "unknown",
+        errmsg: "unknown",
+        egressDescription: "fixture",
+      },
+      "probe_inconclusive",
+    ],
+  ];
+  for (const [fixture, expected] of cases) {
+    const result = await probeWechatAuth({
+      credentialsConfigured: () => true,
+      inspectTokenCache: () => ({ present: false, expired: false }),
+      createClient: async () => fakeWechatClient(fixture),
+      now: () => NOW,
+    });
+    assert.equal(result.status, expected);
+    assert.ok(result.nextStep);
+  }
+});
+
+test("wechat: egress initialization network errors remain network_error", async () => {
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => true,
+    inspectTokenCache: () => ({ present: true, expired: false }),
+    createClient: async () => {
+      throw new Error("SSH tunnel connection timeout");
+    },
+    now: () => NOW,
+  });
+  assert.equal(result.status, "network_error");
+  assert.equal(result.evidence.liveProbe, "network_error");
+});
+
+test("wechat: thrown check failures are sanitized and close failures cannot escape", async () => {
+  let closeCalled = false;
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => true,
+    inspectTokenCache: () => ({ present: true, expired: false }),
+    createClient: async () => ({
+      checkAccess: async () => {
+        throw new Error("socket timeout app_secret=DO_NOT_LEAK");
+      },
+      close: async () => {
+        closeCalled = true;
+        throw new Error("close leaked-token=DO_NOT_LEAK");
+      },
+    }),
+    now: () => NOW,
+  });
+  assert.equal(closeCalled, true);
+  assert.equal(result.status, "network_error");
+  assert.doesNotMatch(JSON.stringify(result), /DO_NOT_LEAK|app_secret|leaked-token/);
+});
+
+test("wechat: close failure does not override a completed ready receipt", async () => {
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => true,
+    inspectTokenCache: () => ({ present: true, expired: false }),
+    createClient: async () => ({
+      checkAccess: async () => ({
+        ok: true,
+        egressDescription: "fixture",
+        tokenRefreshed: false,
+        tokenCacheBeforeCheck: { present: true, expired: false },
+      }),
+      close: () => {
+        throw new Error("raw cleanup secret");
+      },
+    }),
+    now: () => NOW,
+  });
+  assert.equal(result.status, "ready");
+  assert.doesNotMatch(JSON.stringify(result), /raw cleanup secret/);
+});
+
+test("registry exposes one shared probe seam for auth check and future info commands", async () => {
+  const registry = createAuthProbeRegistry({ now: () => NOW });
+  assert.deepEqual(Object.keys(registry).sort(), ["1point3acres", "linkedin", "reddit", "wechat", "x", "xhs"]);
+  const xhs = await registry.xhs();
+  const acres = await registry["1point3acres"]();
+  assert.equal(xhs.status, "agent_check_required");
+  assert.equal(acres.status, "agent_check_required");
+  assert.equal(xhs.nextStep?.continueInSameContext, true);
+});
+
+test("registry isolates a rejected platform and preserves multi-platform receipts", async () => {
+  const ready = {
+    platform: "linkedin" as const,
+    status: "ready" as const,
+    checkedAt: CHECKED_AT,
+    verificationMode: "passive_browser" as const,
+    evidence: { liveProbe: "authenticated" as const },
+    healed: [],
+    requiresHuman: false,
+  };
+  const results = await probeAuthPlatforms(["x", "linkedin", "xhs"], {
+    now: () => NOW,
+    probeOverrides: {
+      x: async () => {
+        throw new Error("registry raw secret DO_NOT_LEAK");
+      },
+      linkedin: async () => ready,
+    },
+  });
+  assert.deepEqual(results.map((result) => result.platform), ["x", "linkedin", "xhs"]);
+  assert.deepEqual(results.map((result) => result.status), [
+    "probe_inconclusive",
+    "ready",
+    "agent_check_required",
+  ]);
+  assert.ok(results[0].nextStep);
+  assert.doesNotMatch(JSON.stringify(results), /DO_NOT_LEAK|registry raw secret/);
+});
+
+test("auth command boundary returns stable partial-failure and success exit semantics", async () => {
+  const partial = await executeAuthCheck(["x", "linkedin"], (platforms) =>
+    probeAuthPlatforms(platforms, {
+      now: () => NOW,
+      probeOverrides: {
+        x: async () => {
+          throw new Error("unclassified secret");
+        },
+        linkedin: async () => ({
+          platform: "linkedin",
+          status: "ready",
+          checkedAt: CHECKED_AT,
+          verificationMode: "passive_browser",
+          evidence: { liveProbe: "authenticated" },
+          healed: [],
+          requiresHuman: false,
+        }),
+      },
+    }),
+  );
+  assert.equal(partial.exitCode, 1);
+  assert.equal(partial.results.length, 2);
+
+  const success = await executeAuthCheck(["linkedin"], async () => [
+    {
+      platform: "linkedin",
+      status: "ready",
+      checkedAt: CHECKED_AT,
+      verificationMode: "passive_browser",
+      evidence: { liveProbe: "authenticated" },
+      healed: [],
+      requiresHuman: false,
+    },
+  ]);
+  assert.equal(success.exitCode, 0);
+
+  const totalFailure = await executeAuthCheck(["x", "reddit"], async () => {
+    throw new Error("command boundary raw secret");
+  });
+  assert.equal(totalFailure.exitCode, 1);
+  assert.equal(totalFailure.results.length, 2);
+  assert.doesNotMatch(JSON.stringify(totalFailure), /raw secret/);
+});

@@ -52,6 +52,11 @@ interface TokenCacheFile {
   expires_at: number;
 }
 
+export interface TokenCacheEvidence {
+  present: boolean;
+  expired: boolean;
+}
+
 /** Thrown when WeChat returns a non-zero errcode. */
 export class WeChatApiError extends Error {
   constructor(
@@ -81,14 +86,22 @@ export interface DraftAddPayload {
 
 /** Result of the travel-aware allowlist preflight used by `check`. */
 export type CheckResult =
-  | { ok: true; egressDescription: string; egressIp?: string }
+  | {
+      ok: true;
+      egressDescription: string;
+      egressIp?: string;
+      tokenRefreshed: boolean;
+      tokenCacheBeforeCheck: TokenCacheEvidence;
+    }
   | {
       ok: false;
-      stage: "credentials" | "token" | "ip" | "unknown";
+      stage: "credentials" | "token" | "ip" | "network" | "unknown";
       errcode?: number;
       errmsg?: string;
       egressIp?: string;
       egressDescription: string;
+      tokenRefreshed?: boolean;
+      tokenCacheBeforeCheck?: TokenCacheEvidence;
     };
 
 export interface WeChatClient {
@@ -128,6 +141,15 @@ function readTokenCache(): TokenCacheFile | null {
   } catch {
     return null;
   }
+}
+
+/** Sanitized local token-cache evidence for auth readiness; never returns the token. */
+export function inspectTokenCache(nowMs = Date.now()): TokenCacheEvidence {
+  const cached = readTokenCache();
+  return {
+    present: cached !== null,
+    expired: cached !== null && cached.expires_at <= nowMs + TOKEN_REFRESH_MARGIN_MS,
+  };
 }
 
 function writeTokenCache(cache: TokenCacheFile): void {
@@ -262,18 +284,25 @@ class WeChatClientImpl implements WeChatClient {
 
   async checkAccess(): Promise<CheckResult> {
     const egressDescription = this.egress.describe();
+    const tokenCacheBeforeCheck = inspectTokenCache();
 
     // Step 1 — credentials present.
     if (!env.WECHAT_APP_ID || !env.WECHAT_APP_SECRET) {
-      return { ok: false, stage: "credentials", egressDescription };
+      return { ok: false, stage: "credentials", egressDescription, tokenCacheBeforeCheck };
     }
 
     // Step 2 — mint a token (force a fresh fetch so we actually reach the gate).
     let token: string;
+    let tokenRefreshed = false;
     try {
-      token = await this.ensureToken(true);
+      token = await this.ensureToken();
+      tokenRefreshed = !tokenCacheBeforeCheck.present || tokenCacheBeforeCheck.expired;
     } catch (err) {
-      return this.classifyFailure(err, egressDescription);
+      return {
+        ...this.classifyFailure(err, egressDescription),
+        tokenRefreshed,
+        tokenCacheBeforeCheck,
+      };
     }
 
     // Step 3 — one harmless authenticated GET. Only a genuinely authenticated
@@ -283,9 +312,32 @@ class WeChatClientImpl implements WeChatClient {
       await this.request(`/cgi-bin/get_api_domain_ip?access_token=${encodeURIComponent(token)}`, {
         method: "GET",
       });
-      return { ok: true, egressDescription };
+      return { ok: true, egressDescription, tokenRefreshed, tokenCacheBeforeCheck };
     } catch (err) {
-      return this.classifyFailure(err, egressDescription);
+      // A cached token can be revoked server-side before its declared expiry.
+      // Refresh once through the normal credential exchange, report the repair,
+      // then repeat the same harmless authenticated GET. Never loop indefinitely.
+      if (err instanceof WeChatApiError && (err.errcode === 40014 || err.errcode === 42001)) {
+        try {
+          token = await this.ensureToken(true);
+          tokenRefreshed = true;
+          await this.request(`/cgi-bin/get_api_domain_ip?access_token=${encodeURIComponent(token)}`, {
+            method: "GET",
+          });
+          return { ok: true, egressDescription, tokenRefreshed, tokenCacheBeforeCheck };
+        } catch (retryError) {
+          return {
+            ...this.classifyFailure(retryError, egressDescription),
+            tokenRefreshed,
+            tokenCacheBeforeCheck,
+          };
+        }
+      }
+      return {
+        ...this.classifyFailure(err, egressDescription),
+        tokenRefreshed,
+        tokenCacheBeforeCheck,
+      };
     }
   }
 
@@ -307,7 +359,10 @@ class WeChatClientImpl implements WeChatClient {
       }
       return { ok: false, stage: "token", errcode: err.errcode, errmsg: err.errmsg, egressDescription };
     }
-    return { ok: false, stage: "unknown", errmsg: (err as Error).message, egressDescription };
+    if (err instanceof TypeError || (err instanceof Error && /fetch|connect|network|socket|timeout|dns|proxy/i.test(err.message))) {
+      return { ok: false, stage: "network", errmsg: "Network or egress connection failed", egressDescription };
+    }
+    return { ok: false, stage: "unknown", errmsg: "Unclassified API probe failure", egressDescription };
   }
 
   async close(): Promise<void> {

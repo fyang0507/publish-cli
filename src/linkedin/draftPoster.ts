@@ -23,7 +23,7 @@
  * BEST-EFFORT and NEEDS LIVE CALIBRATION against the current linkedin.com composer
  * DOM. LinkedIn's composer/media/drafts affordances drift like X's. Run
  * `publish linkedin draft ... --inspect` (headful) to watch the flow and
- * recalibrate. Nothing here is trustworthy until verified live (CLAUDE.md).
+ * recalibrate. Nothing here is trustworthy until verified live (AGENTS.md).
  *
  * The session module is the SINGLE authenticator — we never log in here; we only
  * borrow its persistent context.

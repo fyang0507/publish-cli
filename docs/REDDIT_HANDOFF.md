@@ -71,7 +71,7 @@ non-Devvit external OAuth flow.
 | `src/reddit/draftPoster.ts` | `stageDraft` — composer → **"Save Draft"**; eligibility-block detection; Post is a FORBIDDEN selector; bail safeguard |
 | `src/commands/reddit-{inspect,search,draft}.ts` | the three commands; reuse `resolveContentInput` |
 | `src/cli.ts`, `src/config.ts`, `.env.example` | wiring: reddit group; `REDDIT_*` creds + `reddit-profile`/`reddit-cookies` in `dataPaths()` |
-| `skills/publish/{SKILL,SETUP,calibration}.md`, `CLAUDE.md`, `README.md` | docs registrations |
+| `skills/publish/{SKILL,SETUP,calibration}.md`, `AGENTS.md`, `README.md` | docs registrations |
 
 ## Verified ✅ (locally)
 
@@ -160,4 +160,4 @@ VPN / hotspot**). No 2FA on the operator's account (confirmed).
   and `../x/draftPoster.ts` primitives + `../commands/contentInput.ts`.
 - **Machine-local state off Google Drive** — profiles/cookies live under
   `~/.publish-cli` (PUBLISH_DATA_DIR); never commit `.env`.
-- **Verify live before claiming a flow works** (CLAUDE.md) — but rate-limit.
+- **Verify live before claiming a flow works** (AGENTS.md) — but rate-limit.

@@ -81,7 +81,7 @@ Three things make WeChat unlike every channel shipped today:
 ### 1.1 The workflow: check → draft → (human) review
 
 Publishing is a **two-phase** flow; the editorial judgment of *what* to publish
-stays with the **consuming agent / operator**, not this repo (CLAUDE.md
+stays with the **consuming agent / operator**, not this repo (AGENTS.md
 public-repo posture):
 
 0. **One-time setup** — allowlist a **stable egress IP** and point the CLI at it
@@ -211,7 +211,7 @@ channels' `session.ts`, but with **no browser and no persistent profile**:
   `dataPaths().wechatTokenCache` = `<PUBLISH_DATA_DIR>/wechat-token.json`, refreshed
   when <5 min remain. A live access token is **secret-adjacent**, so it lives under
   `PUBLISH_DATA_DIR` (default `~/.publish-cli`) **off any cloud-synced drive** — the
-  same rule as the browser cookie caches (CLAUDE.md "State lives in two homes").
+  same rule as the browser cookie caches (AGENTS.md "State lives in two homes").
   There is **no browser profile dir** for WeChat (it is the first channel without
   one).
 - **Credentials:** `WECHAT_APP_ID` + `WECHAT_APP_SECRET` from `.env` (§6). The
@@ -400,7 +400,7 @@ selectors:
   `freepublish/*`.**
 - `POST /cgi-bin/message/mass/*` (mass send to followers).
 
-Any change that adds one of these is out of bounds (CLAUDE.md "Hard boundary").
+Any change that adds one of these is out of bounds (AGENTS.md "Hard boundary").
 
 ## 6. Config & state additions
 
@@ -443,7 +443,7 @@ among the consumers (no code change — the resolver is already channel-agnostic
 
 **Edits:** `src/cli.ts` (register the `wechat` group), `src/config.ts` (env +
 `wechatTokenCache`), `src/commands/contentInput.ts` (docstring), `.env.example`,
-and — at implementation time — `README.md`, `PRODUCT_SPEC.md`, `CLAUDE.md`, and the
+and — at implementation time — `README.md`, `PRODUCT_SPEC.md`, `AGENTS.md`, and the
 `skills/publish/*` capability layer.
 
 **New dependencies:** `marked` (deterministic markdown → HTML; the renderer override
@@ -476,7 +476,7 @@ are unset (Mode B).
 
 ## 9. Open verification risks (verify live before claiming it works)
 
-Compile-green + code review misses real bugs in these flows (CLAUDE.md "Verify
+Compile-green + code review misses real bugs in these flows (AGENTS.md "Verify
 live"). For WeChat the live surface is the API + the 草稿箱 preview, not a browser:
 
 - **Field limits drift.** Confirm title ≤64, digest ≤120, and content size limits

@@ -12,7 +12,7 @@
  * only WeChat stays API-driven.
  *
  * DELIBERATELY NOT REFACTORED into a shared createBrowserSession() factory — same
- * posture as LinkedIn (CLAUDE.md): the shipped X session is hard-to-live-test and
+ * posture as LinkedIn (AGENTS.md): the shipped X session is hard-to-live-test and
  * must stay untouched, so this is a structural sibling, not a fork of live-verified
  * X code. It does NOT share X's src/session.ts.
  *
@@ -40,7 +40,7 @@
  * selectors are centralized in REDDIT_LOGIN_SELECTORS below and every one is
  * BEST-EFFORT and NEEDS LIVE CALIBRATION — run with `--inspect` (headful) to watch
  * the flow and update them. None of this is trustworthy until verified live
- * (CLAUDE.md "Verify live").
+ * (AGENTS.md "Verify live").
  */
 
 import { writeFileSync, readFileSync, existsSync } from "node:fs";
