@@ -35,7 +35,7 @@ import { basename, extname } from "node:path";
 import { Blob } from "node:buffer";
 import { fetch, FormData, type RequestInit } from "undici";
 import { createEgress, type EgressHandle } from "./egress.js";
-import { env, dataPaths } from "../config.js";
+import { env, dataPaths, peekDataPaths } from "../config.js";
 
 const API_BASE = "https://api.weixin.qq.com";
 
@@ -130,7 +130,9 @@ export function parseEgressIpFrom40164(errmsg: string): string | null {
 // ---------------------------------------------------------------------------
 
 function readTokenCache(): TokenCacheFile | null {
-  const file = dataPaths().wechatTokenCache;
+  // Reading readiness evidence must not call dataPaths(), which creates every
+  // browser profile directory as a normal execution convenience.
+  const file = peekDataPaths().wechatTokenCache;
   if (!existsSync(file)) return null;
   try {
     const parsed = JSON.parse(readFileSync(file, "utf-8")) as Partial<TokenCacheFile>;

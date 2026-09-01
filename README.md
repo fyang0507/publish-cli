@@ -91,8 +91,8 @@ The source of truth for content is caller-supplied local markdown, passed to the
 ```bash
 publish --help
 
-publish auth check --platform x --platform reddit [--json]
-publish auth check --all [--json]
+publish auth check --platform x,linkedin,reddit [--json]
+publish auth check --platform wechat,xhs [--json]
 
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private|--public] [--dry-run] [--json] [--inspect]
 publish x watch [--query <q>...] [--x-list <id>...] [--languages en,zh] [--persona <text> | --persona-from <file>] [--config <watch.yaml>] [--validate-config] [--no-triage] [--format text|json|markdown] [--json] [--out <file>]
@@ -113,10 +113,13 @@ publish wechat draft (--text <content> | --from <base.md>) [--title <t>] [--auth
 Run any subcommand with `--help` for the authoritative flag list.
 
 `auth check` is passive and sanitized: it never logs in, submits credentials, or
-opens a composer. Exit `0` means all requested platforms are ready, `1` means at
-least one needs its returned `nextStep`, and `2` means invalid usage. Empty
-profile directories are not authentication evidence; browser readiness requires
-a positive live signal. WeChat may automatically renew its short-lived token and
+opens a composer. The comma-separated platform list is explicit; there is no
+`--all`. Each receipt has a binary `ready` field plus a diagnostic `status`.
+Exit `0` means all requested platforms are ready, `1` means at least one needs
+its returned `nextStep`, and `2` means invalid usage. An absent or empty browser
+profile returns `login_required` without launching Playwright or creating local
+state. `probe_inconclusive` is non-ready and directs the agent to inspect the
+entry URL headfully. WeChat may automatically renew its short-lived token and
 reports that as `healed: ["token_refreshed"]`.
 
 ## Status

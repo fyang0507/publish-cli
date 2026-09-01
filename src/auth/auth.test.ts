@@ -1,8 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   evaluateBrowserReadiness,
   hasMeaningfulProfileState,
@@ -20,6 +29,7 @@ import { executeAuthCheck } from "../commands/auth-check.js";
 
 const CHECKED_AT = "2026-08-30T20:55:00.000Z";
 const NOW = Date.parse(CHECKED_AT);
+const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 
 function browserConfig(platform: "x" | "linkedin" | "reddit"): PassiveBrowserProbeConfig {
   return {
@@ -150,6 +160,7 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
       { kind: "authenticated" },
       CHECKED_AT,
     );
+    assert.equal(result.ready, true);
     assert.equal(result.status, "ready");
     assert.equal(result.evidence.profileAgeDays, 60);
     assert.equal(result.evidence.liveProbe, "authenticated");
@@ -162,6 +173,7 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
       { kind: "logged_out" },
       CHECKED_AT,
     );
+    assert.equal(result.ready, false);
     assert.equal(result.status, "login_required");
     assert.equal(result.nextStep?.executor, "agent_browser");
     assert.equal(result.nextStep?.continueInSameContext, true);
@@ -228,6 +240,34 @@ test("empty profile directories are not meaningful local evidence", () => {
       NOW,
     );
     assert.equal(evidence.profilePresent, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("fresh-machine probes are idempotent and never create a browser profile", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-auth-idempotent-"));
+  try {
+    const profileDir = join(dir, "profile");
+    const cookieCache = join(dir, "cookies.json");
+    let backendCalls = 0;
+    const backend = {
+      probe: async () => {
+        backendCalls += 1;
+        return { kind: "logged_out" as const };
+      },
+    };
+    const config = { ...browserConfig("x"), profileDir, cookieCache };
+
+    const first = await probePassiveBrowserAuth(config, backend, NOW);
+    const second = await probePassiveBrowserAuth(config, backend, NOW);
+
+    assert.equal(first.ready, false);
+    assert.equal(first.status, "login_required");
+    assert.equal(first.evidence.liveProbe, "not_run");
+    assert.equal(second.evidence.profilePresent, false);
+    assert.equal(backendCalls, 0);
+    assert.equal(existsSync(profileDir), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -404,6 +444,7 @@ test("registry exposes one shared probe seam for auth check and future info comm
 test("registry isolates a rejected platform and preserves multi-platform receipts", async () => {
   const ready = {
     platform: "linkedin" as const,
+    ready: true,
     status: "ready" as const,
     checkedAt: CHECKED_AT,
     verificationMode: "passive_browser" as const,
@@ -440,6 +481,7 @@ test("auth command boundary returns stable partial-failure and success exit sema
         },
         linkedin: async () => ({
           platform: "linkedin",
+          ready: true,
           status: "ready",
           checkedAt: CHECKED_AT,
           verificationMode: "passive_browser",
@@ -456,6 +498,7 @@ test("auth command boundary returns stable partial-failure and success exit sema
   const success = await executeAuthCheck(["linkedin"], async () => [
     {
       platform: "linkedin",
+      ready: true,
       status: "ready",
       checkedAt: CHECKED_AT,
       verificationMode: "passive_browser",
@@ -472,4 +515,87 @@ test("auth command boundary returns stable partial-failure and success exit sema
   assert.equal(totalFailure.exitCode, 1);
   assert.equal(totalFailure.results.length, 2);
   assert.doesNotMatch(JSON.stringify(totalFailure), /raw secret/);
+});
+
+test("auth CLI accepts a deliberate comma-separated platform list in first-seen order", () => {
+  const run = spawnSync(
+    process.execPath,
+    [CLI_PATH, "auth", "check", "--platform", "xhs,1point3acres,xhs", "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(run.status, 1);
+  const receipt = JSON.parse(run.stdout) as { results: Array<{ platform: string; ready: boolean }> };
+  assert.deepEqual(receipt.results.map((result) => result.platform), ["xhs", "1point3acres"]);
+  assert.ok(receipt.results.every((result) => result.ready === false));
+});
+
+test("auth CLI help lists platform modes and removed --all fails actionably with exit 2", () => {
+  const help = spawnSync(process.execPath, [CLI_PATH, "auth", "check", "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(help.status, 0);
+  assert.match(help.stdout, /CLI-probed\s+x, linkedin, reddit, wechat/);
+  assert.match(help.stdout, /Agent-owned\s+xhs, 1point3acres/);
+  assert.doesNotMatch(help.stdout, /--all/);
+
+  const removed = spawnSync(process.execPath, [CLI_PATH, "auth", "check", "--all"], {
+    encoding: "utf8",
+  });
+  assert.equal(removed.status, 2);
+  assert.match(removed.stderr, /--all was removed/);
+  assert.match(removed.stderr, /--platform x,linkedin,reddit/);
+});
+
+test("auth CLI zero-state checks are repeatable and create no profile or token state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-auth-cli-zero-"));
+  try {
+    const env = {
+      ...process.env,
+      PUBLISH_DATA_DIR: dir,
+      X_USERNAME: "",
+      X_PASSWORD: "",
+      X_EMAIL: "",
+      LI_USERNAME: "",
+      LI_PASSWORD: "",
+      LI_EMAIL: "",
+      REDDIT_USERNAME: "",
+      REDDIT_PASSWORD: "",
+      REDDIT_EMAIL: "",
+      WECHAT_APP_ID: "",
+      WECHAT_APP_SECRET: "",
+    };
+    const args = [
+      CLI_PATH,
+      "auth",
+      "check",
+      "--platform",
+      "x,linkedin,reddit,wechat",
+      "--json",
+    ];
+    const first = spawnSync(process.execPath, args, { encoding: "utf8", env });
+    const second = spawnSync(process.execPath, args, { encoding: "utf8", env });
+    assert.equal(first.status, 1);
+    assert.equal(second.status, 1);
+
+    const summarize = (raw: string) =>
+      (JSON.parse(raw) as {
+        results: Array<{
+          platform: string;
+          ready: boolean;
+          status: string;
+          evidence: { profilePresent?: boolean; liveProbe: string };
+        }>;
+      }).results.map((result) => ({
+        platform: result.platform,
+        ready: result.ready,
+        status: result.status,
+        profilePresent: result.evidence.profilePresent,
+        liveProbe: result.evidence.liveProbe,
+      }));
+
+    assert.deepEqual(summarize(first.stdout), summarize(second.stdout));
+    assert.deepEqual(readdirSync(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

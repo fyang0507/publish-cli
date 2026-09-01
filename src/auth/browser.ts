@@ -146,11 +146,12 @@ export function evaluateBrowserReadiness(
   };
 
   if (live.kind === "authenticated") {
-    return { ...common, status: "ready", requiresHuman: false };
+    return { ...common, ready: true, status: "ready", requiresHuman: false };
   }
   if (live.kind === "logged_out") {
     return {
       ...common,
+      ready: false,
       status: "login_required",
       requiresHuman: true,
       nextStep: browserNextStep(config, false),
@@ -159,6 +160,7 @@ export function evaluateBrowserReadiness(
   if (live.kind === "challenge") {
     return {
       ...common,
+      ready: false,
       status: "human_challenge_required",
       requiresHuman: true,
       nextStep: browserNextStep(config, true),
@@ -167,6 +169,7 @@ export function evaluateBrowserReadiness(
   if (live.kind === "network_error") {
     return {
       ...common,
+      ready: false,
       status: "network_error",
       requiresHuman: false,
       nextStep: {
@@ -179,15 +182,43 @@ export function evaluateBrowserReadiness(
   }
   return {
     ...common,
+    ready: false,
     status: "probe_inconclusive",
     requiresHuman: false,
     nextStep: {
       executor: "agent_browser",
       entryUrl: config.entryUrl,
       workflowRef: `${config.workflowRef}#probe-inconclusive`,
-      instruction: "Inspect the visible page using the browser agent; do not infer logout from a missing selector. Verify an authenticated, logged-out, or challenge state and continue in that browser context.",
+      instruction: "Open the entry URL with a headful browser agent. Determine whether the page is authenticated, logged out, or challenged; do not infer logout from selector drift. If authenticated, continue the publishing workflow in that same browser context. Otherwise complete the returned login or human challenge before continuing.",
       continueInSameContext: true,
     },
+  };
+}
+
+/**
+ * No meaningful persistent profile means there is no CLI browser session to
+ * prove live. Return the binary non-ready recovery immediately instead of
+ * launching Playwright, which would create a misleading durable profile tree.
+ */
+export function zeroStateBrowserReadiness(
+  config: PassiveBrowserProbeConfig,
+  local: BrowserLocalEvidence,
+  checkedAt = new Date().toISOString(),
+): AuthReadiness {
+  return {
+    platform: config.platform,
+    ready: false,
+    status: "login_required",
+    checkedAt,
+    verificationMode: "passive_browser",
+    evidence: {
+      ...local,
+      liveProbe: "not_run",
+      note: "No meaningful persistent browser profile exists. The live probe was skipped so auth check remains idempotent and does not create browser state.",
+    },
+    healed: [],
+    requiresHuman: true,
+    nextStep: browserNextStep(config, false),
   };
 }
 
@@ -317,8 +348,10 @@ export async function probePassiveBrowserAuth(
   backend: BrowserProbeBackend = new PlaywrightPassiveBrowserBackend(),
   nowMs = Date.now(),
 ): Promise<AuthReadiness> {
-  // Measure first: launchPersistentContext may create/populate the directory.
   const local = inspectBrowserLocalEvidence(config, nowMs);
+  if (!local.profilePresent) {
+    return zeroStateBrowserReadiness(config, local, new Date(nowMs).toISOString());
+  }
   const live = await backend.probe(config);
   return evaluateBrowserReadiness(config, local, live, new Date(nowMs).toISOString());
 }

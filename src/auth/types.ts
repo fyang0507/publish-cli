@@ -54,6 +54,8 @@ export interface AuthNextStep {
 
 export interface AuthReadiness {
   platform: AuthPlatform;
+  /** Binary workflow gate. `status` explains why a false result is not ready. */
+  ready: boolean;
   status: AuthStatus;
   checkedAt: string;
   verificationMode: "passive_browser" | "api" | "browser_agent";

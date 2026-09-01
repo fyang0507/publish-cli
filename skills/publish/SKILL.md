@@ -16,13 +16,15 @@ probe. It never calls an automatic login path, submits credentials, or opens a
 composer:
 
 ```bash
-publish auth check --platform x --platform reddit --json
-publish auth check --all --json
+publish auth check --platform x,linkedin,reddit --json
+publish auth check --platform wechat,xhs --json
 ```
 
-A profile directory or cookie/token cache is only local evidence. Proceed only
-on `status: ready`, which requires a positive live UI/API signal. For any other
-status, execute the sanitized `nextStep`. Browser-channel recovery is owned by
+A profile directory or cookie/token cache is only local evidence. Always name
+the intended comma-separated platform set; there is no `--all`. Proceed only on
+`ready: true`, which requires a positive live UI/API signal for an existing
+session. `status` explains a false result. For any non-ready status, execute the
+sanitized `nextStep`. Browser-channel recovery is owned by
 the browser agent: open `entryUrl`, let the operator complete CAPTCHA/QR/2FA as
 needed, positively verify authentication, and continue in that **same browser
 context**. Never interpret selector drift, an unfamiliar page, or a network
@@ -32,6 +34,13 @@ WeChat may renew an expired stable token as part of its normal credential
 exchange; the receipt reports that explicitly as `healed: ["token_refreshed"]`.
 `xhs` and `1point3acres` intentionally return `agent_check_required` because
 their authenticated browser contexts are agent-owned.
+
+`probe_inconclusive` is not an ambiguous permission to proceed. It means the
+CLI could not positively classify the visible page, so `ready` is false. Open
+the returned entry URL headfully, determine authenticated/logged-out/challenge
+state, and continue the publishing workflow in that same context only after
+authentication is proven. An absent or empty persistent profile skips the live
+probe and returns `login_required` without creating browser state.
 
 ## What it does
 
@@ -167,7 +176,7 @@ of people, build a List once, then keep it fresh:
 ## Commands (complements `publish --help`)
 
 ```bash
-publish auth check (--platform <name>...) | --all [--json]
+publish auth check --platform <comma-separated-names> [--json]
 publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--description <t>] \
                  [--x-list <id>] [--private|--public] [--limit <n>] [--dry-run] [--json] [--inspect]
 publish x watch  [--query <q>...] [--x-list <id>...] [--languages en,zh] \

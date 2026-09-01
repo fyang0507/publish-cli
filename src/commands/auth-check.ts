@@ -1,4 +1,4 @@
-import { Command, InvalidArgumentError } from "commander";
+import { Command, InvalidArgumentError, Option } from "commander";
 import {
   AUTH_PLATFORMS,
   probeAuthPlatforms,
@@ -8,7 +8,8 @@ import {
 } from "../auth/index.js";
 
 interface AuthCheckOptions {
-  platform: string[];
+  platform?: string[];
+  /** Hidden tombstone so removed --all usage gets an actionable exit-2 error. */
   all?: boolean;
   json?: boolean;
 }
@@ -18,18 +19,28 @@ export interface AuthCheckExecution {
   exitCode: 0 | 1;
 }
 
-function collect(value: string, previous: string[]): string[] {
-  return [...previous, value];
+function collectPlatforms(value: string, previous: string[] = []): string[] {
+  const parts = value.split(",").map((part) => part.trim());
+  if (parts.some((part) => !part)) {
+    throw new InvalidArgumentError(
+      "--platform must be a comma-separated list without empty names.",
+    );
+  }
+  return [...previous, ...parts];
 }
 
 function parsePlatforms(opts: AuthCheckOptions): AuthPlatform[] {
-  if (opts.all && opts.platform.length) {
-    throw new InvalidArgumentError("Use either --all or one or more --platform options, not both.");
+  if (opts.all) {
+    throw new InvalidArgumentError(
+      "--all was removed. Deliberately specify --platform <names>, for example --platform x,linkedin,reddit.",
+    );
   }
-  if (!opts.all && !opts.platform.length) {
-    throw new InvalidArgumentError("Specify --all or at least one --platform <name>.");
+  if (!opts.platform?.length) {
+    throw new InvalidArgumentError(
+      "Specify --platform <names>, for example --platform x,linkedin,reddit.",
+    );
   }
-  const requested = opts.all ? [...AUTH_PLATFORMS] : opts.platform;
+  const requested = opts.platform;
   const unknown = requested.filter((value) => !(AUTH_PLATFORMS as readonly string[]).includes(value));
   if (unknown.length) {
     throw new InvalidArgumentError(
@@ -43,12 +54,16 @@ export function registerAuthCheckCommand(parent: Command): void {
   parent
     .command("check")
     .description("Passively check authentication readiness; never logs in, submits credentials, or opens a composer")
-    .option("--platform <name>", "Platform to check (repeatable)", collect, [])
-    .option("--all", "Check every built and agent-owned channel descriptor")
+    .option(
+      "--platform <names>",
+      "Comma-separated platforms to check (repeatable): x,linkedin,reddit,wechat,xhs,1point3acres",
+      collectPlatforms,
+    )
+    .addOption(new Option("--all").hideHelp())
     .option("--json", "Emit a sanitized machine-readable receipt")
     .addHelpText(
       "after",
-      "\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready\n  2  invalid command usage\n",
+      "\nPlatform modes:\n  CLI-probed   x, linkedin, reddit, wechat\n  Agent-owned  xhs, 1point3acres (returns agent_check_required with a browser next step)\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
     )
     .action(async (opts: AuthCheckOptions) => {
       let platforms: AuthPlatform[];
@@ -94,15 +109,21 @@ export async function executeAuthCheck(
   }
   return {
     results,
-    exitCode: results.every((result) => result.status === "ready") ? 0 : 1,
+    exitCode: results.every((result) => result.ready) ? 0 : 1,
   };
 }
 
 export function renderAuthReport(results: AuthReadiness[]): string {
   const lines = ["publish auth check — passive readiness (never logs in)", ""];
   for (const result of results) {
-    lines.push(`${result.status === "ready" ? "✓" : "✗"} ${result.platform}: ${result.status}`);
+    const marker = result.ready
+      ? "✓"
+      : result.status === "probe_inconclusive" || result.status === "agent_check_required"
+        ? "?"
+        : "✗";
+    lines.push(`${marker} ${result.platform}: ready=${result.ready ? "yes" : "no"} (${result.status})`);
     lines.push(`  live proof: ${result.evidence.liveProbe}`);
+    if (result.evidence.note) lines.push(`  detail: ${result.evidence.note}`);
     if (result.evidence.profilePresent != null) {
       lines.push(
         `  local evidence: profile=${result.evidence.profilePresent ? "present" : "missing"}, ` +

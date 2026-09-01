@@ -78,6 +78,7 @@ export async function probeWechatAuth(
   if (!credentialsConfigured) {
     return {
       platform: "wechat",
+      ready: false,
       status: "credentials_missing",
       checkedAt,
       verificationMode: "api",
@@ -95,6 +96,7 @@ export async function probeWechatAuth(
     const status = isNetworkLike(error) ? "network_error" : "probe_inconclusive";
     return {
       platform: "wechat",
+      ready: false,
       status,
       checkedAt,
       verificationMode: "api",
@@ -127,7 +129,7 @@ export async function probeWechatAuth(
       healed,
     };
     if (result.ok) {
-      readiness = { ...base, status: "ready", requiresHuman: false };
+      readiness = { ...base, ready: true, status: "ready", requiresHuman: false };
     } else {
       const status: AuthReadiness["status"] =
         result.stage === "credentials"
@@ -141,6 +143,7 @@ export async function probeWechatAuth(
               : "probe_inconclusive";
       readiness = {
         ...base,
+        ready: false,
         status,
         evidence: {
           ...base.evidence,
@@ -154,6 +157,7 @@ export async function probeWechatAuth(
     const status: AuthReadiness["status"] = isNetworkLike(error) ? "network_error" : "probe_inconclusive";
     readiness = {
       platform: "wechat",
+      ready: false,
       status,
       checkedAt,
       verificationMode: "api",

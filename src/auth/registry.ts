@@ -32,6 +32,7 @@ function agentOwnedDescriptor(
   const isXhs = platform === "xhs";
   return {
     platform,
+    ready: false,
     status: "agent_check_required",
     checkedAt: new Date(nowMs).toISOString(),
     verificationMode: "browser_agent",
@@ -168,6 +169,7 @@ export function unexpectedProbeReadiness(
   const status = network ? "network_error" : "probe_inconclusive";
   return {
     platform,
+    ready: false,
     status,
     checkedAt: new Date(nowMs).toISOString(),
     verificationMode:

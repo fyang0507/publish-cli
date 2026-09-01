@@ -19,17 +19,18 @@ Run this before any channel operation and after moving to a new machine or
 leaving a profile idle for a long time:
 
 ```bash
-publish auth check --platform x --platform linkedin --platform reddit --json
+publish auth check --platform x,linkedin,reddit --json
 publish auth check --platform wechat --json
-publish auth check --all --json
 ```
 
-Exit `0` means every requested platform returned `ready`; exit `1` means at
-least one needs recovery; exit `2` means invalid command usage. The probe is
-passive: browser checks navigate an existing or zero-state profile but never
-call `ensureSession()`, submit credentials, or open a composer. WeChat may use
-App ID/Secret to renew its normal short-lived token and reports that repair in
-`healed`.
+Always name the intended comma-separated platform set; there is no `--all`.
+Exit `0` means every requested platform has `ready: true`; exit `1` means at
+least one has `ready: false` and needs recovery; exit `2` means invalid command
+usage. The probe is passive: browser checks navigate an existing profile but
+never call `ensureSession()`, submit credentials, or open a composer. An absent
+or empty profile returns `login_required` without launching a browser or
+creating profile state. WeChat may use App ID/Secret to renew its normal
+short-lived token and reports that repair in `healed`.
 
 For browser recovery, follow `nextStep` with the headful browser agent that will
 continue the task. Complete login/CAPTCHA/QR/2FA with the operator, positively
