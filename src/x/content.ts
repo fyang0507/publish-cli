@@ -24,11 +24,19 @@
 
 import { GeminiClient } from "../gemini.js";
 import type { ThinkingLevel } from "@google/genai";
+import {
+  X_PREMIUM_POST_PLATFORM_MAX_LENGTH,
+  X_STANDARD_POST_MAX_WEIGHTED_LENGTH,
+  countXWeightedLength,
+  sliceByMeasuredLength,
+  validateXPostText,
+  validateXPremiumTransportText,
+} from "../capabilities/validation.js";
 
 /** Hard character limits for the X composer. */
-export const TWEET_LIMIT_DEFAULT = 280;
+export const TWEET_LIMIT_DEFAULT = X_STANDARD_POST_MAX_WEIGHTED_LENGTH;
 /** Premium long-post cap. Configurable via generateContent({ longLimit }). */
-export const TWEET_LIMIT_LONG = 25000;
+export const TWEET_LIMIT_LONG = X_PREMIUM_POST_PLATFORM_MAX_LENGTH;
 
 export type XFormat = "tweet" | "thread" | "article";
 
@@ -296,15 +304,13 @@ function collectLinkFlags(text: string): LinkFlag[] {
 // Deterministic splitting helpers
 // ---------------------------------------------------------------------------
 
-/**
- * X counts characters by Unicode code points (and t.co-collapses URLs to 23),
- * but for staging a draft we use a conservative code-point count: [...str].length.
- * This slightly over-counts URLs vs X's real meter, which is the safe direction
- * (we never under-count and overflow the composer).
- */
+/** Shared historical helper: Unicode code points, not an X post validator. */
 export function countChars(text: string): number {
   return [...text].length;
 }
+
+const countXPostChars = countXWeightedLength;
+type TextMeasure = (text: string) => number;
 
 /** Split prose into paragraphs (blank-line separated), trimmed, non-empty. */
 function toParagraphs(prose: string): string[] {
@@ -316,9 +322,14 @@ function toParagraphs(prose: string): string[] {
 
 /** Split a paragraph into sentences, keeping terminal punctuation. */
 function toSentences(paragraph: string): string[] {
-  // Best-effort sentence boundary: punctuation + space + capital/quote/digit.
-  const parts = paragraph.match(/[^.!?]+[.!?]+(?=\s|$)|[^.!?]+$/g);
-  return (parts ?? [paragraph]).map((s) => s.trim()).filter(Boolean);
+  // Intl.Segmenter covers the complete input instead of regex-matching only the
+  // text after the last URL/decimal/abbreviation period. Whitespace between
+  // segments is normalized when chunks are joined, but source tokens are never
+  // dropped.
+  return Array.from(
+    new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(paragraph),
+    ({ segment }) => segment,
+  ).filter((segment) => segment.trim().length > 0);
 }
 
 /**
@@ -329,7 +340,12 @@ function toSentences(paragraph: string): string[] {
  * `reserve` characters are held back from the limit on every chunk to leave room
  * for the " n/N" numbering suffix added later.
  */
-function packChunks(prose: string, limit: number, reserve: number): string[] {
+function packChunks(
+  prose: string,
+  limit: number,
+  reserve: number,
+  measure: TextMeasure = countXPostChars,
+): string[] {
   const effective = Math.max(1, limit - reserve);
   const chunks: string[] = [];
   let current = "";
@@ -340,7 +356,7 @@ function packChunks(prose: string, limit: number, reserve: number): string[] {
   };
   const tryAppend = (piece: string, sep: string): boolean => {
     const candidate = current ? current + sep + piece : piece;
-    if (countChars(candidate) <= effective) {
+    if (measure(candidate) <= effective) {
       current = candidate;
       return true;
     }
@@ -348,7 +364,7 @@ function packChunks(prose: string, limit: number, reserve: number): string[] {
   };
 
   for (const para of toParagraphs(prose)) {
-    if (countChars(para) <= effective) {
+    if (measure(para) <= effective) {
       if (!tryAppend(para, "\n\n")) {
         flush();
         current = para;
@@ -358,8 +374,11 @@ function packChunks(prose: string, limit: number, reserve: number): string[] {
     // Paragraph too big: fall to sentences (flush whatever's buffered first).
     flush();
     for (const sentence of toSentences(para)) {
-      if (countChars(sentence) <= effective) {
-        if (!tryAppend(sentence, " ")) {
+      if (measure(sentence) <= effective) {
+        // Intl.Segmenter returns the source separator as part of each segment.
+        // Appending an extra space corrupts languages that do not separate
+        // sentences with whitespace (for example punctuated Chinese prose).
+        if (!tryAppend(sentence, "")) {
           flush();
           current = sentence;
         }
@@ -368,10 +387,10 @@ function packChunks(prose: string, limit: number, reserve: number): string[] {
       // Sentence too big: hard word-wrap as a last resort.
       flush();
       for (const word of sentence.split(/\s+/)) {
-        if (countChars(word) > effective) {
+        if (measure(word) > effective) {
           // A single token longer than the limit — chunk it raw.
           flush();
-          for (const slice of hardSlice(word, effective)) chunks.push(slice);
+          for (const slice of hardSlice(word, effective, measure)) chunks.push(slice);
           continue;
         }
         if (!tryAppend(word, " ")) {
@@ -386,12 +405,23 @@ function packChunks(prose: string, limit: number, reserve: number): string[] {
   return chunks;
 }
 
-/** Hard-slice an over-long token into <=limit code-point pieces. */
-function hardSlice(token: string, limit: number): string[] {
-  const cps = [...token];
+/** Hard-slice an over-long token into <=limit weighted pieces without breaking graphemes. */
+function hardSlice(token: string, limit: number, measure: TextMeasure): string[] {
   const out: string[] = [];
-  for (let i = 0; i < cps.length; i += limit) {
-    out.push(cps.slice(i, i + limit).join(""));
+  let remaining = token;
+  while (remaining) {
+    const slice = sliceByMeasuredLength(remaining, limit, measure);
+    if (!slice) {
+      // This is unreachable for X's practical limits, but guarantees progress
+      // for a caller-supplied tiny limit without splitting UTF-16 surrogates.
+      const first = Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(remaining))[0]?.segment;
+      if (!first) break;
+      out.push(first);
+      remaining = remaining.slice(first.length);
+      continue;
+    }
+    out.push(slice);
+    remaining = remaining.slice(slice.length);
   }
   return out;
 }
@@ -456,7 +486,7 @@ export async function generateContent(
 
   if (opts.format === "tweet") {
     base.limit = tweetLimit;
-    base.tweet = buildTweet(prose, tweetLimit, warnings);
+    base.tweet = buildTweet(prose, tweetLimit, warnings, !!opts.long);
     return base;
   }
 
@@ -475,22 +505,30 @@ function buildTweet(
   prose: string,
   limit: number,
   warnings: string[],
+  premiumTransportPolicy: boolean,
 ): { text: string; chars: number } {
   const collapsed = prose.replace(/\n{2,}/g, "\n\n").trim();
-  if (countChars(collapsed) <= limit) {
-    return { text: collapsed, chars: countChars(collapsed) };
+  const measure = premiumTransportPolicy ? countChars : countXPostChars;
+  const validation = premiumTransportPolicy
+    ? validateXPremiumTransportText(collapsed, limit)
+    : validateXPostText(collapsed, limit);
+  if (validation.valid) {
+    return { text: collapsed, chars: validation.measuredLength };
   }
   // Too long for a single tweet: take the leading text up to the limit on a
   // sentence boundary where possible. We do NOT silently drop content quietly —
   // we warn the caller so they can pick --format thread or --long instead.
-  const chunks = packChunks(collapsed, limit, 0);
-  const text = chunks[0] ?? collapsed.slice(0, limit);
+  const chunks = packChunks(collapsed, limit, 0, measure);
+  const text = chunks[0] ?? sliceByMeasuredLength(collapsed, limit, measure);
+  const unit = premiumTransportPolicy
+    ? "Unicode code points under the local Premium transport policy"
+    : "weighted chars";
   warnings.push(
-    `Base content is ${countChars(collapsed)} chars but the tweet limit is ${limit}. ` +
-      `Emitted only the leading segment (${countChars(text)} chars). ` +
+    `Base content is ${validation.measuredLength} ${unit} but the tweet limit is ${limit}. ` +
+      `Emitted only the leading segment (${measure(text)} ${unit}). ` +
       `Use --format thread to split it, or --long to raise the limit.`,
   );
-  return { text, chars: countChars(text) };
+  return { text, chars: measure(text) };
 }
 
 function buildThread(prose: string, limit: number, warnings: string[]): ThreadPost[] {
@@ -504,13 +542,13 @@ function buildThread(prose: string, limit: number, warnings: string[]): ThreadPo
   const posts: ThreadPost[] = chunks.map((text, i) => {
     const suffix = ` ${i + 1}/${total}`;
     let body = `${text}${suffix}`;
-    if (countChars(body) > limit) {
+    if (countXPostChars(body) > limit) {
       // Extremely rare given the reserve; hard-trim to stay valid and warn.
-      const room = limit - countChars(suffix);
-      body = `${[...text].slice(0, Math.max(0, room)).join("")}${suffix}`;
+      const room = limit - countXPostChars(suffix);
+      body = `${sliceByMeasuredLength(text, Math.max(0, room), countXPostChars)}${suffix}`;
       warnings.push(`Thread post ${i + 1}/${total} was trimmed to fit the ${limit}-char limit.`);
     }
-    return { index: i + 1, total, text: body, chars: countChars(body) };
+    return { index: i + 1, total, text: body, chars: countXPostChars(body) };
   });
   return posts;
 }

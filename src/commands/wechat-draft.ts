@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { resolveContentInput, type ContentInputOptions } from "./contentInput.js";
 import { generateArticle, renderArticleForInspection, type GeneratedArticle } from "../wechat/content.js";
+import { createServerValidationReceipt } from "../capabilities/validation.js";
 
 /**
  * `publish wechat draft` — owned-content publisher for the WeChat Official Account
@@ -17,9 +18,11 @@ import { generateArticle, renderArticleForInspection, type GeneratedArticle } fr
  *      ('-' = stdin). Exactly one (shared resolveContentInput; exit 2 on misuse).
  *      WeChat is long-form, so --from is the primary path.
  *   2. DETERMINISTIC generation (src/wechat/content.ts; plain code, no LLM, no
- *      network): title (≤64 cp) + inline-styled HTML body + digest + cover, with
- *      metadata resolved flag → frontmatter → fallback. Throws (exit 2) on a
- *      missing/oversized title, an oversized explicit digest, or a missing cover.
+ *      network): title + inline-styled HTML body + optional digest + cover, with
+ *      metadata resolved flag → frontmatter → fallback. WeChat documents
+ *      title/author/digest limits in 字 without defining the Unicode measurement,
+ *      so those boundaries remain server-authoritative. Throws (exit 2) on a
+ *      missing title or cover.
  *   3. Echo the generated article + advisories.
  *   4. --out: write the exact rendered HTML for inspection.
  *   5. --dry-run: STOP after render + validation — NO token, NO uploads, NO
@@ -46,9 +49,9 @@ export function registerWechatDraftCommand(parent: Command): void {
     .description("Stage a NATIVE WeChat article draft from inline text or a markdown file — never publishes")
     .option("--from <base.md>", "Path to a canonical base markdown ('-' = stdin); the primary path")
     .option("--text <content>", "Body content inline (exactly one of --text / --from)")
-    .option("--title <title>", "Article title, ≤64 code points (or from frontmatter / markdown H1)")
+    .option("--title <title>", "Article title (documented ≤32 字; exact measurement is server-authoritative)")
     .option("--author <name>", "Article author (or from frontmatter / WECHAT_AUTHOR)")
-    .option("--digest <summary>", "Digest 摘要, ≤120 code points (or frontmatter description/summary; else auto)")
+    .option("--digest <summary>", "Digest 摘要 (documented ≤120 字; omit to let WeChat derive the first 54 字)")
     .option("--cover <image>", "Cover image path — required (or from frontmatter coverImage/cover/image)")
     .option("--source-url <url>", "阅读原文 link (content_source_url; or from frontmatter sourceUrl/contentSourceUrl)")
     .option("--keep-links", "Keep inline external links (default: rewrite to bottom citations)")
@@ -62,9 +65,8 @@ export function registerWechatDraftCommand(parent: Command): void {
       const baseDir =
         opts.from && opts.from !== "-" ? dirname(resolve(opts.from)) : process.cwd();
 
-      // DETERMINISTIC generation (no LLM, no network). Throws on missing/oversized
-      // title, oversized explicit digest, or missing cover — a usage error (exit 2),
-      // same tier as resolveContentInput.
+      // DETERMINISTIC generation (no LLM, no network). Throws on a missing title
+      // or cover — a usage error (exit 2), same tier as resolveContentInput.
       let article: GeneratedArticle;
       try {
         article = generateArticle(md, {
@@ -127,6 +129,23 @@ export function registerWechatDraftCommand(parent: Command): void {
       } catch (err) {
         exitCode = 1;
         if (err instanceof WeChatApiError) {
+          const knownIpError = err.errcode === 40164;
+          const receipt = createServerValidationReceipt({
+            source: "wechat_api",
+            stage: err.endpoint,
+            outcome: "rejected",
+            code: String(err.errcode),
+            message: err.errmsg,
+            classified: knownIpError,
+            retryable: knownIpError ? false : null,
+            inputRelated: knownIpError ? false : null,
+            suggestedCorrection: knownIpError
+              ? "Add the fixed egress IP to the account allowlist, then rerun publish wechat check."
+              : null,
+            platformTouched: true,
+            observedState: "nothing_staged",
+            published: false,
+          });
           if (err.errcode === 40164) {
             // IP not allowlisted — the ordered uploads (§5) aborted before any
             // partial work, so nothing was staged. Surface the exact egress IP.
@@ -140,9 +159,10 @@ export function registerWechatDraftCommand(parent: Command): void {
             );
           } else {
             console.error(
-              `\n✗ WeChat API error on ${err.endpoint}: ${err.errcode} ${err.errmsg}. Nothing was staged.`,
+              `\n✗ WeChat API error on ${err.endpoint}: ${err.errcode} ${receipt.sanitizedMessage}. Nothing was staged.`,
             );
           }
+          console.error(`  server receipt: ${JSON.stringify(receipt)}`);
         } else {
           console.error(`\n✗ Failed to stage the WeChat draft: ${(err as Error).message}`);
         }

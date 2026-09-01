@@ -137,10 +137,10 @@ makes no `draft/add` call.
 
 ```
 publish wechat draft (--from <base.md> | --from - | --text "<body>")
-                     [--title "<title>"]        # ≤64 chars (or frontmatter / markdown H1)
-                     [--author "<name>"]        # or frontmatter `author` / WECHAT_AUTHOR
-                     [--digest "<summary>"]     # ≤120 chars (or frontmatter description; else auto)
-                     --cover <image.(png|jpg)>  # required (or frontmatter coverImage/cover/image)
+                     [--title "<title>"]        # official ≤32 字; measurement server-authoritative
+                     [--author "<name>"]        # official ≤16 字; or frontmatter / WECHAT_AUTHOR
+                     [--digest "<summary>"]     # official ≤120 字; omitted => first 54 字 from body
+                     --cover <image.(bmp|png|jpg|jpeg|gif)> # required permanent material
                      [--source-url <url>]       # 阅读原文 link (or frontmatter sourceUrl)
                      [--keep-links]             # keep inline external links (default: → bottom citations, §4)
                      [--out <file.html>]        # write the rendered HTML for inspection
@@ -313,13 +313,15 @@ draft assembler needs, with **no network and no LLM**:
 1. **Parse** via `parseBaseMarkdown` → frontmatter, leading H1, body markdown, link
    flags.
 2. **Resolve metadata** (flag → frontmatter → fallback):
-   - **title:** `--title` → frontmatter `title` → leading H1. **Required.** Cap
-     **≤64** code points (WeChat's article-title limit); over cap → **ERROR**, never
-     silent truncation (same policy as Reddit's title cap).
+   - **title:** `--title` → frontmatter `title` → leading H1. **Required.** The
+     official contract says **≤32 `字`**, but does not define code-point, UTF-16,
+     or grapheme measurement, so the CLI reports the limit and leaves rejection
+     server-authoritative rather than guessing a local counter.
    - **author:** `--author` → frontmatter `author` → `WECHAT_AUTHOR` env → empty.
-   - **digest (摘要):** `--digest` → frontmatter `description`/`summary` → **auto**
-     (first paragraph, truncated to ≤120 code points). WeChat auto-fills from the
-     body when blank, but generating it locally keeps output predictable.
+     The official **≤16 `字`** boundary has the same unresolved measurement.
+   - **digest (摘要):** `--digest` → frontmatter `description`/`summary`; when
+     omitted, leave it empty so WeChat derives the first **54 `字`** from the body.
+     The documented maximum is **120 `字`**, with measurement server-authoritative.
    - **cover:** `--cover` → frontmatter `coverImage`/`cover`/`image`. **Required**
      for `article_type=news`; if unresolved → **ERROR** with guidance (mirrors the
      reference's "no cover" stop).
@@ -375,9 +377,9 @@ On a real run it:
 ```jsonc
 { "articles": [ {
     "article_type": "news",
-    "title": "<≤64>",
-    "author": "<optional>",
-    "digest": "<≤120>",
+    "title": "<official ≤32 字; server-authoritative measurement>",
+    "author": "<optional; official ≤16 字>",
+    "digest": "<optional; official ≤120 字; omission derives first 54 字>",
     "content": "<inline-styled HTML, external images rewritten to WeChat URLs>",
     "content_source_url": "<optional 阅读原文>",
     "thumb_media_id": "<from step 2>",
@@ -479,8 +481,10 @@ are unset (Mode B).
 Compile-green + code review misses real bugs in these flows (AGENTS.md "Verify
 live"). For WeChat the live surface is the API + the 草稿箱 preview, not a browser:
 
-- **Field limits drift.** Confirm title ≤64, digest ≤120, and content size limits
-  against live `errcode`s; adjust caps to match what the API actually rejects.
+- **Field measurement and content limits remain unresolved.** The official title,
+  author, and digest limits are 32/16/120 `字`, but exact Unicode measurement is
+  unknown. Preserve sanitized live `errcode`s instead of guessing a local counter.
+  The official HTML row also conflicts between 2 KB, 20,000 characters, and 1 MB.
 - **Inline-style rendering.** WeChat's editor sanitizes *some* inline CSS. Stage a
   real draft and eyeball it in the 草稿箱 preview — headings, code blocks, lists,
   images, and citations must render as intended. This is the highest-risk item and

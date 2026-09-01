@@ -546,6 +546,7 @@ test("registry exposes one shared probe seam for auth check and future info comm
   assert.equal(xhs.status, "agent_check_required");
   assert.equal(acres.status, "agent_check_required");
   assert.equal(xhs.nextStep?.continueInSameContext, true);
+  assert.equal(acres.nextStep?.continueInSameContext, true);
 });
 
 test("registry isolates a rejected platform and preserves multi-platform receipts", async () => {

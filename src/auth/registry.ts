@@ -1,4 +1,10 @@
 import { peekDataPaths } from "../config.js";
+import {
+  ONEPOINT3ACRES_ENTRY_URL,
+  ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
+  XHS_ENTRY_URL,
+  XHS_CAPABILITY_WORKFLOW_REF,
+} from "../capabilities/workflows.js";
 import { LI_LOGIN_SELECTORS } from "../linkedin/session.js";
 import { REDDIT_LOGIN_SELECTORS } from "../reddit/session.js";
 import { X_SELECTORS } from "../session.js";
@@ -44,10 +50,8 @@ function agentOwnedDescriptor(
     requiresHuman: true,
     nextStep: {
       executor: "agent_browser",
-      entryUrl: isXhs
-        ? "https://creator.xiaohongshu.com/publish/publish"
-        : "https://www.1point3acres.com/",
-      workflowRef: isXhs ? "xhs#authentication" : "1point3acres#authentication",
+      entryUrl: isXhs ? XHS_ENTRY_URL : ONEPOINT3ACRES_ENTRY_URL,
+      workflowRef: isXhs ? XHS_CAPABILITY_WORKFLOW_REF : ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
       instruction: isXhs
         ? "Open the creator portal with the browser agent, let the operator scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
         : "Open 1point3acres with the browser agent, complete any permitted human login or challenge, positively verify the authenticated state, and continue in that same browser context.",

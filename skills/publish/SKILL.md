@@ -49,6 +49,9 @@ account signal. Inspect `evidence.note` to see when the headful retry occurred.
 
 ## What it does
 
+- **channel info** — `publish <channel> info [--json]` returns every configured
+  format in a versioned static-capability envelope plus separate passive
+  readiness. Non-ready auth remains exit 0; follow the sanitized `nextStep`.
 - **auth check** — passive, sanitized authentication readiness for one or more
   channels; returns local evidence, positive live proof, status, and an executable
   recovery step. Never logs in.
@@ -65,7 +68,7 @@ account signal. Inspect `evidence.note` to see when the headful retry occurred.
   so an agent can see what it has already put out and avoid repeating itself across
   a multi-day campaign. Filters reposts and others' quoted tweets out.
 - **linkedin draft** — turn inline text (or a Markdown file) into a native
-  **LinkedIn post** draft (single post, 3000-char cap, optional attached media).
+  **LinkedIn post** draft (single post, 3,000 UTF-16 code-unit cap, optional attached media).
 - **reddit inspect / search** — read-only subreddit discovery (facts only, no LLM
   ranking): `inspect <sub>…` reports each named subreddit's posting contract
   (subscribers, allowed post types, rules, flairs, post requirements); `search
@@ -98,7 +101,7 @@ account signal. Inspect `evidence.note` to see when the headful retry occurred.
 - Long-form → `publish x draft --format article`. Note: **an X Article requires a
   5:2 aspect-ratio hero image to publish.**
 - Publish owned content to LinkedIn → `publish linkedin draft --text "…"` (or
-  `--from <file.md>`). Single post, **3000-char cap**, deterministic
+  `--from <file.md>`). Single post, **3,000 UTF-16 code-unit cap**, deterministic
   markdown→plain-text (headings→plain, bullets→"• ", emoji passthrough); links are
   advised into the **first comment**, not the body; `--media <path>` (repeatable)
   attaches images; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility
@@ -113,8 +116,9 @@ account signal. Inspect `evidence.note` to see when the headful retry occurred.
 - Publish owned long-form to WeChat → `publish wechat draft --from <file.md> --cover
   <img>` (or `--text`). The body is **rich inline-styled HTML** (WeChat strips
   `<style>` and CSS classes, so all styling is inlined; one default look). Title
-  **≤64 code points**, digest **≤120 code points** (over cap is an ERROR, never
-  silent truncation). A **cover image is required.** External links → bottom
+  documents title/author/digest as **32/16/120 字**, but exact Unicode measurement
+  is unknown and server-authoritative; omitted digest lets WeChat derive its first
+  **54 字**. A **cover image is required.** External links → bottom
   citations by default (`--keep-links` keeps them inline). Rendering is
   **deterministic, no LLM**. Stages a native draft in the 草稿箱 and **never posts**.
   On a new network/proxy, run `publish wechat check` first (the API is
@@ -199,7 +203,7 @@ publish reddit draft --subreddit <name> --title "<title>" (--text <content> | --
                  [--flair <id|text>] [--nsfw] [--spoiler] [--dry-run] [--inspect]
 publish wechat check [--json]
 publish wechat draft (--text <content> | --from <file.md>) [--title "<t>"] [--author "<name>"] \
-                 [--digest "<s>"] --cover <image.(png|jpg)> [--source-url <url>] [--keep-links] \
+                 [--digest "<s>"] --cover <image.(bmp|png|jpg|jpeg|gif)> [--source-url <url>] [--keep-links] \
                  [--out <file.html>] [--dry-run]
 ```
 
@@ -258,7 +262,7 @@ publish wechat draft (--text <content> | --from <file.md>) [--title "<t>"] [--au
   LIVE on X only** — a draft staged-but-not-yet-posted won't appear until a human
   posts it. Use it as the pre-draft "have I already said this?" check in a campaign.
 - **linkedin draft** — inline `--text` (primary) or `--from <file.md>` (`-` = stdin);
-  single post, **3000-char cap** (over cap → leading segment + warning, never silent
+  single post, **3,000 UTF-16 code-unit cap** (over cap → leading segment + warning, never silent
   truncation); deterministic markdown→plain-text with emoji passthrough; `--media`
   (repeatable) attaches images in order; `--bold` opts into Unicode bold; `--dry-run`
   generates + prints without a browser; `--inspect` runs headful. It surfaces an
@@ -299,8 +303,10 @@ publish wechat draft (--text <content> | --from <file.md>) [--title "<t>"] [--au
 - **wechat draft** — inline `--text` or `--from <file.md>` (`-` = stdin) via the
   shared resolver. Metadata `--title` / `--author` / `--digest` / `--cover` /
   `--source-url` fall back to `--from` frontmatter (`coverImage`/`cover`/`image` for
-  the cover, `sourceUrl` for the source link); **title ≤64 code points** and
-  **digest ≤120 code points** are **hard errors** (no silent truncation). The
+  the cover, `sourceUrl` for the source link). WeChat documents title/author/digest
+  as **32/16/120 字** without defining the Unicode measurement, so the CLI does not
+  guess code-point boundaries; omitted digest is left for WeChat's first-54-字
+  behavior. The
   **cover is required** and is uploaded to become the article's `thumb_media_id`. The
   body is rendered to **inline-styled HTML** (WeChat strips `<style>`/classes);
   **local body images are uploaded to WeChat's CDN and their `<img src>` rewritten**,

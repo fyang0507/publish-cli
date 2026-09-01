@@ -39,15 +39,11 @@
  *     remote `http(s)://` images are flagged as a warning and left as-is this phase.
  */
 
-import { parseBaseMarkdown, countChars, type LinkFlag } from "../x/content.js";
+import { parseBaseMarkdown, type LinkFlag } from "../x/content.js";
 import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { marked, Renderer } from "marked";
-
-/** WeChat article-title cap, in Unicode code points. Over cap => ERROR. */
-export const WECHAT_TITLE_LIMIT = 64;
-/** WeChat digest (摘要) cap, in Unicode code points. */
-export const WECHAT_DIGEST_LIMIT = 120;
+import { assertWechatLocalImage } from "../capabilities/validation.js";
 
 /** WeChat's own article domain — links here are always kept inline (never cited). */
 const WECHAT_HOST = "mp.weixin.qq.com";
@@ -88,11 +84,11 @@ export interface BodyImage {
 
 /** Result of a WeChat article generation run. */
 export interface GeneratedArticle {
-  /** The article title (≤64 code points, validated). */
+  /** The article title; WeChat's documented 字 boundary is server-authoritative. */
   title: string;
   /** The author ("" when none supplied). */
   author: string;
-  /** The digest / 摘要 (≤120 code points; auto-truncated when derived). */
+  /** The explicit digest, or empty so WeChat can derive its documented first 54 字. */
   digest: string;
   /** Inline-styled HTML body. `<img src>` still points at LOCAL paths (draft.ts rewrites). */
   html: string;
@@ -242,54 +238,6 @@ function collectLinkFlags(body: string): LinkFlag[] {
   }
 
   return flags;
-}
-
-/**
- * Best-effort plain-text extraction of the first body paragraph, for an auto
- * digest. Skips leading headings, images, blockquotes, and fenced code; strips
- * inline markdown (links → label, emphasis/code markers removed). Deterministic.
- */
-function firstParagraphPlain(bodyMd: string): string {
-  const lines = bodyMd.replace(/\r\n/g, "\n").split("\n");
-  const para: string[] = [];
-  let inFence = false;
-  let fenceChar = "";
-  for (const line of lines) {
-    const fence = line.match(/^\s*(`{3,}|~{3,})/);
-    if (!inFence && fence) {
-      if (para.length) break;
-      inFence = true;
-      fenceChar = fence[1][0];
-      continue;
-    }
-    if (inFence) {
-      if (fence && fence[1][0] === fenceChar) inFence = false;
-      continue;
-    }
-    const t = line.trim();
-    if (!t) {
-      if (para.length) break;
-      continue;
-    }
-    // Skip non-paragraph lead-ins until the first real prose paragraph.
-    if (/^#{1,6}\s/.test(t) || /^!\[[^\]]*\]\([^)]*\)\s*$/.test(t) || /^>\s?/.test(t)) {
-      if (para.length) break;
-      continue;
-    }
-    // Strip a leading list marker so a leading list still yields text.
-    para.push(t.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, ""));
-  }
-  return stripInlineMarkdown(para.join(" "));
-}
-
-/** Strip inline markdown syntax to readable plain text (for the digest). */
-function stripInlineMarkdown(s: string): string {
-  return s
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, "") // images → nothing
-    .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1") // links → label
-    .replace(/[*_~`]+/g, "") // emphasis / code markers
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 // ---------------------------------------------------------------------------
@@ -464,10 +412,10 @@ function renderCitations(citations: Citation[]): string {
  *
  * THROWS (usage error; the command maps this to exit 2) on:
  *   - a missing/unresolved title,
- *   - a title over WECHAT_TITLE_LIMIT (64),
- *   - an EXPLICIT digest over WECHAT_DIGEST_LIMIT (120),
  *   - a missing/unresolved cover.
- * A DERIVED (auto) digest over the cap is truncated with a warning (never thrown).
+ * WeChat documents title/author/digest limits in 字 without defining a Unicode
+ * measurement, so those boundaries remain server-authoritative rather than
+ * being guessed as code points.
  */
 export function generateArticle(md: string, opts: GenerateArticleOptions = {}): GeneratedArticle {
   const warnings: string[] = [];
@@ -490,14 +438,6 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
         "or start the markdown with an H1 (`# ...`).",
     );
   }
-  const titleChars = countChars(title);
-  if (titleChars > WECHAT_TITLE_LIMIT) {
-    throw new Error(
-      `Title is ${titleChars} code points but WeChat's cap is ${WECHAT_TITLE_LIMIT}. ` +
-        `Shorten the title (no silent truncation).`,
-    );
-  }
-
   // Relative cover / body-image paths resolve against the markdown file's dir
   // (opts.baseDir), falling back to the process CWD (correct for inline --text).
   const baseDir = opts.baseDir ?? process.cwd();
@@ -506,11 +446,12 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   const coverRaw = (opts.cover ?? data.cover)?.trim();
   if (!coverRaw) {
     throw new Error(
-      "WeChat article requires a cover image (封面 / thumb_media_id): pass --cover <image.(png|jpg)>, " +
+      "WeChat article requires a cover image (封面 / thumb_media_id): pass --cover <image.(bmp|png|jpg|jpeg|gif)>, " +
         "or add a `coverImage`/`cover`/`image` frontmatter field.",
     );
   }
   const coverPath = resolvePath(baseDir, coverRaw);
+  assertWechatLocalImage(coverPath, "cover");
 
   // --- author ---
   const author = (opts.author ?? data.author ?? "").trim();
@@ -535,30 +476,13 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   const explicitDigest = (opts.digest ?? data.digest)?.trim();
   let digest: string;
   if (explicitDigest) {
-    const dChars = countChars(explicitDigest);
-    if (dChars > WECHAT_DIGEST_LIMIT) {
-      throw new Error(
-        `Digest is ${dChars} code points but WeChat's cap is ${WECHAT_DIGEST_LIMIT}. ` +
-          `Shorten it (no silent truncation).`,
-      );
-    }
     digest = explicitDigest;
   } else {
-    const auto = firstParagraphPlain(bodyMarkdown);
-    if (countChars(auto) > WECHAT_DIGEST_LIMIT) {
-      digest = [...auto].slice(0, WECHAT_DIGEST_LIMIT).join("").trimEnd();
-      warnings.push(
-        `Digest not supplied — auto-derived from the first paragraph and truncated to ` +
-          `${WECHAT_DIGEST_LIMIT} code points. Set --digest or a frontmatter ` +
-          `\`description\` to control it.`,
-      );
-    } else {
-      digest = auto;
-      warnings.push(
-        `Digest not supplied — auto-derived from the first paragraph (${countChars(auto)} chars). ` +
-          `Set --digest or a frontmatter \`description\` to control it.`,
-      );
-    }
+    digest = "";
+    warnings.push(
+      "Digest not supplied — leaving it omitted so WeChat can derive the first 54 字 from the body. " +
+        "Exact 字 measurement remains server-authoritative.",
+    );
   }
 
   // --- advisories: citations + remote images ---
@@ -576,6 +500,7 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
         `article would drop them. Reference local image files instead (auto reupload is a follow-up).`,
     );
   }
+  for (const image of ctx.bodyImages) assertWechatLocalImage(image.path, "body");
 
   const linkFlags = collectLinkFlags(bodyMarkdown);
 
@@ -604,9 +529,9 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
 export function renderArticleForInspection(a: GeneratedArticle): string {
   const out: string[] = [];
   out.push("format: article (article_type=news)");
-  out.push(`title (${countChars(a.title)}/${WECHAT_TITLE_LIMIT} chars): ${a.title}`);
+  out.push(`title (documented 32 字; server-authoritative measurement): ${a.title}`);
   out.push(`author: ${a.author || "(none)"}`);
-  out.push(`digest (${countChars(a.digest)}/${WECHAT_DIGEST_LIMIT} chars): ${a.digest || "(none)"}`);
+  out.push(`digest (documented 120 字; omitted => first 54 字): ${a.digest || "(omitted)"}`);
   out.push(`cover: ${a.coverPath}`);
   if (a.sourceUrl) out.push(`source url (阅读原文): ${a.sourceUrl}`);
 

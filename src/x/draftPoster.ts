@@ -25,6 +25,7 @@ import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from
 import { dirname, extname, join } from "node:path";
 import { getBrowserContext, type EnsureSessionOptions } from "../session.js";
 import type { ArticleBlock, GeneratedContent, InlineRun } from "./content.js";
+import { isLivePositiveXArticleCoverPath } from "../capabilities/validation.js";
 
 /**
  * Centralized composer/draft selectors. EVERY entry NEEDS LIVE CALIBRATION.
@@ -428,8 +429,8 @@ export async function stageReplyDraft(
  * hero image. Leaves it unsent (Articles autosave). NEVER clicks Publish.
  *
  * DETERMINISTIC parts (fully implemented, verifiable at build time): block/inline
- * parsing (content.ts), HTML rendering (htmlFromArticleBlocks), hero-image
- * discovery + 5:2 ratio validation (resolveHeroImage).
+ * parsing (content.ts), HTML rendering (htmlFromArticleBlocks), and optional
+ * cover discovery + ratio inspection (resolveHeroImage).
  *
  * BROWSER-INTERACTION part still needing live calibration: the 5:2 HERO IMAGE
  * upload (articleCover* selectors + crop/apply dialog) — degrades gracefully.
@@ -518,8 +519,9 @@ async function stageArticleDraft(
     );
   }
 
-  // Attach the REQUIRED 5:2 hero image (issue #5 req 3). BEST-EFFORT — the cover
-  // upload flow NEEDS LIVE CALIBRATION (a human calibrates it).
+  // Attach an optional auto-discovered cover. The live-positive set includes
+  // exact 5:2 and 1500x620; every tested image opened crop/edit and required
+  // Apply, so ratio is advisory and never a local rejection.
   const hero = resolveHeroImage(basePath);
   let heroAttached = false;
   if (!hero.path) {
@@ -528,19 +530,18 @@ async function stageArticleDraft(
         (hero.reason ?? "No suitable image found near the base markdown.") +
         " Add a 5:2 image (e.g. hero.jpg / cover.png) in the article's publish/<slug>/ folder.",
     );
-  } else if (!hero.ratioOk) {
-    notes.push(
-      `HERO IMAGE RATIO: found ${hero.path} at ${hero.width}x${hero.height} ` +
-        `(ratio ${hero.ratio?.toFixed(3)}), but X requires 5:2 (2.5). ` +
-        "NEEDS LIVE CALIBRATION: no image lib is bundled, so cropping/resizing to 5:2 " +
-        "is NOT performed automatically — pre-crop the image to 5:2, or add an image " +
-        "lib (e.g. sharp) to package.json and wire cropping in resolveHeroImage().",
-    );
   } else {
+    if (!hero.ratioOk) {
+      notes.push(
+        `HERO IMAGE RATIO: found ${hero.path} at ${hero.width}x${hero.height} ` +
+          `(ratio ${hero.ratio?.toFixed(3)}). Uploading without local rejection; ` +
+          "review X's mandatory crop/edit step before leaving the draft.",
+      );
+    }
     const uploaded = await uploadHeroImage(page, hero.path, notes);
     if (uploaded) {
       heroAttached = true;
-      notes.push(`Hero image uploaded from ${hero.path} (5:2, ${hero.width}x${hero.height}).`);
+      notes.push(`Hero image uploaded from ${hero.path} (${hero.width}x${hero.height}); verify the applied crop.`);
     }
   }
 
@@ -687,7 +688,7 @@ function modifier(): "Meta" | "Control" {
 }
 
 // ---------------------------------------------------------------------------
-// Hero image (5:2) — DETERMINISTIC discovery + ratio validation
+// Article cover — deterministic discovery + ratio inspection (never rejection)
 // ---------------------------------------------------------------------------
 
 interface HeroImage {
@@ -701,14 +702,13 @@ interface HeroImage {
 
 const HERO_RATIO = 5 / 2; // 2.5
 const HERO_RATIO_TOL = 0.02; // allow tiny rounding drift
-const IMAGE_EXTS = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 // Prefer explicitly-named hero/cover assets when present.
 const HERO_NAME_HINTS = ["hero", "cover", "banner", "og", "5x2", "5-2"];
 
 /**
  * Locate a hero image next to the article's base markdown (its publish/<slug>/
- * folder), preferring names hinting at a cover, and validate the 5:2 ratio by
- * reading the image header (no image lib needed for common formats).
+ * folder), preferring names hinting at a cover, and inspect its ratio by reading
+ * the image header (no image lib needed for common formats).
  *
  * Returns a HeroImage describing what was found. Deterministic + verifiable.
  */
@@ -720,7 +720,7 @@ function resolveHeroImage(basePath?: string): HeroImage {
   let candidates: string[];
   try {
     candidates = readdirSync(dir)
-      .filter((f) => IMAGE_EXTS.has(extname(f).toLowerCase()))
+      .filter((f) => isLivePositiveXArticleCoverPath(f))
       .map((f) => join(dir, f))
       .filter((p) => {
         try {
@@ -832,7 +832,8 @@ function readImageSize(path: string): { width: number; height: number } | null {
 }
 
 /**
- * Upload the (already 5:2-validated) hero image via the editor's cover control.
+ * Upload the live-positive cover format via the editor's cover control. X owns
+ * the crop/edit acceptance step; local ratio inspection never rejects it.
  *
  * NEEDS LIVE CALIBRATION: the cover button / hidden file input / crop-apply
  * dialog testids are best-effort. We prefer setting the file <input> directly
