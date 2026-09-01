@@ -7,9 +7,7 @@ import {
 import {
   LINKEDIN_POST_MAX_UTF16_CODE_UNITS,
   WECHAT_BODY_IMAGE_EXTENSIONS,
-  WECHAT_BODY_IMAGE_TRANSPORT_MAX_BYTES,
   WECHAT_COVER_EXTENSIONS,
-  WECHAT_COVER_TRANSPORT_MAX_BYTES,
   X_ARTICLE_COVER_POSITIVE_EXTENSIONS,
   X_PREMIUM_POST_PLATFORM_MAX_LENGTH,
   X_STANDARD_POST_MAX_WEIGHTED_LENGTH,
@@ -57,11 +55,27 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
       workflowRef: GENERIC_CAPABILITY_WORKFLOW_REF,
       continueInSameContext: true,
     },
+    state: {
+      machineLocal: [
+        "PUBLISH_DATA_DIR/x-profile (persistent browser profile)",
+        "PUBLISH_DATA_DIR/x-cookies.json (sanitized auth-cookie cache)",
+      ],
+      durable: ["<data-repo>/.publish-cli/publish.db (watch dedupe and reply ledger)"],
+      recovery: [
+        "Do not copy cookies between machines; complete a headful login in the browser context that will continue the workflow.",
+      ],
+    },
     formats: [
       {
         id: "tweet",
         name: "Tweet / post",
         summary: "Plain-text native Unsent draft; standard posts use X's weighted 280 limit.",
+        usage: "publish x draft --format tweet (--text <content> | --from <base.md|->) [--long]",
+        humanHighlights: [
+          "Standard posts use twitter-text weighted length: 280 maximum, URLs count as 23, and CJK/parsed emoji sequences count as 2.",
+          "Premium documents a 25,000 platform maximum, but its counting rule and maximum draftable length remain unknown; live drafts are confirmed only at 281 and 500.",
+          "This transport does not attach media to tweet drafts.",
+        ],
         action: "draft",
         platformSupported: true,
         transportSupport: "supported",
@@ -104,6 +118,11 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
         id: "thread",
         name: "Thread",
         summary: "Numbered plain-text sequence; every row independently uses X's weighted 280 limit.",
+        usage: "publish x draft --format thread (--text <content> | --from <base.md|->)",
+        humanHighlights: [
+          "Every numbered row independently uses the twitter-text weighted 280 limit.",
+          "This transport does not attach media per row.",
+        ],
         action: "draft",
         platformSupported: true,
         transportSupport: "supported",
@@ -126,6 +145,14 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
         id: "article",
         name: "Article",
         summary: "Premium rich Article with optional auto-discovery of an already-prepared cover; autosaves as an Article draft.",
+        usage: "publish x draft --format article --from <base.md>",
+        humanHighlights: [
+          "Premium is required; the Article body maximum remains unknown.",
+          "JPEG, PNG, and WebP covers are live-positive fixtures at 1500x600 and 1500x620; every tested upload required crop/apply.",
+          "Cover discovery scans the --from directory, ranks 5:2 images first, then names containing hero/cover/banner/og/5x2/5-2, then closest ratio; there is no explicit cover flag.",
+          "Article title comes from the first Markdown H1, otherwise the first non-empty line, otherwise Untitled.",
+          "Cover byte/dimension/aspect maxima remain unknown; title, representative body formatting, and cover presence survived a reopen fixture.",
+        ],
         action: "draft",
         platformSupported: true,
         transportSupport: "supported",
@@ -134,7 +161,7 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
           {
             name: "coverAsset",
             required: false,
-            description: "Optional already-prepared cover auto-discovered beside the Markdown file; a coverless Article draft can still autosave.",
+            description: "Optional already-prepared .jpg/.jpeg/.png/.webp cover auto-discovered in the --from file's directory; a coverless Article draft can still autosave.",
           },
         ],
         terminalState: "autosaved native Article draft",
@@ -197,11 +224,27 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
       workflowRef: GENERIC_CAPABILITY_WORKFLOW_REF,
       continueInSameContext: true,
     },
+    state: {
+      machineLocal: [
+        "PUBLISH_DATA_DIR/li-profile (persistent browser profile)",
+        "PUBLISH_DATA_DIR/li-cookies.json (auth-cookie cache)",
+      ],
+      durable: [],
+      recovery: [
+        "Do not copy cookies between machines; complete a headful login/checkpoint in the browser context that will continue the workflow.",
+      ],
+    },
     formats: [
       {
         id: "post",
         name: "Personal feed post",
         summary: "One plain-text post with optional images; text is capped at 3,000 UTF-16 code units.",
+        usage: "publish linkedin draft (--text <content> | --from <base.md|->) [--media <path> ...]",
+        humanHighlights: [
+          "Text is capped at 3,000 UTF-16 code units.",
+          "JPEG, PNG, GIF, and WebP are live-positive image types, but documented count/byte/dimension/ratio boundaries conflict with live acceptance; actual maxima remain unknown.",
+          "Text restoration is live-confirmed; media draft save/persistence remains unknown.",
+        ],
         action: "draft",
         platformSupported: true,
         transportSupport: "supported",
@@ -310,11 +353,27 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
       workflowRef: GENERIC_CAPABILITY_WORKFLOW_REF,
       continueInSameContext: true,
     },
+    state: {
+      machineLocal: [
+        "PUBLISH_DATA_DIR/reddit-profile (persistent browser profile)",
+        "PUBLISH_DATA_DIR/reddit-cookies.json (auth-cookie cache)",
+      ],
+      durable: [],
+      recovery: [
+        "Do not copy cookies between machines; complete CAPTCHA/login in a headful browser context, then continue in that context.",
+      ],
+    },
     formats: [
       {
         id: "self_post",
         name: "Self-post",
         summary: "Markdown title/body draft for one subreddit; no inline body-image transport.",
+        usage: "publish reddit draft --subreddit <name> --title <title> (--text <body> | --from <base.md|->) [--flair <id|text>] [--nsfw] [--spoiler]",
+        humanHighlights: [
+          "The transport guard uses 300 title and 40,000 body code points; actual platform maxima remain unknown.",
+          "Run publish reddit inspect <subreddit> for current rules/flairs; karma, account age, bans, and complete AutoMod behavior are not statically knowable.",
+          "The body remains Markdown and this self-post transport does not upload inline body images.",
+        ],
         action: "draft",
         platformSupported: true,
         transportSupport: "supported",
@@ -386,21 +445,38 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
       workflowRef: GENERIC_CAPABILITY_WORKFLOW_REF,
       continueInSameContext: false,
     },
+    state: {
+      machineLocal: [
+        "PUBLISH_DATA_DIR/wechat-token.json (short-lived stable-token cache; no browser profile)",
+      ],
+      durable: [],
+      recovery: [
+        "Set WECHAT_APP_ID and WECHAT_APP_SECRET; set exactly one of WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL for fixed egress.",
+        "Allowlist that fixed egress IP once in the developer console; token renewal may create/update the machine-local cache and is reported in readiness.healed.",
+      ],
+    },
     formats: [
       {
         id: "article",
         name: "Official Account news article",
         summary: "Inline-styled HTML article staged in 草稿箱 through draft/add with a required permanent cover.",
+        usage: "publish wechat draft (--from <base.md|-> | --text <content>) [--title <title>] [--author <name>] [--digest <summary>] [--cover <image>] [--source-url <url>] [--keep-links]",
+        humanHighlights: [
+          "Cover formats: BMP/PNG/JPEG/JPG/GIF with documented label 10M; body images: JPG/PNG with documented wording 1MB以下. Exact byte boundaries are unknown/server-authoritative.",
+          "Documented title/author/digest limits are 32/16/120 字; measurement is unknown/server-authoritative, and omitted digest lets WeChat derive the first 54 字.",
+          "Three documented HTML-size statements conflict, so the effective maximum is unknown.",
+          "Fresh cover uploads consume permanent-material quota; body uploadimg images do not.",
+        ],
         action: "draft",
         platformSupported: true,
         transportSupport: "supported",
         fields: [
-          { name: "title", required: true, description: "Article title." },
-          { name: "text", required: true, description: "Canonical Markdown file, inline text, or stdin." },
-          { name: "cover", required: true, description: "Permanent-material cover upload." },
-          { name: "author", required: false, description: "Article author." },
-          { name: "digest", required: false, description: "Article digest; omission lets WeChat derive it." },
-          { name: "sourceUrl", required: false, description: "Content source URL." },
+          { name: "title", required: true, description: "Required after resolution: --title, frontmatter title, or leading Markdown H1." },
+          { name: "text", required: true, description: "Exactly one of --from <Markdown|-> or --text <content>." },
+          { name: "cover", required: true, description: "Required after resolution: --cover or frontmatter coverImage/cover/image; uploaded as permanent material." },
+          { name: "author", required: false, description: "--author, frontmatter author, or WECHAT_AUTHOR." },
+          { name: "digest", required: false, description: "--digest or frontmatter description/summary/digest; omission lets WeChat derive it." },
+          { name: "sourceUrl", required: false, description: "--source-url or frontmatter sourceUrl/contentSourceUrl." },
         ],
         terminalState: "native Official Account 草稿箱 draft via draft/add",
         constraints: {
@@ -411,7 +487,6 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
             documentedMaximumBytesLabel: fact("10M", "official_documentation", WECHAT_COVER_DOC, "2026-08-31"),
             exactMaximumBytes: unknown(ISSUE_42, "2026-08-31"),
             transportPolicyExtensions: [...WECHAT_COVER_EXTENSIONS],
-            transportPolicyMaximumBytes: WECHAT_COVER_TRANSPORT_MAX_BYTES,
             minimumDimensions: unknown(ISSUE_42, "2026-08-31"),
             recommendedDimensions: unknown(ISSUE_42, "2026-08-31"),
             maximumDimensions: unknown(ISSUE_42, "2026-08-31"),
@@ -425,7 +500,6 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
             documentedMaximumBytesWording: fact("1MB以下", "official_documentation", WECHAT_BODY_IMAGE_DOC, "2026-08-31"),
             exactMaximumBytes: unknown(ISSUE_42, "2026-08-31"),
             transportPolicyExtensions: [...WECHAT_BODY_IMAGE_EXTENSIONS],
-            transportPolicyMaximumBytes: WECHAT_BODY_IMAGE_TRANSPORT_MAX_BYTES,
             pixelDimensions: unknown(ISSUE_42, "2026-08-31"),
             maximumCountForNewsHtml: unknown(ISSUE_42, "2026-08-31"),
             recompressionAndMetadataBehavior: unknown(ISSUE_42, "2026-08-31"),
@@ -473,7 +547,7 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
           },
         },
         validation: {
-          local: ["required fields", "shared cover/body extension policy", "shared conservative upload-byte policy", "file existence"],
+          local: ["required fields", "shared cover/body extension policy", "file existence"],
           serverAuthoritative: ["all 字 measurement", "exact byte boundaries", "HTML effective maximum", "unknown media behavior"],
         },
         gotchas: [
@@ -483,7 +557,10 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
         ],
       },
     ],
-    gotchas: ["All API calls require an allowlisted source IP; use one fixed proxy or SSH egress."],
+    gotchas: [
+      "All API calls require an allowlisted source IP; set exactly one of WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL and use one fixed egress.",
+      "The shared passive auth probe may renew the normal API token and reports token_refreshed in readiness.healed.",
+    ],
     forbiddenActions: ["freepublish/*", "message/mass/*"],
   },
 
@@ -499,11 +576,23 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
       workflowRef: XHS_CAPABILITY_WORKFLOW_REF,
       continueInSameContext: true,
     },
+    state: {
+      machineLocal: ["Agent-owned persistent browser profile; location is owned by the selected browser backend."],
+      durable: [],
+      recovery: [
+        "QR-authenticate in the headful browser context that will continue the workflow; browser-local drafts disappear if that browser data is cleared.",
+      ],
+    },
     formats: [
       {
         id: "long_article",
         name: "Long-form article / 写长文",
-        summary: "Agent-browser long-form workflow; the CLI transport and detailed execution contract are not implemented in #32.",
+        summary: "Agent-browser long-form workflow with a browser-local draft; it is not cloud-synced and is lost if browser data is cleared. The CLI transport and detailed execution contract are not implemented in #32.",
+        usage: "No CLI execution command in issue #32; use the agent-owned workflowRef and issue #35 contract.",
+        humanHighlights: [
+          "The only initial format is a long article ending in a reopened browser-local draft, not a cloud draft.",
+          "Detailed limits/import behavior remain unresolved in this issue and are server/workflow-authoritative under issue #35.",
+        ],
         action: "agent_browser_draft",
         platformSupported: true,
         transportSupport: "agent_operated",
@@ -511,7 +600,7 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
           { name: "from", required: true, description: "Prepared long-form import artifact; detailed accepted formats remain owned by issue #35." },
           { name: "title", required: true, description: "Long-article title populated and verified in the live workflow." },
         ],
-        terminalState: "agent-operated browser-local long-article draft; final publication remains forbidden",
+        terminalState: "reopened browser-local long-article draft after temporary save; not a cloud draft; final publication remains forbidden",
         constraints: {
           detailedContractOwner: "issue #35",
           detailedConstraints: unknown(ISSUE_35, "2026-08-31"),
@@ -520,7 +609,10 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
           local: [],
           serverAuthoritative: ["all detailed format constraints until issue #35 lands"],
         },
-        gotchas: ["Continue authentication and drafting in the same agent-owned browser context."],
+        gotchas: [
+          "Continue authentication and drafting in the same agent-owned browser context.",
+          "Browser-local drafts disappear when browser data is cleared; issue #35 owns persistence verification and the detailed save contract.",
+        ],
       },
     ],
     gotchas: ["Detailed selectors, limits, and workflow steps are intentionally downstream to issue #35."],
@@ -539,11 +631,23 @@ const registry: Record<AuthPlatform, ChannelStaticCapabilities> = {
       workflowRef: ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
       continueInSameContext: true,
     },
+    state: {
+      machineLocal: [],
+      durable: [],
+      recovery: [
+        "No publish-cli browser/profile state is created; prepare text locally and hand it to the human-operated authorized browser workflow.",
+      ],
+    },
     formats: [
       {
         id: "text_thread",
         name: "Text thread",
         summary: "Offline/manual textual handoff; publish-cli does not inspect, fill, save, or submit the website composer.",
+        usage: "No CLI execution command in issue #32; prepare target/title/body locally for human handoff.",
+        humanHighlights: [
+          "Only a local textual handoff is supported; publish-cli performs no crawl, login, composer fill, save, or submit.",
+          "Destination and composer constraints remain unresolved until issue #37 provides the authorized handoff contract.",
+        ],
         action: "human_handoff",
         platformSupported: true,
         transportSupport: "manual_handoff_only",

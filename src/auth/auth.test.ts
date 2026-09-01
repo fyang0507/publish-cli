@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -226,37 +227,55 @@ test("Reddit API fallback treats an opaque non-JSON 403 as an access wall, never
 });
 
 test("Reddit passive probe retries headful after a headless network-security wall", async () => {
-  const launches: boolean[] = [];
-  const fakeContext = (headless: boolean) => {
-    const page = {
-      url: () => "https://www.reddit.com/",
-      goto: async () => ({ status: () => (headless ? 403 : 200) }),
-      locator: (selector: string) => ({
-        first: () => ({
-          isVisible: async () => !headless && selector === "#authenticated",
-        }),
-        innerText: async () =>
-          headless ? "You've been blocked by network security. File a ticket." : "Reddit home",
-      }),
-      waitForTimeout: async () => {},
-    };
-    return {
-      pages: () => [page],
-      newPage: async () => page,
-      close: async () => {},
-    } as unknown as BrowserContext;
-  };
-  const backend = new PlaywrightPassiveBrowserBackend(async (_profileDir, headless) => {
-    launches.push(headless);
-    return fakeContext(headless);
-  });
+  const dir = mkdtempSync(join(tmpdir(), "publish-auth-reddit-snapshot-"));
+  try {
+    const profileDir = join(dir, "profile");
+    mkdirSync(join(profileDir, "Default"), { recursive: true });
+    const preferences = join(profileDir, "Default", "Preferences");
+    writeFileSync(preferences, "original-profile");
 
-  const result = await backend.probe(browserConfig("reddit"));
-  assert.deepEqual(result, {
-    kind: "authenticated",
-    note: "Reddit blocked the headless probe with its network security wall; a passive headful retry completed the observation.",
-  });
-  assert.deepEqual(launches, [true, false]);
+    const launches: boolean[] = [];
+    const launchedProfileDirs: string[] = [];
+    const fakeContext = (headless: boolean) => {
+      const page = {
+        url: () => "https://www.reddit.com/",
+        goto: async () => ({ status: () => (headless ? 403 : 200) }),
+        locator: (selector: string) => ({
+          first: () => ({
+            isVisible: async () => !headless && selector === "#authenticated",
+          }),
+          innerText: async () =>
+            headless ? "You've been blocked by network security. File a ticket." : "Reddit home",
+        }),
+        waitForTimeout: async () => {},
+      };
+      return {
+        pages: () => [page],
+        newPage: async () => page,
+        close: async () => {},
+      } as unknown as BrowserContext;
+    };
+    const backend = new PlaywrightPassiveBrowserBackend(async (launchedProfileDir, headless) => {
+      launches.push(headless);
+      launchedProfileDirs.push(launchedProfileDir);
+      assert.notEqual(launchedProfileDir, profileDir);
+      assert.equal(readFileSync(join(launchedProfileDir, "Default", "Preferences"), "utf8"), "original-profile");
+      writeFileSync(join(launchedProfileDir, "probe-write"), "chrome may mutate this copy");
+      return fakeContext(headless);
+    });
+
+    const result = await backend.probe({ ...browserConfig("reddit"), profileDir });
+    assert.deepEqual(result, {
+      kind: "authenticated",
+      note: "Reddit blocked the headless probe with its network security wall; a passive headful retry completed the observation.",
+    });
+    assert.deepEqual(launches, [true, false]);
+    assert.equal(readFileSync(preferences, "utf8"), "original-profile");
+    assert.equal(existsSync(join(profileDir, "probe-write")), false);
+    assert.ok(launchedProfileDirs.every((launchedProfileDir) => !existsSync(launchedProfileDir)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 for (const platform of ["x", "linkedin", "reddit"] as const) {
@@ -409,7 +428,9 @@ test("wechat: fresh-machine missing credentials returns executable setup nextSte
     now: () => NOW,
   });
   assert.equal(result.status, "credentials_missing");
+  assert.equal(result.requiresHuman, true);
   assert.match(result.nextStep?.instruction ?? "", /WECHAT_APP_ID/);
+  assert.match(result.nextStep?.instruction ?? "", /WECHAT_PROXY_URL/);
 });
 
 test("wechat: expired token is renewed automatically and reported in healed", async () => {

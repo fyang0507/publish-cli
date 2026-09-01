@@ -31,6 +31,8 @@ export interface AuthProbeDependencies {
 export type AuthProbe = () => Promise<AuthReadiness>;
 export type AuthProbeRegistry = Record<AuthPlatform, AuthProbe>;
 
+const BROWSER_AUTH_WORKFLOW_REF = "skills/publish/SETUP.md#first-login-headful";
+
 function agentOwnedDescriptor(
   platform: Extract<AuthPlatform, "xhs" | "1point3acres">,
   nowMs: number,
@@ -80,7 +82,7 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       ],
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/, /\/i\/flow\/login/],
       challengeUrlPatterns: [/challenge/i, /account\/access/i],
-      workflowRef: "x#authentication",
+      workflowRef: BROWSER_AUTH_WORKFLOW_REF,
       loginInstruction: "Complete X login in the browser context that will continue the publishing workflow; positively verify the authenticated Home UI before continuing.",
       challengeInstruction: "Complete the visible X identity, CAPTCHA, 2FA, or checkpoint step with the operator; positively verify Home and continue in the same browser context.",
     },
@@ -102,7 +104,7 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       ],
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/, /\/uas\/login/],
       challengeUrlPatterns: [/\/checkpoint\//, /challenge/i],
-      workflowRef: "linkedin#authentication",
+      workflowRef: BROWSER_AUTH_WORKFLOW_REF,
       loginInstruction: "Complete LinkedIn login in the browser context that will continue the publishing workflow; positively verify the authenticated feed before continuing.",
       challengeInstruction: "Complete the visible LinkedIn CAPTCHA, 2FA, identity, or device checkpoint with the operator; positively verify the feed and continue in the same browser context.",
     },
@@ -124,7 +126,7 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       ],
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/],
       challengeUrlPatterns: [/js_challenge=1/, /challenge/i],
-      workflowRef: "reddit#authentication",
+      workflowRef: BROWSER_AUTH_WORKFLOW_REF,
       loginInstruction: "Complete Reddit login in the browser context that will continue the publishing workflow; solve any CAPTCHA with the operator and positively verify the authenticated user menu.",
       challengeInstruction: "Let the operator solve Reddit's CAPTCHA or identity challenge; positively verify the authenticated user menu and continue in the same browser context.",
     },

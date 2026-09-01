@@ -20,9 +20,6 @@ export const LINKEDIN_POST_MAX_UTF16_CODE_UNITS = 3_000;
 export const X_ARTICLE_COVER_POSITIVE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"] as const;
 export const WECHAT_COVER_EXTENSIONS = [".bmp", ".png", ".jpg", ".jpeg", ".gif"] as const;
 export const WECHAT_BODY_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"] as const;
-/** Conservative transport policies; platform boundary inclusivity remains unknown. */
-export const WECHAT_COVER_TRANSPORT_MAX_BYTES = 9_999_999;
-export const WECHAT_BODY_IMAGE_TRANSPORT_MAX_BYTES = 999_999;
 
 export type LengthUnit =
   | "twitter_text_weighted"
@@ -95,7 +92,8 @@ export interface LocalImageValidationResult {
   extension: string;
   contentType: string | null;
   sizeBytes: number | null;
-  maximumBytes: number;
+  /** Exact platform byte boundaries are unknown and remain server-authoritative. */
+  maximumBytes: null;
   error: string | null;
 }
 
@@ -114,9 +112,7 @@ export function validateWechatLocalImage(
 ): LocalImageValidationResult {
   const extension = extname(localPath).toLowerCase();
   const allowed = surface === "cover" ? WECHAT_COVER_EXTENSIONS : WECHAT_BODY_IMAGE_EXTENSIONS;
-  const maximumBytes = surface === "cover"
-    ? WECHAT_COVER_TRANSPORT_MAX_BYTES
-    : WECHAT_BODY_IMAGE_TRANSPORT_MAX_BYTES;
+  const maximumBytes = null;
 
   if (!existsSync(localPath)) {
     return {
@@ -141,17 +137,6 @@ export function validateWechatLocalImage(
     };
   }
   const sizeBytes = statSync(localPath).size;
-  if (sizeBytes > maximumBytes) {
-    return {
-      valid: false,
-      surface,
-      extension,
-      contentType: imageContentType(extension),
-      sizeBytes,
-      maximumBytes,
-      error: `${surface} image is ${sizeBytes} bytes; the conservative transport policy is at most ${maximumBytes} bytes: ${localPath}`,
-    };
-  }
   return {
     valid: true,
     surface,

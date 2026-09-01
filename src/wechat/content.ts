@@ -15,18 +15,18 @@
  * (a `marked` renderer override that emits only inline styles). One readable
  * default look; themes/color presets are deferred (WECHAT_DESIGN §8).
  *
- * REUSE: parseBaseMarkdown() + countChars() are imported from ../x/content.js (the
- * shared, deterministic markdown parser) — parseBaseMarkdown for leading-H1 title
- * derivation, countChars for the conservative code-point count. Same reuse posture
- * as LinkedIn/Reddit (by import, never by editing X).
+ * REUSE: parseBaseMarkdown() is imported from ../x/content.js for deterministic
+ * frontmatter/body parsing and leading-H1 title derivation. Same reuse posture as
+ * LinkedIn/Reddit (by import, never by editing X).
  *
  * WeChat rules (WECHAT_DESIGN §4):
- *   - title: REQUIRED. --title → frontmatter `title` → leading Markdown H1. Cap 64
- *     code points; over cap => ERROR, never truncation (same policy as Reddit).
- *   - author: --author → frontmatter `author` → WECHAT_AUTHOR env → "".
- *   - digest (摘要): --digest → frontmatter `description`/`summary` → AUTO (first
- *     paragraph, truncated ≤120). Explicit over cap => ERROR; auto over cap =>
- *     truncated + warning.
+ *   - title: REQUIRED. --title → frontmatter `title` → leading Markdown H1.
+ *     WeChat documents 32 字; exact measurement is server-authoritative.
+ *   - author: --author → frontmatter `author` → WECHAT_AUTHOR env → "". WeChat
+ *     documents 16 字; exact measurement is server-authoritative.
+ *   - digest (摘要): --digest → frontmatter `description`/`summary`. WeChat
+ *     documents 120 字; exact measurement is server-authoritative. When omitted,
+ *     leave it empty so WeChat derives its documented first 54 字.
  *   - cover (封面 / thumb_media_id): --cover → frontmatter `coverImage`/`cover`/
  *     `image`. REQUIRED for article_type=news; unresolved => ERROR.
  *   - source url (阅读原文): --source-url → frontmatter `sourceUrl`/
@@ -57,7 +57,7 @@ export interface GenerateArticleOptions {
   title?: string;
   /** --author → frontmatter `author` → env.WECHAT_AUTHOR → "". */
   author?: string;
-  /** --digest → frontmatter `description`/`summary` → AUTO (first paragraph ≤120). */
+  /** --digest → frontmatter `description`/`summary`; omission delegates derivation to WeChat. */
   digest?: string;
   /** --cover → frontmatter `coverImage`/`cover`/`image`. REQUIRED (throws if unresolved). */
   cover?: string;
@@ -100,7 +100,7 @@ export interface GeneratedArticle {
   bodyImages: BodyImage[];
   /** Links surfaced with an informational note (reuses the shared type). */
   linkFlags: LinkFlag[];
-  /** Non-fatal advisories (auto digest, links→citations, remote image found, …). Never silent. */
+  /** Non-fatal advisories (omitted digest, links→citations, remote image found, …). Never silent. */
   warnings: string[];
 }
 

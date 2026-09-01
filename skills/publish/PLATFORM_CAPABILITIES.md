@@ -21,9 +21,11 @@ observed lower bounds, actual maxima, and `null` unknowns remain distinct.
 returns `agent_check_required` with the creator entry URL. Authentication and
 drafting belong to the agent-owned headful browser context: let the operator
 complete QR login when required, positively verify the creator UI, and continue
-in that same context. The CLI does not implement selectors, import, composer, or
-draft execution in issue #32; issue #35 owns that detailed workflow. Never click
-the final publish action.
+in that same context. The long-article terminal state is a browser-local draft,
+not a cloud draft; it disappears if browser data is cleared and must be reopened
+before a workflow claims persistence. The CLI does not implement selectors,
+import, composer, or draft execution in issue #32; issue #35 owns that detailed
+workflow. Never click the final publish action.
 
 ## 1point3acres discovery boundary
 

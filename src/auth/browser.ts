@@ -3,7 +3,9 @@ import {
   readFileSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type {
   AuthNextStep,
@@ -43,6 +45,11 @@ type PassiveContextLauncher = (
   headless: boolean,
 ) => Promise<BrowserContext>;
 
+interface PassiveProfileSnapshot {
+  profileDir: string;
+  cleanup(): Promise<void>;
+}
+
 interface BrowserProbeAttempt {
   observation: BrowserLiveObservation;
   accessBlocked: boolean;
@@ -55,6 +62,68 @@ const PROFILE_MARKERS = [
   join("Default", "Network", "Cookies"),
   join("Default", "History"),
 ];
+
+const VOLATILE_CHROME_PROFILE_NAMES = new Set([
+  "DevToolsActivePort",
+  "SingletonCookie",
+  "SingletonLock",
+  "SingletonSocket",
+]);
+
+/** Authentication-bearing state needed for a live UI probe; caches are omitted. */
+const PASSIVE_PROFILE_STATE_PATHS = [
+  "Local State",
+  join("Default", "Preferences"),
+  join("Default", "Secure Preferences"),
+  join("Default", "Cookies"),
+  join("Default", "Cookies-journal"),
+  join("Default", "Network", "Cookies"),
+  join("Default", "Network", "Cookies-journal"),
+  join("Default", "Local Storage"),
+  join("Default", "Session Storage"),
+  join("Default", "IndexedDB"),
+  join("Default", "WebStorage"),
+] as const;
+
+/**
+ * Chrome rewrites a user-data directory even when automation only reads a page.
+ * Passive probes therefore launch against a short-lived profile snapshot, never
+ * the operator's persistent profile. The snapshot is removed after each attempt.
+ */
+export async function createPassiveProfileSnapshot(
+  sourceProfileDir: string,
+): Promise<PassiveProfileSnapshot> {
+  const root = await mkdtemp(join(tmpdir(), "publish-auth-probe-"));
+  const profileDir = join(root, "profile");
+  try {
+    for (const relativePath of PASSIVE_PROFILE_STATE_PATHS) {
+      const source = join(sourceProfileDir, relativePath);
+      if (!existsSync(source)) continue;
+      const destination = join(profileDir, relativePath);
+      await mkdir(dirname(destination), { recursive: true });
+      await cp(source, destination, {
+        recursive: true,
+        force: true,
+        preserveTimestamps: true,
+        filter: (candidate) =>
+          !VOLATILE_CHROME_PROFILE_NAMES.has(basename(candidate)),
+      });
+    }
+  } catch (error) {
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+
+  let cleaned = false;
+  return {
+    profileDir,
+    cleanup: async () => {
+      if (cleaned) return;
+      cleaned = true;
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
 
 function fileAgeDays(path: string, nowMs: number): number | undefined {
   try {
@@ -422,15 +491,17 @@ export class PlaywrightPassiveBrowserBackend implements BrowserProbeBackend {
     headless: boolean,
   ): Promise<BrowserProbeAttempt> {
     let context: BrowserContext | undefined;
+    let snapshot: PassiveProfileSnapshot | undefined;
     try {
       try {
-        context = await this.launchContext(config.profileDir, headless);
+        snapshot = await createPassiveProfileSnapshot(config.profileDir);
+        context = await this.launchContext(snapshot.profileDir, headless);
       } catch {
         return {
           accessBlocked: false,
           observation: {
             kind: "inconclusive",
-            note: "Passive browser could not launch. Install Chrome or run npx playwright install chromium, then retry.",
+            note: "Passive browser could not snapshot or launch the local profile. Check filesystem space and Chrome installation, then retry.",
           },
         };
       }
@@ -477,6 +548,7 @@ export class PlaywrightPassiveBrowserBackend implements BrowserProbeBackend {
       };
     } finally {
       await context?.close().catch(() => {});
+      await snapshot?.cleanup().catch(() => {});
     }
   }
 

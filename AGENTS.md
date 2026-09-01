@@ -27,6 +27,9 @@ contract in [issue #45](https://github.com/fyang0507/publish-cli/issues/45).
 - Auth preflight must be passive for browser channels: it must not call
   `ensureSession()`, submit stored credentials, or reinterpret navigation failure
   or selector drift as logout.
+- Launch passive browser probes against an ephemeral copy of the persistent
+  profile. Chrome rewrites user-data directories during read-only navigation, so
+  `auth check` / `info` must never launch against the operator's original profile.
 - Distinguish `login_required`, `human_challenge_required`, missing/rejected
   credentials, IP allowlist failure, network failure, and
   `probe_inconclusive`; return a sanitized, structured `nextStep` for each.

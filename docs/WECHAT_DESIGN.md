@@ -337,9 +337,9 @@ draft assembler needs, with **no network and no LLM**:
    Links to `mp.weixin.qq.com` are always kept inline.
 5. **Return** `{ title, author, digest, html, coverPath, sourceUrl, bodyImages[],
    linkFlags, warnings[] }`. `bodyImages[]` are the local paths the assembler must
-   upload + rewrite. `warnings[]` carries advisories (auto-generated digest, links
-   converted to citations, remote image found) — printed for the operator, never
-   silent.
+   upload + rewrite. `warnings[]` carries advisories (omitted digest delegated to
+   WeChat, links converted to citations, remote image found) — printed for the
+   operator, never silent.
 
 Everything in §4 runs in `--dry-run` (no network); the uploads in §4.1 and §5 do
 not.
@@ -352,12 +352,16 @@ non-WeChat hosts are stripped from published articles. Two upload paths, both in
 
 - **Body images:** for each local image referenced in the markdown, `POST
   /cgi-bin/media/uploadimg` → returns a WeChat CDN **URL**; the assembler rewrites
-  the corresponding `<img src>` to that URL. (`uploadimg` accepts jpg/png, ≤1 MB —
-  oversized images are an ERROR this phase; auto-compression is a follow-up, §8.)
+  the corresponding `<img src>` to that URL. Official documentation says jpg/png
+  and `1MB以下`; exact byte semantics are unresolved and server-authoritative, so
+  the CLI validates the extension and file presence but does not invent a local
+  byte cutoff. Auto-compression is a follow-up (§8).
 - **Cover (`thumb_media_id`):** `POST /cgi-bin/material/add_material?type=image` →
   returns a **permanent-material** `media_id` used as the article's
-  `thumb_media_id`. Note: this consumes the account's permanent-material quota; a
-  future optimization could dedupe by content hash (§8).
+  `thumb_media_id`. Official documentation labels the maximum `10M`; exact byte
+  semantics remain unresolved/server-authoritative. Note: this consumes the
+  account's permanent-material quota; a future optimization could dedupe by
+  content hash (§8).
 - **Remote images** (`http(s)://` sources in the markdown): flagged as a
   `warning` and left as-is this phase (a published article would drop them). Auto
   download-then-reupload is a follow-up (§8).

@@ -311,7 +311,9 @@ publish wechat draft (--text <content> | --from <file.md>) [--title "<t>"] [--au
   body is rendered to **inline-styled HTML** (WeChat strips `<style>`/classes);
   **local body images are uploaded to WeChat's CDN and their `<img src>` rewritten**,
   while **remote `http(s)` images are flagged and left as-is** (a published article
-  would drop them); an **oversized body image (>1 MB) is an ERROR this phase**.
+  would drop them). WeChat documents body uploads as `1MB以下` and cover uploads as
+  `10M`, but exact byte semantics are unknown and server-authoritative; the CLI
+  does not invent a local byte cutoff.
   `--dry-run` renders + validates with **NO network** (no token, no upload, no
   `draft/add`) and, with `--out`, writes the HTML for inspection. It stages via
   **`draft/add`** and **never publishes** — `freepublish/*` and `message/mass/*` are

@@ -44,6 +44,10 @@ export interface ChannelFormatCapability {
   id: string;
   name: string;
   summary: string;
+  /** Concrete CLI invocation, or an explicit statement that execution is external. */
+  usage: string;
+  /** Curated human-output facts; complete evidence remains in constraints/--json. */
+  humanHighlights: string[];
   action: string;
   platformSupported: boolean;
   transportSupport: TransportSupport;
@@ -61,6 +65,12 @@ export interface ChannelAuthCapability {
   continueInSameContext: boolean;
 }
 
+export interface ChannelStateCapability {
+  machineLocal: string[];
+  durable: string[];
+  recovery: string[];
+}
+
 export interface ChannelStaticCapabilities {
   schemaVersion: typeof CHANNEL_CAPABILITY_SCHEMA_VERSION;
   channel: AuthPlatform;
@@ -68,6 +78,7 @@ export interface ChannelStaticCapabilities {
   executionMode: ExecutionMode;
   supportBoundary: string;
   auth: ChannelAuthCapability;
+  state: ChannelStateCapability;
   formats: ChannelFormatCapability[];
   gotchas: string[];
   forbiddenActions: string[];

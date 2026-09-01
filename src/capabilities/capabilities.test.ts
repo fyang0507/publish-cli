@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { AUTH_PLATFORMS, createAuthProbeRegistry, type AuthReadiness } from "../auth/index.js";
-import { executeChannelInfo } from "../commands/channel-info.js";
+import { executeChannelInfo, renderChannelInfo } from "../commands/channel-info.js";
 import { generatePost } from "../linkedin/content.js";
 import { generateContent } from "../x/content.js";
 import { generateArticle } from "../wechat/content.js";
@@ -22,6 +22,7 @@ import {
   countUtf16CodeUnits,
   countXWeightedLength,
   createServerValidationReceipt,
+  validateWechatLocalImage,
   validateLinkedInPostText,
   validateXPostText,
 } from "./index.js";
@@ -59,6 +60,11 @@ test("registry is complete, versioned, JSON-serializable, and evidence-aware", (
     assert.equal(entry.schemaVersion, CHANNEL_CAPABILITY_SCHEMA_VERSION);
     assert.equal(entry.channel, channel);
     assert.doesNotThrow(() => JSON.stringify(entry));
+    assert.ok(entry.state.recovery.length > 0, `${channel} has state recovery guidance`);
+    for (const format of entry.formats) {
+      assert.ok(format.usage.length > 0, `${channel}/${format.id} has invocation guidance`);
+      assert.ok(format.humanHighlights.length > 0, `${channel}/${format.id} has human highlights`);
+    }
     const facts = collectFacts(entry);
     assert.ok(facts.length > 0, `${channel} has evidence facts`);
     for (const item of facts) {
@@ -88,6 +94,24 @@ test("registry returns every configured format at once", () => {
 
   const article = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article");
   assert.equal(article?.fields.find((field) => field.name === "coverAsset")?.required, false);
+});
+
+test("invocation guidance maps every advertised override and implicit resolution rule", () => {
+  const xArticle = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article");
+  assert.match(xArticle?.usage ?? "", /--format article --from/);
+  assert.ok(xArticle?.humanHighlights.some((item) => /ranks 5:2 images first/.test(item)));
+  assert.ok(xArticle?.humanHighlights.some((item) => /first Markdown H1/.test(item)));
+
+  const reddit = CHANNEL_CAPABILITIES.reddit.formats[0];
+  assert.match(reddit.usage, /--nsfw/);
+  assert.match(reddit.usage, /--spoiler/);
+
+  const wechat = CHANNEL_CAPABILITIES.wechat.formats[0];
+  for (const option of ["--title", "--author", "--digest", "--cover", "--source-url", "--keep-links"]) {
+    assert.match(wechat.usage, new RegExp(option));
+  }
+  assert.match(wechat.fields.find((field) => field.name === "title")?.description ?? "", /after resolution/);
+  assert.match(wechat.fields.find((field) => field.name === "cover")?.description ?? "", /frontmatter/);
 });
 
 test("documented values, live conflicts, lower bounds, actual maxima, and unknowns remain separate", () => {
@@ -145,6 +169,30 @@ test("info keeps static capabilities separate, sanitizes probe failure, and alwa
   assert.doesNotMatch(JSON.stringify(failure.envelope), /SECRET_VALUE|raw token/);
 });
 
+test("human info is readiness-first, concise, and actionable while JSON owns full evidence", () => {
+  const readiness = ready("wechat");
+  readiness.healed = ["token_refreshed"];
+  const rendered = renderChannelInfo({
+    schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
+    channel: "wechat",
+    capabilities: CHANNEL_CAPABILITIES.wechat,
+    readiness,
+  });
+  assert.ok(rendered.indexOf("Readiness: ready") < rendered.indexOf("Static capabilities:"));
+  assert.match(rendered, /Healed: token_refreshed/);
+  assert.match(rendered, /Exit behavior: info returns 0 even when not ready/);
+  assert.match(rendered, /cover \(required\)/);
+  assert.match(rendered, /Use: publish wechat draft/);
+  assert.match(rendered, /Cover formats: BMP\/PNG\/JPEG\/JPG\/GIF/);
+  assert.match(rendered, /Exact byte boundaries are unknown\/server-authoritative/);
+  assert.match(rendered, /32\/16\/120 字/);
+  assert.match(rendered, /WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL/);
+  assert.match(rendered, /serverAuthoritative:/);
+  assert.match(rendered, /Forbidden actions:\n  - freepublish\/\*/);
+  assert.match(rendered, /Evidence: use --json/);
+  assert.ok(rendered.split("\n").length < 60);
+});
+
 test("agent-owned entries use shipped channel references and truthful context boundaries", async () => {
   assert.ok(existsSync(resolve(process.cwd(), GENERIC_CAPABILITY_WORKFLOW_REF.split("#")[0])));
   assert.ok(existsSync(resolve(process.cwd(), XHS_CAPABILITY_WORKFLOW_REF.split("#")[0])));
@@ -162,6 +210,8 @@ test("agent-owned entries use shipped channel references and truthful context bo
   assert.equal(acres.nextStep?.workflowRef, ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF);
   assert.equal(acres.nextStep?.continueInSameContext, true);
   assert.equal(CHANNEL_CAPABILITIES["1point3acres"].executionMode, "human_handoff");
+  assert.match(CHANNEL_CAPABILITIES.xhs.formats[0].terminalState, /browser-local/);
+  assert.match(CHANNEL_CAPABILITIES.xhs.formats[0].terminalState, /not a cloud draft/);
 });
 
 test("X uses official twitter-text fixtures from issue #40", () => {
@@ -294,6 +344,23 @@ test("WeChat leaves unknown 字 measurement to the server and omits derived dige
       () => generateArticle("# Title\n\n![body](body.gif)", { cover, baseDir: dir }),
       /body image must use \.jpg\/\.jpeg\/\.png/,
     );
+
+    const documentedLabelCover = join(dir, "documented-label-cover.jpg");
+    const documentedLabelBody = join(dir, "documented-label-body.png");
+    writeFileSync(documentedLabelCover, "");
+    writeFileSync(documentedLabelBody, "");
+    truncateSync(documentedLabelCover, 10_000_000);
+    truncateSync(documentedLabelBody, 1_000_000);
+    assert.deepEqual(validateWechatLocalImage(documentedLabelCover, "cover"), {
+      valid: true,
+      surface: "cover",
+      extension: ".jpg",
+      contentType: "image/jpeg",
+      sizeBytes: 10_000_000,
+      maximumBytes: null,
+      error: null,
+    });
+    assert.equal(validateWechatLocalImage(documentedLabelBody, "body").valid, true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

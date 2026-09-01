@@ -30,12 +30,12 @@
  * before trusting parseEgressIpFrom40164.
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { Blob } from "node:buffer";
 import { fetch, FormData, type RequestInit } from "undici";
 import { createEgress, type EgressHandle } from "./egress.js";
-import { env, dataPaths, peekDataPaths } from "../config.js";
+import { env, peekDataPaths } from "../config.js";
 import {
   assertWechatLocalImage,
   type WeChatImageSurface,
@@ -106,9 +106,9 @@ export type CheckResult =
     };
 
 export interface WeChatClient {
-  /** stable_token with cache at dataPaths().wechatTokenCache; refresh when <5min remain (or force). */
+  /** stable_token cached at PUBLISH_DATA_DIR/wechat-token.json; refresh when <5min remain (or force). */
   ensureToken(force?: boolean): Promise<string>;
-  /** POST /cgi-bin/media/uploadimg (multipart) -> CDN URL string. jpg/png ≤1MB (oversized => throw). */
+  /** POST /cgi-bin/media/uploadimg -> CDN URL. jpg/png locally; exact bytes remain server-authoritative. */
   uploadBodyImage(localPath: string): Promise<string>;
   /** POST /cgi-bin/material/add_material?type=image (multipart) -> thumb media_id (permanent material). */
   uploadCover(localPath: string): Promise<string>;
@@ -157,7 +157,9 @@ export function inspectTokenCache(nowMs = Date.now()): TokenCacheEvidence {
 
 function writeTokenCache(cache: TokenCacheFile): void {
   // NEVER persist app_secret — only the short-lived token + its expiry.
-  writeFileSync(dataPaths().wechatTokenCache, JSON.stringify(cache, null, 2), { mode: 0o600 });
+  const file = peekDataPaths().wechatTokenCache;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(cache, null, 2), { mode: 0o600 });
 }
 
 /** Read an image after the same deterministic preflight used by dry-run. */
