@@ -66,8 +66,8 @@ export interface AuthReadiness {
 }
 
 export type BrowserLiveObservation =
-  | { kind: "authenticated" }
-  | { kind: "logged_out" }
+  | { kind: "authenticated"; note?: string }
+  | { kind: "logged_out"; note?: string }
   | { kind: "challenge"; note?: string }
   | { kind: "network_error"; note: string }
   | { kind: "inconclusive"; note: string };

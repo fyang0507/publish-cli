@@ -119,8 +119,12 @@ Exit `0` means all requested platforms are ready, `1` means at least one needs
 its returned `nextStep`, and `2` means invalid usage. An absent or empty browser
 profile returns `login_required` without launching Playwright or creating local
 state. `probe_inconclusive` is non-ready and directs the agent to inspect the
-entry URL headfully. WeChat may automatically renew its short-lived token and
-reports that as `healed: ["token_refreshed"]`.
+entry URL headfully. Reddit first handles its known headless HTTP 403 wall itself:
+it passively retries headful once (a browser window may briefly appear and then
+closes) and uses `/api/me.json` as a DOM-drift fallback, so a normal Reddit check
+resolves to ready or login-required without agent interpretation. WeChat may
+automatically renew its short-lived token and reports that as
+`healed: ["token_refreshed"]`.
 
 ## Status
 

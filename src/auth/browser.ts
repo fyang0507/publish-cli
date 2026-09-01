@@ -38,6 +38,16 @@ export interface BrowserProbeBackend {
   probe(config: PassiveBrowserProbeConfig): Promise<BrowserLiveObservation>;
 }
 
+type PassiveContextLauncher = (
+  profileDir: string,
+  headless: boolean,
+) => Promise<BrowserContext>;
+
+interface BrowserProbeAttempt {
+  observation: BrowserLiveObservation;
+  accessBlocked: boolean;
+}
+
 const PROFILE_MARKERS = [
   "Local State",
   join("Default", "Preferences"),
@@ -138,9 +148,7 @@ export function evaluateBrowserReadiness(
     evidence: {
       ...local,
       liveProbe: live.kind,
-      ...(live.kind === "challenge" || live.kind === "network_error" || live.kind === "inconclusive"
-        ? { note: live.note }
-        : {}),
+      ...(live.note ? { note: live.note } : {}),
     },
     healed: [] as string[],
   };
@@ -294,47 +302,168 @@ export async function waitForBrowserSignal(
   return undefined;
 }
 
+const REDDIT_NETWORK_SECURITY_TEXT = "you've been blocked by network security";
+
+/** Reddit serves this explicit 403 wall to headless Chrome on some networks. */
+export function isKnownRedditAccessBlock(status: number, bodyText: string): boolean {
+  return status === 403 && bodyText.toLowerCase().includes(REDDIT_NETWORK_SECURITY_TEXT);
+}
+
+/**
+ * DOM markers are the fast path, but Reddit's same-origin account endpoint is a
+ * second, independent auth signal when the shell markup drifts.
+ */
+export async function probeRedditApiSession(page: Page): Promise<BrowserLiveObservation | undefined> {
+  try {
+    const result = await page.evaluate(async () => {
+      const response = await fetch("/api/me.json", { credentials: "include" });
+      let parsed = false;
+      let hasAccount = false;
+      try {
+        const value = (await response.json()) as unknown;
+        parsed = true;
+        if (typeof value === "object" && value !== null && "data" in value) {
+          const data = (value as { data?: unknown }).data;
+          hasAccount =
+            typeof data === "object" &&
+            data !== null &&
+            "name" in data &&
+            typeof (data as { name?: unknown }).name === "string" &&
+            (data as { name: string }).name.length > 0;
+        }
+      } catch {
+        // The caller classifies non-JSON or unexpected responses below.
+      }
+      return { status: response.status, parsed, hasAccount };
+    });
+
+    if (result.status === 200 && result.hasAccount) {
+      return {
+        kind: "authenticated",
+        note: "Reddit's account endpoint positively identified an authenticated session.",
+      };
+    }
+    if (result.status === 401 || result.status === 403) {
+      return {
+        kind: "logged_out",
+        note: `Reddit's account endpoint rejected the session (HTTP ${result.status}).`,
+      };
+    }
+    if (result.status === 200 && result.parsed) {
+      return {
+        kind: "logged_out",
+        note: "Reddit's account endpoint returned no authenticated account.",
+      };
+    }
+    if (result.status >= 500) {
+      return {
+        kind: "network_error",
+        note: `Reddit auth endpoint returned HTTP ${result.status}.`,
+      };
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function launchPassiveContext(profileDir: string, headless: boolean): Promise<BrowserContext> {
+  const launchOpts = {
+    headless,
+    viewport: { width: 1280, height: 900 },
+    args: ["--disable-blink-features=AutomationControlled"],
+  };
+  try {
+    return await chromium.launchPersistentContext(profileDir, {
+      ...launchOpts,
+      channel: "chrome",
+    });
+  } catch {
+    return chromium.launchPersistentContext(profileDir, launchOpts);
+  }
+}
+
 export class PlaywrightPassiveBrowserBackend implements BrowserProbeBackend {
-  async probe(config: PassiveBrowserProbeConfig): Promise<BrowserLiveObservation> {
+  constructor(private readonly launchContext: PassiveContextLauncher = launchPassiveContext) {}
+
+  private async probeOnce(
+    config: PassiveBrowserProbeConfig,
+    headless: boolean,
+  ): Promise<BrowserProbeAttempt> {
     let context: BrowserContext | undefined;
     try {
-      const launchOpts = {
-        headless: true,
-        viewport: { width: 1280, height: 900 },
-        args: ["--disable-blink-features=AutomationControlled"],
-      };
       try {
-        context = await chromium.launchPersistentContext(config.profileDir, {
-          ...launchOpts,
-          channel: "chrome",
-        });
+        context = await this.launchContext(config.profileDir, headless);
       } catch {
-        try {
-          context = await chromium.launchPersistentContext(config.profileDir, launchOpts);
-        } catch {
-          return {
+        return {
+          accessBlocked: false,
+          observation: {
             kind: "inconclusive",
             note: "Passive browser could not launch. Install Chrome or run npx playwright install chromium, then retry.",
+          },
+        };
+      }
+
+      const page = context.pages()[0] ?? (await context.newPage());
+      let response;
+      try {
+        response = await page.goto(config.entryUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+      } catch (error) {
+        return {
+          accessBlocked: false,
+          observation: { kind: "network_error", note: sanitizeError(error) },
+        };
+      }
+
+      if (config.platform === "reddit") {
+        const status = response?.status() ?? 0;
+        const bodyText = await page.locator("body").innerText({ timeout: 1_000 }).catch(() => "");
+        if (isKnownRedditAccessBlock(status, bodyText)) {
+          return {
+            accessBlocked: true,
+            observation: {
+              kind: "network_error",
+              note: `Reddit blocked the ${headless ? "headless" : "headful"} browser probe with its network security wall (HTTP 403).`,
+            },
           };
         }
       }
 
-      const page = context.pages()[0] ?? (await context.newPage());
-      try {
-        await page.goto(config.entryUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
-      } catch (error) {
-        return { kind: "network_error", note: sanitizeError(error) };
+      const signal = await waitForBrowserSignal(page, config);
+      if (signal) return { observation: signal, accessBlocked: false };
+
+      if (config.platform === "reddit") {
+        const apiSignal = await probeRedditApiSession(page);
+        if (apiSignal) return { observation: apiSignal, accessBlocked: false };
       }
 
-      const signal = await waitForBrowserSignal(page, config);
-      if (signal) return signal;
       return {
-        kind: "inconclusive",
-        note: "No positive authenticated, logged-out, or challenge signal matched; selectors or page state may have drifted.",
+        accessBlocked: false,
+        observation: {
+          kind: "inconclusive",
+          note: "No positive authenticated, logged-out, or challenge signal matched; selectors or page state may have drifted.",
+        },
       };
     } finally {
       await context?.close().catch(() => {});
     }
+  }
+
+  async probe(config: PassiveBrowserProbeConfig): Promise<BrowserLiveObservation> {
+    const headless = await this.probeOnce(config, true);
+    if (config.platform === "reddit" && headless.accessBlocked) {
+      // Reddit commonly fingerprints headless Chrome and serves an explicit 403
+      // wall. A one-shot headful retry is still passive: it never fills, clicks,
+      // logs in, or opens a composer, and it closes after observing auth state.
+      const retry = (await this.probeOnce(config, false)).observation;
+      const retryNote =
+        "Reddit blocked the headless probe with its network security wall; a passive headful retry completed the observation.";
+      return {
+        ...retry,
+        note: retry.note ? `${retryNote} ${retry.note}` : retryNote,
+      };
+    }
+    return headless.observation;
   }
 }
 

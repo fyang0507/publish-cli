@@ -38,6 +38,11 @@ verify the authenticated UI, and continue in the same browser context. A missing
 selector is `probe_inconclusive`, not proof of logout. Do not copy cookie files
 between machines.
 
+Reddit auth preflight handles its known headless HTTP 403 wall before asking for
+recovery: it passively retries headful once, then uses `/api/me.json` if the DOM
+auth markers drift. The retry never clicks, fills, or logs in and is reported in
+`evidence.note`.
+
 ## Credentials — `.env`
 
 Copy `.env.example` → `.env` (gitignored) and set:

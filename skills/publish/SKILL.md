@@ -42,6 +42,11 @@ state, and continue the publishing workflow in that same context only after
 authentication is proven. An absent or empty persistent profile skips the live
 probe and returns `login_required` without creating browser state.
 
+Reddit's known headless HTTP 403 network-security wall is handled inside the
+preflight: it automatically retries once headfully without clicking, filling, or
+logging in. If Reddit's DOM markers drift, `/api/me.json` supplies the independent
+account signal. Inspect `evidence.note` to see when the headful retry occurred.
+
 ## What it does
 
 - **auth check** — passive, sanitized authentication readiness for one or more

@@ -15,6 +15,14 @@ logged-out signal.
 Declared-expired cookie caches are invalid local evidence, but an existing profile
 is still probed because the live session may remain valid.
 
+Reddit has an additional conclusive fallback. If its explicit HTTP 403 network-
+security wall blocks the headless probe, the CLI automatically retries once in a
+passive headful browser; a browser window may briefly appear and is closed after
+the observation. It still never clicks, fills, or logs in. DOM drift falls
+back to Reddit's same-origin `/api/me.json` account endpoint. A successful headful
+retry is disclosed in `evidence.note`; a wall that also blocks headful is
+`network_error`, not `probe_inconclusive`.
+
 An absent or empty profile is deterministically not ready. The probe returns
 `login_required` with `liveProbe: not_run` and does not launch Playwright, create
 a profile tree, or change the local evidence. Repeating a zero-state check is

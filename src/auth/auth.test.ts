@@ -16,11 +16,15 @@ import {
   evaluateBrowserReadiness,
   hasMeaningfulProfileState,
   inspectBrowserLocalEvidence,
+  isKnownRedditAccessBlock,
+  PlaywrightPassiveBrowserBackend,
   probePassiveBrowserAuth,
+  probeRedditApiSession,
   waitForBrowserSignal,
   type BrowserSignalPage,
   type PassiveBrowserProbeConfig,
 } from "./browser.js";
+import type { BrowserContext, Page } from "playwright";
 import { createAuthProbeRegistry, probeAuthPlatforms } from "./registry.js";
 import type { BrowserLocalEvidence } from "./types.js";
 import { probeWechatAuth } from "./wechat.js";
@@ -150,6 +154,72 @@ test("browser signal polling uses one total budget rather than multiplying by se
   });
   assert.equal(result, undefined);
   assert.equal(page.elapsedMs, 350);
+});
+
+test("Reddit network-security wall is recognized as a conclusive access block", () => {
+  assert.equal(
+    isKnownRedditAccessBlock(
+      403,
+      "You've been blocked by network security. If you think this is a mistake, file a ticket.",
+    ),
+    true,
+  );
+  assert.equal(isKnownRedditAccessBlock(200, "You've been blocked by network security."), false);
+  assert.equal(isKnownRedditAccessBlock(403, "ordinary forbidden response"), false);
+});
+
+test("Reddit API fallback distinguishes authenticated and logged-out sessions", async () => {
+  const page = (result: { status: number; parsed: boolean; hasAccount: boolean }) =>
+    ({ evaluate: async () => result }) as unknown as Page;
+
+  assert.deepEqual(
+    await probeRedditApiSession(page({ status: 200, parsed: true, hasAccount: true })),
+    {
+      kind: "authenticated",
+      note: "Reddit's account endpoint positively identified an authenticated session.",
+    },
+  );
+  assert.deepEqual(
+    await probeRedditApiSession(page({ status: 403, parsed: false, hasAccount: false })),
+    {
+      kind: "logged_out",
+      note: "Reddit's account endpoint rejected the session (HTTP 403).",
+    },
+  );
+});
+
+test("Reddit passive probe retries headful after a headless network-security wall", async () => {
+  const launches: boolean[] = [];
+  const fakeContext = (headless: boolean) => {
+    const page = {
+      url: () => "https://www.reddit.com/",
+      goto: async () => ({ status: () => (headless ? 403 : 200) }),
+      locator: (selector: string) => ({
+        first: () => ({
+          isVisible: async () => !headless && selector === "#authenticated",
+        }),
+        innerText: async () =>
+          headless ? "You've been blocked by network security. File a ticket." : "Reddit home",
+      }),
+      waitForTimeout: async () => {},
+    };
+    return {
+      pages: () => [page],
+      newPage: async () => page,
+      close: async () => {},
+    } as unknown as BrowserContext;
+  };
+  const backend = new PlaywrightPassiveBrowserBackend(async (_profileDir, headless) => {
+    launches.push(headless);
+    return fakeContext(headless);
+  });
+
+  const result = await backend.probe(browserConfig("reddit"));
+  assert.deepEqual(result, {
+    kind: "authenticated",
+    note: "Reddit blocked the headless probe with its network security wall; a passive headful retry completed the observation.",
+  });
+  assert.deepEqual(launches, [true, false]);
 });
 
 for (const platform of ["x", "linkedin", "reddit"] as const) {
