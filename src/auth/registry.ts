@@ -33,7 +33,7 @@ export type AuthProbeRegistry = Record<AuthPlatform, AuthProbe>;
 
 const BROWSER_AUTH_WORKFLOW_REF = "skills/publish/SETUP.md#first-login-headful";
 
-function agentOwnedDescriptor(
+function externallyOwnedDescriptor(
   platform: Extract<AuthPlatform, "xhs" | "1point3acres">,
   nowMs: number,
 ): AuthReadiness {
@@ -43,20 +43,22 @@ function agentOwnedDescriptor(
     ready: false,
     status: "agent_check_required",
     checkedAt: new Date(nowMs).toISOString(),
-    verificationMode: "browser_agent",
+    verificationMode: isXhs ? "browser_agent" : "human_handoff",
     evidence: {
       liveProbe: "not_run",
-      note: "This channel's authenticated browser context is owned by the browser agent, not publish-cli.",
+      note: isXhs
+        ? "This channel's authenticated browser context is owned by the browser agent, not publish-cli."
+        : "publish-cli does not access this website; authentication and composer verification belong to the human-operated handoff.",
     },
     healed: [],
     requiresHuman: true,
     nextStep: {
-      executor: "agent_browser",
+      executor: isXhs ? "agent_browser" : "human",
       entryUrl: isXhs ? XHS_ENTRY_URL : ONEPOINT3ACRES_ENTRY_URL,
       workflowRef: isXhs ? XHS_CAPABILITY_WORKFLOW_REF : ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
       instruction: isXhs
         ? "Open the creator portal with the browser agent, let the operator scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
-        : "Open 1point3acres with the browser agent, complete any permitted human login or challenge, positively verify the authenticated state, and continue in that same browser context.",
+        : "Have the human open 1point3acres in a normal authorized browser, complete login or challenge, confirm the intended composer state, and continue the manual handoff in that same browser context; publish-cli and browser agents must not operate the website.",
       continueInSameContext: true,
     },
   };
@@ -146,22 +148,25 @@ export function createAuthProbeRegistry(deps: AuthProbeDependencies = {}): AuthP
     linkedin: () => probePassiveBrowserAuth(configs.linkedin, deps.browserBackend, now()),
     reddit: () => probePassiveBrowserAuth(configs.reddit, deps.browserBackend, now()),
     wechat: () => probeWechatAuth({ ...deps.wechat, now }),
-    xhs: async () => agentOwnedDescriptor("xhs", now()),
-    "1point3acres": async () => agentOwnedDescriptor("1point3acres", now()),
+    xhs: async () => externallyOwnedDescriptor("xhs", now()),
+    "1point3acres": async () => externallyOwnedDescriptor("1point3acres", now()),
   };
   return { ...registry, ...deps.probeOverrides };
 }
 
 function failureNextStep(platform: AuthPlatform, status: "network_error" | "probe_inconclusive") {
-  const browserOwned = platform === "xhs" || platform === "1point3acres";
+  const browserOwned = platform === "xhs";
+  const humanHandoff = platform === "1point3acres";
   return {
-    executor: browserOwned ? ("agent_browser" as const) : ("operator" as const),
+    executor: browserOwned ? ("agent_browser" as const) : humanHandoff ? ("human" as const) : ("operator" as const),
     workflowRef: `${platform}#auth-probe-${status === "network_error" ? "network" : "inconclusive"}`,
     instruction:
       status === "network_error"
         ? `Restore network access for ${platform}, then rerun publish auth check --platform ${platform}.`
+        : humanHandoff
+          ? "Have the human inspect the 1point3acres login/composer state in a normal authorized browser; publish-cli and browser agents must not operate the website."
         : `Inspect the ${platform} authentication workflow without exposing credentials, then rerun publish auth check --platform ${platform}; do not infer readiness from local state alone.`,
-    continueInSameContext: browserOwned,
+    continueInSameContext: browserOwned || humanHandoff,
   };
 }
 
@@ -179,7 +184,7 @@ export function unexpectedProbeReadiness(
     status,
     checkedAt: new Date(nowMs).toISOString(),
     verificationMode:
-      platform === "wechat" ? "api" : platform === "xhs" || platform === "1point3acres" ? "browser_agent" : "passive_browser",
+      platform === "wechat" ? "api" : platform === "xhs" ? "browser_agent" : platform === "1point3acres" ? "human_handoff" : "passive_browser",
     evidence: {
       liveProbe: network ? "network_error" : "inconclusive",
       note: network

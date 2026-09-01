@@ -32,8 +32,10 @@ failure as logout. Never copy cookies between machines.
 
 WeChat may renew an expired stable token as part of its normal credential
 exchange; the receipt reports that explicitly as `healed: ["token_refreshed"]`.
-`xhs` and `1point3acres` intentionally return `agent_check_required` because
-their authenticated browser contexts are agent-owned.
+`xhs` and `1point3acres` intentionally return `agent_check_required` because the
+CLI cannot prove their live auth state. For `xhs`, the returned browser-agent
+step owns authentication and drafting. For `1point3acres`, the returned executor
+is the human and all website work stays in a normal human-operated browser.
 
 `probe_inconclusive` is not an ambiguous permission to proceed. It means the
 CLI could not positively classify the visible page, so `ready` is false. Open
@@ -50,8 +52,13 @@ account signal. Inspect `evidence.note` to see when the headful retry occurred.
 ## What it does
 
 - **channel info** — `publish <channel> info [--json]` returns every configured
-  format in a versioned static-capability envelope plus separate passive
-  readiness. Non-ready auth remains exit 0; follow the sanitized `nextStep`.
+  format in a versioned static-capability envelope plus separate bounded
+  readiness. Treat it as the channel execution oracle: it assigns CLI/agent/human/
+  platform responsibility, explains excluded capabilities, names content/media
+  specifications, and supplies an ordered workflow with verification and a hard
+  stop. This applies even when execution belongs to an agent browser or human
+  handoff rather than a CLI draft command. Non-ready auth remains exit 0; follow
+  the sanitized `nextStep`.
 - **auth check** — passive, sanitized authentication readiness for one or more
   channels; returns local evidence, positive live proof, status, and an executable
   recovery step. Never logs in.

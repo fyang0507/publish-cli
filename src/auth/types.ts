@@ -58,7 +58,7 @@ export interface AuthReadiness {
   ready: boolean;
   status: AuthStatus;
   checkedAt: string;
-  verificationMode: "passive_browser" | "api" | "browser_agent";
+  verificationMode: "passive_browser" | "api" | "browser_agent" | "human_handoff";
   evidence: AuthEvidence;
   healed: string[];
   requiresHuman: boolean;

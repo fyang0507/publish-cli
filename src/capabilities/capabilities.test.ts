@@ -53,6 +53,12 @@ function collectFacts(value: unknown, facts: Array<{ value: unknown; evidence: R
   return facts;
 }
 
+function resolveDotPath(value: unknown, path: string): unknown {
+  return path.split(".").reduce<unknown>((cursor, key) =>
+    cursor && typeof cursor === "object" ? (cursor as Record<string, unknown>)[key] : undefined,
+  value);
+}
+
 test("registry is complete, versioned, JSON-serializable, and evidence-aware", () => {
   assert.deepEqual(Object.keys(CHANNEL_CAPABILITIES).sort(), [...AUTH_PLATFORMS].sort());
   for (const channel of AUTH_PLATFORMS) {
@@ -61,14 +67,41 @@ test("registry is complete, versioned, JSON-serializable, and evidence-aware", (
     assert.equal(entry.channel, channel);
     assert.doesNotThrow(() => JSON.stringify(entry));
     assert.ok(entry.state.recovery.length > 0, `${channel} has state recovery guidance`);
+    for (const role of ["cli", "agent", "human", "platform"] as const) {
+      assert.ok(entry.responsibility[role].length > 0, `${channel} defines ${role} responsibility`);
+    }
+    assert.ok(entry.responsibility.rationale.length > 0, `${channel} explains its design boundary`);
+    assert.ok(entry.excludedCapabilities.length > 0, `${channel} explains unsupported capabilities`);
     for (const format of entry.formats) {
       assert.ok(format.usage.length > 0, `${channel}/${format.id} has invocation guidance`);
       assert.ok(format.humanHighlights.length > 0, `${channel}/${format.id} has human highlights`);
+      assert.equal(format.workflow.owner, entry.executionMode, `${channel}/${format.id} names the execution owner`);
+      assert.ok(format.workflow.preconditions.length > 0, `${channel}/${format.id} has preconditions`);
+      assert.ok(format.workflow.steps.length > 0, `${channel}/${format.id} has executable steps`);
+      assert.equal(new Set(format.workflow.steps.map((step) => step.id)).size, format.workflow.steps.length);
+      assert.ok(format.workflow.steps.every((step) => step.instruction && step.verification));
+      for (const step of format.workflow.steps) {
+        assert.ok(step.evidenceRefs.length > 0, `${channel}/${format.id}/${step.id} cites evidence`);
+        for (const evidenceRef of step.evidenceRefs) {
+          if (evidenceRef === "readiness" || evidenceRef === "auth") continue;
+          const resolved = resolveDotPath(format, evidenceRef);
+          assert.notEqual(resolved, undefined, `${channel}/${format.id} resolves ${evidenceRef}`);
+          assert.ok(collectFacts(resolved).length > 0, `${channel}/${format.id} ${evidenceRef} is evidence-bearing`);
+        }
+      }
+      assert.ok(format.workflow.successCriteria.length > 0, `${channel}/${format.id} has success criteria`);
+      assert.match(format.workflow.terminalBoundary, /Stop/i);
+      assert.ok(format.workflow.stopConditions.length > 1, `${channel}/${format.id} has explicit stops`);
+      assert.equal(new Set(format.workflow.stopConditions.map((item) => item.id)).size, format.workflow.stopConditions.length);
+      assert.deepEqual(
+        [...new Set(format.workflow.stopConditions.map((item) => item.outcome))].sort(),
+        ["abort", "needs_human", "success_terminal"],
+      );
     }
     const facts = collectFacts(entry);
     assert.ok(facts.length > 0, `${channel} has evidence facts`);
     for (const item of facts) {
-      assert.match(String(item.evidence.kind), /^(official_documentation|live_positive_fixture|read_only_api|unknown)$/);
+      assert.match(String(item.evidence.kind), /^(implementation_contract|official_documentation|live_positive_fixture|read_only_api|unknown)$/);
       assert.ok(String(item.evidence.source).length > 0);
       assert.match(String(item.evidence.lastVerified), /^\d{4}-\d{2}-\d{2}$/);
       if (item.value === null) assert.equal(item.evidence.kind, "unknown");
@@ -97,21 +130,56 @@ test("registry returns every configured format at once", () => {
 });
 
 test("invocation guidance maps every advertised override and implicit resolution rule", () => {
+  const xTweet = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "tweet")!;
+  for (const option of ["--long", "--dry-run", "--inspect"]) {
+    assert.match(xTweet.usage, new RegExp(option));
+  }
+
+  const xThread = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "thread")!;
+  for (const option of ["--dry-run", "--inspect"]) {
+    assert.match(xThread.usage, new RegExp(option));
+  }
+
   const xArticle = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article");
   assert.match(xArticle?.usage ?? "", /--format article --from/);
+  assert.match(xArticle?.usage ?? "", /--dry-run/);
+  assert.match(xArticle?.usage ?? "", /--inspect/);
   assert.ok(xArticle?.humanHighlights.some((item) => /ranks 5:2 images first/.test(item)));
   assert.ok(xArticle?.humanHighlights.some((item) => /first Markdown H1/.test(item)));
 
   const reddit = CHANNEL_CAPABILITIES.reddit.formats[0];
-  assert.match(reddit.usage, /--nsfw/);
-  assert.match(reddit.usage, /--spoiler/);
+  for (const option of ["--nsfw", "--spoiler", "--dry-run", "--inspect"]) {
+    assert.match(reddit.usage, new RegExp(option));
+  }
+
+  const linkedin = CHANNEL_CAPABILITIES.linkedin.formats[0];
+  for (const option of ["--media", "--bold", "--dry-run", "--inspect"]) {
+    assert.match(linkedin.usage, new RegExp(option));
+  }
 
   const wechat = CHANNEL_CAPABILITIES.wechat.formats[0];
-  for (const option of ["--title", "--author", "--digest", "--cover", "--source-url", "--keep-links"]) {
+  for (const option of ["--title", "--author", "--digest", "--cover", "--source-url", "--keep-links", "--out", "--dry-run"]) {
     assert.match(wechat.usage, new RegExp(option));
   }
   assert.match(wechat.fields.find((field) => field.name === "title")?.description ?? "", /after resolution/);
   assert.match(wechat.fields.find((field) => field.name === "cover")?.description ?? "", /frontmatter/);
+});
+
+test("workflow success claims stay bounded to observed receipts", () => {
+  const tweet = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "tweet")!;
+  assert.match(tweet.workflow.successCriteria.join(" "), /verified=yes/);
+  assert.match(tweet.workflow.stopConditions.find((item) => item.id === "stage_unconfirmed")?.action ?? "", /Do not claim/);
+
+  const thread = CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "thread")!;
+  assert.match(thread.workflow.successCriteria.join(" "), /first-row receipt.*bounded evidence/);
+  assert.doesNotMatch(thread.workflow.successCriteria.join(" "), /all numbered rows were staged/);
+
+  const linkedin = CHANNEL_CAPABILITIES.linkedin.formats[0];
+  assert.match(linkedin.workflow.successCriteria.join(" "), /media.*visibly confirmed/);
+
+  const reddit = CHANNEL_CAPABILITIES.reddit.formats[0];
+  assert.match(reddit.workflow.successCriteria.join(" "), /no stronger reopen\/persistence claim/);
+  assert.match(reddit.workflow.stopConditions.find((item) => item.id === "save_unconfirmed")?.action ?? "", /do not claim persistence/i);
 });
 
 test("documented values, live conflicts, lower bounds, actual maxima, and unknowns remain separate", () => {
@@ -188,9 +256,17 @@ test("human info is readiness-first, concise, and actionable while JSON owns ful
   assert.match(rendered, /32\/16\/120 字/);
   assert.match(rendered, /WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL/);
   assert.match(rendered, /serverAuthoritative:/);
+  assert.match(rendered, /Responsibility boundary:/);
+  assert.match(rendered, /Workflow owner: cli_transport/);
+  assert.match(rendered, /Execute:\n\s+1\. \[agent\]/);
+  assert.match(rendered, /Verify: The API probe is authenticated/);
+  assert.match(rendered, /Terminal boundary: Stop in 草稿箱/);
+  assert.match(rendered, /ip_not_allowlisted \[needs_human; human\]/);
+  assert.match(rendered, /2\.35:1 and 1:1/);
+  assert.match(rendered, /Excluded, deferred, or external capabilities:/);
   assert.match(rendered, /Forbidden actions:\n  - freepublish\/\*/);
   assert.match(rendered, /Evidence: use --json/);
-  assert.ok(rendered.split("\n").length < 60);
+  assert.ok(rendered.split("\n").length < 120);
 });
 
 test("agent-owned entries use shipped channel references and truthful context boundaries", async () => {
@@ -205,13 +281,100 @@ test("agent-owned entries use shipped channel references and truthful context bo
   assert.equal(xhs.nextStep?.workflowRef, XHS_CAPABILITY_WORKFLOW_REF);
   assert.equal(xhs.nextStep?.continueInSameContext, true);
   assert.equal(acres.status, "agent_check_required");
-  assert.equal(acres.nextStep?.executor, "agent_browser");
+  assert.equal(acres.nextStep?.executor, "human");
+  assert.equal(acres.verificationMode, "human_handoff");
   assert.equal(acres.nextStep?.entryUrl, CHANNEL_CAPABILITIES["1point3acres"].auth.entryUrl);
   assert.equal(acres.nextStep?.workflowRef, ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF);
   assert.equal(acres.nextStep?.continueInSameContext, true);
   assert.equal(CHANNEL_CAPABILITIES["1point3acres"].executionMode, "human_handoff");
+  assert.match(CHANNEL_CAPABILITIES["1point3acres"].auth.mode, /human-owned normal-browser/);
+  assert.doesNotMatch(CHANNEL_CAPABILITIES["1point3acres"].auth.mode, /agent-owned/);
   assert.match(CHANNEL_CAPABILITIES.xhs.formats[0].terminalState, /browser-local/);
   assert.match(CHANNEL_CAPABILITIES.xhs.formats[0].terminalState, /not a cloud draft/);
+});
+
+test("agent_check_required renders as an actionable external preflight with consistent ownership", async () => {
+  const registry = createAuthProbeRegistry({ now: () => Date.parse(CHECKED_AT) });
+  const xhsReadiness = await registry.xhs();
+  const xhsRendered = renderChannelInfo({
+    schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
+    channel: "xhs",
+    capabilities: CHANNEL_CAPABILITIES.xhs,
+    readiness: xhsReadiness,
+  });
+  assert.match(xhsRendered, /Readiness: external preflight required \(agent_check_required\)/);
+  assert.match(xhsRendered, /Next: Open the creator portal with the browser agent/);
+  assert.match(xhsRendered, /1\. \[agent\] Open the capability entry URL/);
+  assert.match(xhsRendered, /Supplemental reference: .*not required; the executable workflow is embedded below/);
+
+  const acresReadiness = await registry["1point3acres"]();
+  const acresRendered = renderChannelInfo({
+    schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
+    channel: "1point3acres",
+    capabilities: CHANNEL_CAPABILITIES["1point3acres"],
+    readiness: acresReadiness,
+  });
+  assert.match(acresRendered, /Next: Have the human open 1point3acres in a normal authorized browser/);
+  assert.match(acresRendered, /Authentication: human-owned normal-browser/);
+  assert.doesNotMatch(acresRendered, /Authentication: agent-owned/);
+});
+
+test("agent-browser and handoff info are standalone execution oracles", () => {
+  const xhs = CHANNEL_CAPABILITIES.xhs.formats[0];
+  const xhsConstraints = xhs.constraints as any;
+  assert.deepEqual(xhsConstraints.import.acceptedExtensions.value, [".md", ".docx", ".txt"]);
+  assert.equal(xhsConstraints.editor.titleVisibleMaximum.value, 64);
+  assert.equal(xhsConstraints.editor.bodyVisibleMaximum.value, 10000);
+  assert.equal(xhsConstraints.oneClickLayout.finalCaptionVisibleMaximum.value, 1000);
+  assert.equal(xhsConstraints.oneClickLayout.finalTitleMaximum.value, null);
+  assert.deepEqual(xhsConstraints.deferredImageTextPreparation.recommendedAspectRatioRange.value, {
+    tallest: "3:4",
+    widest: "2:1",
+  });
+  assert.deepEqual(xhs.workflow.steps.map((step) => step.id), [
+    "authenticate",
+    "import",
+    "set_title",
+    "choose_output_branch",
+    "complete_post_layout",
+    "save",
+    "reopen",
+  ]);
+  assert.doesNotMatch(`${xhs.usage} ${xhs.summary}`, /issue #35|future|not implemented in #32/i);
+
+  const acres = CHANNEL_CAPABILITIES["1point3acres"].formats[0];
+  const acresConstraints = acres.constraints as any;
+  assert.equal(acresConstraints.curatedDestinations.workplaceReflection.forumId, 98);
+  assert.equal(acresConstraints.curatedDestinations.chineseLife.forumId, 29);
+  assert.equal(acresConstraints.curatedDestinations.jobSearch.forumId, 28);
+  assert.deepEqual(Object.keys(acresConstraints.curatedDestinations.jobSearch.requiredMetadata), [
+    "jobYear",
+    "jobCategory",
+    "major",
+    "experienceRange",
+    "regionRequired",
+  ]);
+  assert.equal(acresConstraints.composer.title.measurement.value, null);
+  assert.equal(acresConstraints.composer.body.maximum.value, null);
+  assert.match(acres.workflow.steps.find((step) => step.id === "save_draft")?.instruction ?? "", /保存草稿/);
+  assert.doesNotMatch(`${acres.usage} ${acres.summary}`, /issue #37|future|not implemented in #32/i);
+});
+
+test("channel media specifications are discoverable without inferring unknown maxima", () => {
+  const xCover = (CHANNEL_CAPABILITIES.x.formats.find((format) => format.id === "article")?.constraints as any).cover;
+  assert.equal(xCover.recommendedAspectRatio.value, "5:2");
+  assert.equal(xCover.maximumBytes.value, null);
+
+  const linkedinImages = (CHANNEL_CAPABILITIES.linkedin.formats[0].constraints as any).images;
+  assert.deepEqual(linkedinImages.documentedAspectRatioRange.value, { widest: "3:1", tallest: "4:5" });
+  assert.equal(linkedinImages.actualAcceptedAspectRatioRange.value, null);
+
+  const wechatCover = (CHANNEL_CAPABILITIES.wechat.formats[0].constraints as any).cover;
+  assert.deepEqual(wechatCover.supportedCropRatios.value, ["2.35:1", "1:1"]);
+  assert.equal(wechatCover.requiredInputAspectRatio.value, null);
+  const wechatPaths = (CHANNEL_CAPABILITIES.wechat.formats[0].constraints as any).pathResolution;
+  assert.equal(wechatPaths.markdownRelativeBodyImages.value, "directory containing the --from Markdown file");
+  assert.equal(wechatPaths.absolutePathsAccepted.value, true);
 });
 
 test("X uses official twitter-text fixtures from issue #40", () => {

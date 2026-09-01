@@ -24,17 +24,21 @@ complete QR login when required, positively verify the creator UI, and continue
 in that same context. The long-article terminal state is a browser-local draft,
 not a cloud draft; it disappears if browser data is cleared and must be reopened
 before a workflow claims persistence. The CLI does not implement selectors,
-import, composer, or draft execution in issue #32; issue #35 owns that detailed
-workflow. Never click the final publish action.
+import, composer, or draft execution. `publish xhs info` itself is the execution
+oracle: its responsibility boundary, format fields/specifications, ordered
+workflow, verification criteria, and stop condition tell any capable headful
+browser agent how to import, optionally run one-click layout/topics, save, and
+reopen the draft. Never click a final, private, or scheduled publish action.
 
 ## 1point3acres discovery boundary
 
 `publish 1point3acres info` is an offline capability/manual-handoff contract.
-The shared auth descriptor still returns an agent-owned, same-context browser
-recovery step, but publish-cli performs no crawl, login, composer fill, draft save,
-or submit action. Use only authorized visible inspection and hand prepared title
-and body content to the human operator. Issue #37 owns curated forum mappings and
-the detailed handoff procedure. Never click the final submit action.
+The CLI performs no crawl, login, composer fill, draft save, or submit action.
+`publish 1point3acres info` itself contains the curated forum mappings, weighted
+title evidence, destination-specific required metadata, and the complete textual
+handoff procedure. A human uses that handoff in a normal authorized browser,
+saves with `保存草稿`, and reopens `草稿箱`; the final submit action remains outside
+the workflow.
 
 ## Capability matrix
 

@@ -128,8 +128,10 @@ override the symlink target directly.
 
 The execution paths can auto-log-in, but they are not readiness probes and must
 not be used to diagnose ambiguous auth state. Run `publish auth check` first.
-When its `nextStep` requires login, use the agent-owned headful browser context;
-**X blocks headless login** and Reddit commonly raises CAPTCHA.
+When its `nextStep` requires login, follow the named executor and retain the
+required context. XHS uses an agent-owned headful browser; 1point3acres is a
+human-only normal-browser handoff. **X blocks headless login** and Reddit
+commonly raises CAPTCHA.
 
 The legacy command-assisted setup paths remain available for explicit,
 operator-observed calibration:

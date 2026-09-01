@@ -56,9 +56,14 @@ function compactValue(value: unknown): string {
 export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
   const capabilities = envelope.capabilities;
   const readiness = envelope.readiness;
+  const readinessLabel = readiness.ready
+    ? "ready"
+    : readiness.status === "agent_check_required"
+      ? "external preflight required"
+      : "not ready";
   const out = [
     `${capabilities.displayName} channel info`,
-    `Readiness: ${readiness.ready ? "ready" : "not ready"} (${readiness.status})`,
+    `Readiness: ${readinessLabel} (${readiness.status})`,
     "Exit behavior: info returns 0 even when not ready; inspect readiness.ready/status in automation.",
   ];
 
@@ -66,14 +71,20 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
   if (readiness.nextStep) {
     out.push(`Next: ${readiness.nextStep.instruction}`);
     if (readiness.nextStep.entryUrl) out.push(`Recovery entry: ${readiness.nextStep.entryUrl}`);
-    out.push(`Recovery reference: ${readiness.nextStep.workflowRef}`);
+    out.push(`Supplemental recovery reference: ${readiness.nextStep.workflowRef} (the executable workflow is embedded below)`);
   }
 
   out.push(
     `Static capabilities: ${capabilities.executionMode} — ${capabilities.supportBoundary}`,
+    "Responsibility boundary:",
+    `  - CLI: ${compactValue(capabilities.responsibility.cli)}`,
+    `  - Agent: ${compactValue(capabilities.responsibility.agent)}`,
+    `  - Human: ${compactValue(capabilities.responsibility.human)}`,
+    `  - Platform: ${compactValue(capabilities.responsibility.platform)}`,
+    ...capabilities.responsibility.rationale.map((item) => `  - Why: ${item}`),
     `Authentication: ${capabilities.auth.mode}`,
     `Capability entry: ${capabilities.auth.entryUrl}`,
-    `Workflow: ${capabilities.auth.workflowRef}`,
+    `Supplemental reference: ${capabilities.auth.workflowRef} (not required; the executable workflow is embedded below)`,
     "State:",
     `  - Machine-local: ${compactValue(capabilities.state.machineLocal)}`,
     `  - Durable: ${compactValue(capabilities.state.durable)}`,
@@ -99,6 +110,24 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
       ...Object.entries(format.validation).map(
         ([key, value]) => `      - ${key}: ${compactValue(value)}`,
       ),
+      `    Goal: ${format.workflow.objective}`,
+      `    Workflow owner: ${format.workflow.owner}`,
+      "    Preconditions:",
+      ...format.workflow.preconditions.map((item) => `      - ${item}`),
+      "    Execute:",
+      ...format.workflow.steps.map(
+        (step, index) =>
+          `      ${index + 1}. [${step.actor}] ${step.instruction}\n` +
+          `         Verify: ${step.verification}`,
+      ),
+      "    Success:",
+      ...format.workflow.successCriteria.map((item) => `      - ${item}`),
+      `    Terminal boundary: ${format.workflow.terminalBoundary}`,
+      "    Stop conditions:",
+      ...format.workflow.stopConditions.map(
+        (item) =>
+          `      - ${item.id} [${item.outcome}; ${item.actor}] when ${item.when}: ${item.action}`,
+      ),
     );
     if (format.gotchas.length) {
       out.push("    Gotchas:", ...format.gotchas.map((gotcha) => `      - ${gotcha}`));
@@ -107,6 +136,15 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
 
   if (capabilities.gotchas.length) {
     out.push("Channel gotchas:", ...capabilities.gotchas.map((gotcha) => `  - ${gotcha}`));
+  }
+  if (capabilities.excludedCapabilities.length) {
+    out.push(
+      "Excluded, deferred, or external capabilities:",
+      ...capabilities.excludedCapabilities.flatMap((item) => [
+        `  - ${item.id} (${item.disposition}; owner: ${item.owner}): ${item.reason}`,
+        ...(item.alternative ? [`    Alternative: ${item.alternative}`] : []),
+      ]),
+    );
   }
   out.push(
     "Forbidden actions:",
@@ -119,11 +157,11 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
 export function registerChannelInfoCommand(parent: Command, channel: AuthPlatform): void {
   parent
     .command("info")
-    .description("Show all format capabilities plus passive readiness (exit 0 even when not ready)")
+    .description("Show the complete channel execution oracle plus bounded auth readiness (exit 0 even when not ready)")
     .option("--json", "Emit the stable machine-readable channel-info envelope")
     .addHelpText(
       "after",
-      "\nReturns every configured format at once. Readiness failures do not hide static capabilities and do not make info fail.\n",
+      "\nReturns every configured format at once. Browser readiness probes are passive; WeChat may perform its normal token exchange and report token_refreshed. Readiness failures do not hide capabilities or make info fail.\n",
     )
     .action(async (opts: ChannelInfoOptions) => {
       const execution = await executeChannelInfo(channel);

@@ -4,6 +4,7 @@ export const CHANNEL_CAPABILITY_SCHEMA_VERSION = "publish.channel-capabilities/v
 export const CHANNEL_INFO_SCHEMA_VERSION = "publish.channel-info/v1" as const;
 
 export type EvidenceKind =
+  | "implementation_contract"
   | "official_documentation"
   | "live_positive_fixture"
   | "read_only_api"
@@ -33,11 +34,47 @@ export interface CapabilityFact<T extends JsonValue = JsonValue> extends JsonObj
 
 export type ExecutionMode = "cli_transport" | "agent_browser" | "human_handoff";
 export type TransportSupport = "supported" | "agent_operated" | "manual_handoff_only";
+export type WorkflowActor = "agent" | "cli" | "human" | "platform";
+export type CapabilityDisposition = "intentionally_excluded" | "deferred" | "external";
+export type WorkflowStopOutcome = "abort" | "needs_human" | "success_terminal";
 
 export interface CapabilityField {
   name: string;
   required: boolean;
   description: string;
+}
+
+export interface CapabilityWorkflowStep {
+  id: string;
+  actor: WorkflowActor;
+  instruction: string;
+  verification: string;
+  /** `readiness`, `auth`, or dot paths to evidence-bearing facts in this format. */
+  evidenceRefs: string[];
+}
+
+export interface WorkflowStopCondition {
+  id: string;
+  when: string;
+  actor: WorkflowActor;
+  action: string;
+  outcome: WorkflowStopOutcome;
+}
+
+/**
+ * An executable procedure, not a pointer to another issue. A capable agent must
+ * be able to reach the declared terminal state from these steps and the format
+ * fields/constraints alone, regardless of whether execution belongs to the CLI,
+ * an agent-owned browser, or a human handoff.
+ */
+export interface CapabilityWorkflow {
+  objective: string;
+  owner: ExecutionMode;
+  preconditions: string[];
+  steps: CapabilityWorkflowStep[];
+  successCriteria: string[];
+  terminalBoundary: string;
+  stopConditions: WorkflowStopCondition[];
 }
 
 export interface ChannelFormatCapability {
@@ -55,6 +92,7 @@ export interface ChannelFormatCapability {
   terminalState: string;
   constraints: JsonObject;
   validation: JsonObject;
+  workflow: CapabilityWorkflow;
   gotchas: string[];
 }
 
@@ -71,12 +109,30 @@ export interface ChannelStateCapability {
   recovery: string[];
 }
 
+export interface ChannelResponsibilityBoundary {
+  cli: string[];
+  agent: string[];
+  human: string[];
+  platform: string[];
+  rationale: string[];
+}
+
+export interface ChannelExcludedCapability {
+  id: string;
+  disposition: CapabilityDisposition;
+  reason: string;
+  owner: Exclude<WorkflowActor, "cli">;
+  alternative: string | null;
+}
+
 export interface ChannelStaticCapabilities {
   schemaVersion: typeof CHANNEL_CAPABILITY_SCHEMA_VERSION;
   channel: AuthPlatform;
   displayName: string;
   executionMode: ExecutionMode;
   supportBoundary: string;
+  responsibility: ChannelResponsibilityBoundary;
+  excludedCapabilities: ChannelExcludedCapability[];
   auth: ChannelAuthCapability;
   state: ChannelStateCapability;
   formats: ChannelFormatCapability[];

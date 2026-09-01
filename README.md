@@ -1,13 +1,18 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. X, LinkedIn, Reddit, and WeChat provide draft-only transports; Xiaohongshu and 1point3acres currently provide capability discovery/readiness boundaries only. Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for the full vision and roadmap, and [AGENTS.md](./AGENTS.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. X, LinkedIn, Reddit, and WeChat provide draft-only transports; Xiaohongshu is executed by an agent-owned browser and 1point3acres by a human handoff, both guided by the CLI's offline `info` oracle. Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for the full vision and roadmap, and [AGENTS.md](./AGENTS.md) for the high-level agent orientation.
 
 ## Discover channel capabilities
 
 Run `publish <channel> info` (or `--json`) before channel work. It returns every
 configured format at once in a versioned envelope with `capabilities` kept
-separate from passive `readiness`. Missing auth and probe failures remain exit 0
-so static limits and recovery steps are always available. There is no `--format`.
+separate from side-effect-bounded `readiness`. Browser probes are passive;
+WeChat may perform its normal token exchange and report `token_refreshed`.
+Missing auth and probe failures remain exit 0
+so static limits and recovery steps are always available. The capability payload
+is an execution oracle: responsibility lines, exclusions, format/media specs,
+ordered steps, verification, and stop conditions are complete even when the work
+continues outside the CLI. There is no `--format`.
 
 ```bash
 publish x info --json
