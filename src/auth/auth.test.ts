@@ -168,24 +168,61 @@ test("Reddit network-security wall is recognized as a conclusive access block", 
   assert.equal(isKnownRedditAccessBlock(403, "ordinary forbidden response"), false);
 });
 
-test("Reddit API fallback distinguishes authenticated and logged-out sessions", async () => {
-  const page = (result: { status: number; parsed: boolean; hasAccount: boolean }) =>
+test("Reddit API fallback requires structured account evidence before reporting logout", async () => {
+  const page = (result: {
+    status: number;
+    parsed: boolean;
+    hasAccount: boolean;
+    accountAbsent: boolean;
+    authRejected: boolean;
+  }) =>
     ({ evaluate: async () => result }) as unknown as Page;
 
   assert.deepEqual(
-    await probeRedditApiSession(page({ status: 200, parsed: true, hasAccount: true })),
+    await probeRedditApiSession(
+      page({ status: 200, parsed: true, hasAccount: true, accountAbsent: false, authRejected: false }),
+    ),
     {
       kind: "authenticated",
       note: "Reddit's account endpoint positively identified an authenticated session.",
     },
   );
   assert.deepEqual(
-    await probeRedditApiSession(page({ status: 403, parsed: false, hasAccount: false })),
+    await probeRedditApiSession(
+      page({ status: 200, parsed: true, hasAccount: false, accountAbsent: true, authRejected: false }),
+    ),
     {
       kind: "logged_out",
-      note: "Reddit's account endpoint rejected the session (HTTP 403).",
+      note: "Reddit's account endpoint returned no authenticated account.",
     },
   );
+  assert.deepEqual(
+    await probeRedditApiSession(
+      page({ status: 401, parsed: true, hasAccount: false, accountAbsent: false, authRejected: true }),
+    ),
+    {
+      kind: "logged_out",
+      note: "Reddit's account endpoint returned a structured authentication rejection (HTTP 401).",
+    },
+  );
+});
+
+test("Reddit API fallback treats an opaque non-JSON 403 as an access wall, never logout", async () => {
+  const page = (parsed: boolean) => ({
+    evaluate: async () => ({
+      status: 403,
+      parsed,
+      hasAccount: false,
+      accountAbsent: false,
+      authRejected: false,
+    }),
+  }) as unknown as Page;
+
+  assert.deepEqual(await probeRedditApiSession(page(false)), {
+    kind: "network_error",
+    note: "Reddit's account endpoint returned an opaque HTTP 403 access wall.",
+  });
+  assert.equal(await probeRedditApiSession(page(true)), undefined);
 });
 
 test("Reddit passive probe retries headful after a headless network-security wall", async () => {
@@ -614,6 +651,55 @@ test("auth CLI help lists platform modes and removed --all fails actionably with
   assert.equal(removed.status, 2);
   assert.match(removed.stderr, /--all was removed/);
   assert.match(removed.stderr, /--platform x,linkedin,reddit/);
+});
+
+test("auth CLI maps every documented usage error to exit 2 at the public parse boundary", () => {
+  const cases: Array<{ name: string; args: string[]; message: RegExp }> = [
+    {
+      name: "malformed CSV",
+      args: ["auth", "check", "--platform", "x,,reddit"],
+      message: /comma-separated list without empty names/,
+    },
+    {
+      name: "missing platform option value",
+      args: ["auth", "check", "--platform"],
+      message: /option '--platform <names>' argument missing/,
+    },
+    {
+      name: "unknown option",
+      args: ["auth", "check", "--unknown-option"],
+      message: /unknown option '--unknown-option'/,
+    },
+    {
+      name: "removed all",
+      args: ["auth", "check", "--all"],
+      message: /--all was removed/,
+    },
+    {
+      name: "missing platform",
+      args: ["auth", "check"],
+      message: /Specify --platform <names>/,
+    },
+    {
+      name: "unknown platform",
+      args: ["auth", "check", "--platform", "x,unknown"],
+      message: /Unknown platform\(s\): unknown/,
+    },
+  ];
+
+  for (const fixture of cases) {
+    const run = spawnSync(process.execPath, [CLI_PATH, ...fixture.args], { encoding: "utf8" });
+    assert.equal(run.status, 2, `${fixture.name}: ${run.stderr}`);
+    assert.match(run.stderr, fixture.message, fixture.name);
+  }
+
+  const nonReady = spawnSync(
+    process.execPath,
+    [CLI_PATH, "auth", "check", "--platform", "xhs", "--json"],
+    { encoding: "utf8" },
+  );
+  assert.equal(nonReady.status, 1);
+  assert.equal((JSON.parse(nonReady.stdout) as { results: Array<{ ready: boolean }> }).results[0].ready, false);
 });
 
 test("auth CLI zero-state checks are repeatable and create no profile or token state", () => {

@@ -40,8 +40,9 @@ between machines.
 
 Reddit auth preflight handles its known headless HTTP 403 wall before asking for
 recovery: it passively retries headful once, then uses `/api/me.json` if the DOM
-auth markers drift. The retry never clicks, fills, or logs in and is reported in
-`evidence.note`.
+auth markers drift. Only structured account absence/auth rejection proves logout;
+an opaque/non-JSON 403 is a non-ready network error. The retry never clicks,
+fills, or logs in and is reported in `evidence.note`.
 
 ## Credentials — `.env`
 

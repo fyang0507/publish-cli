@@ -116,13 +116,15 @@ Run any subcommand with `--help` for the authoritative flag list.
 opens a composer. The comma-separated platform list is explicit; there is no
 `--all`. Each receipt has a binary `ready` field plus a diagnostic `status`.
 Exit `0` means all requested platforms are ready, `1` means at least one needs
-its returned `nextStep`, and `2` means invalid usage. An absent or empty browser
+its returned `nextStep`, and `2` means invalid usage (including malformed or
+missing platform values, unknown options/platforms, and removed `--all`). An absent or empty browser
 profile returns `login_required` without launching Playwright or creating local
 state. `probe_inconclusive` is non-ready and directs the agent to inspect the
 entry URL headfully. Reddit first handles its known headless HTTP 403 wall itself:
 it passively retries headful once (a browser window may briefly appear and then
-closes) and uses `/api/me.json` as a DOM-drift fallback, so a normal Reddit check
-resolves to ready or login-required without agent interpretation. WeChat may
+closes) and uses `/api/me.json` as a DOM-drift fallback. Only a structured account
+response or authentication rejection proves logout; an opaque/non-JSON 403 stays
+a non-ready network error. WeChat may
 automatically renew its short-lived token and reports that as
 `healed: ["token_refreshed"]`.
 

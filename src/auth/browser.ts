@@ -319,22 +319,47 @@ export async function probeRedditApiSession(page: Page): Promise<BrowserLiveObse
       const response = await fetch("/api/me.json", { credentials: "include" });
       let parsed = false;
       let hasAccount = false;
+      let accountAbsent = false;
+      let authRejected = false;
       try {
         const value = (await response.json()) as unknown;
         parsed = true;
-        if (typeof value === "object" && value !== null && "data" in value) {
-          const data = (value as { data?: unknown }).data;
+        if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+          const record = value as Record<string, unknown>;
+          const data = record.data;
           hasAccount =
             typeof data === "object" &&
             data !== null &&
             "name" in data &&
             typeof (data as { name?: unknown }).name === "string" &&
             (data as { name: string }).name.length > 0;
+
+          // A structured 200 response with no account data is positive absence
+          // evidence. Arbitrary parseable primitives or arrays are schema drift,
+          // not proof that the user is logged out.
+          accountAbsent =
+            response.status === 200 &&
+            !hasAccount &&
+            (Object.keys(record).length === 0 ||
+              ("data" in record &&
+                (data == null ||
+                  (typeof data === "object" && data !== null && !Array.isArray(data)))));
+
+          // Reddit's JSON auth error envelope is `{ message, error }`. Status
+          // alone is insufficient: opaque 401/403 responses are commonly WAF or
+          // network-security walls and must never be reinterpreted as logout.
+          const errorCode = record.error;
+          const message = record.message;
+          authRejected =
+            (response.status === 401 || response.status === 403) &&
+            errorCode === response.status &&
+            typeof message === "string" &&
+            /unauthorized|authentication required|login required|logged[ -]?out/i.test(message);
         }
       } catch {
         // The caller classifies non-JSON or unexpected responses below.
       }
-      return { status: response.status, parsed, hasAccount };
+      return { status: response.status, parsed, hasAccount, accountAbsent, authRejected };
     });
 
     if (result.status === 200 && result.hasAccount) {
@@ -343,16 +368,22 @@ export async function probeRedditApiSession(page: Page): Promise<BrowserLiveObse
         note: "Reddit's account endpoint positively identified an authenticated session.",
       };
     }
-    if (result.status === 401 || result.status === 403) {
+    if (result.authRejected) {
       return {
         kind: "logged_out",
-        note: `Reddit's account endpoint rejected the session (HTTP ${result.status}).`,
+        note: `Reddit's account endpoint returned a structured authentication rejection (HTTP ${result.status}).`,
       };
     }
-    if (result.status === 200 && result.parsed) {
+    if (result.accountAbsent) {
       return {
         kind: "logged_out",
         note: "Reddit's account endpoint returned no authenticated account.",
+      };
+    }
+    if (result.status === 403 && !result.parsed) {
+      return {
+        kind: "network_error",
+        note: "Reddit's account endpoint returned an opaque HTTP 403 access wall.",
       };
     }
     if (result.status >= 500) {

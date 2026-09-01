@@ -22,6 +22,9 @@ the observation. It still never clicks, fills, or logs in. DOM drift falls
 back to Reddit's same-origin `/api/me.json` account endpoint. A successful headful
 retry is disclosed in `evidence.note`; a wall that also blocks headful is
 `network_error`, not `probe_inconclusive`.
+Only a structured account response or structured authentication rejection proves
+logout. An opaque/non-JSON 403 from the account endpoint is an access wall and
+returns `network_error`; status code alone never implies `login_required`.
 
 An absent or empty profile is deterministically not ready. The probe returns
 `login_required` with `liveProbe: not_run` and does not launch Playwright, create
@@ -54,7 +57,8 @@ The platform list is always explicit and deliberate. There is no `--all`.
 
 - Exit 0: every requested platform has `ready: true`.
 - Exit 1: one or more platforms have `ready: false`; follow `nextStep`.
-- Exit 2: invalid usage.
+- Exit 2: invalid usage, including a malformed platform list, missing option
+  value, unknown option/platform, removed `--all`, or a missing `--platform`.
 
 ## Future `info` integration
 
