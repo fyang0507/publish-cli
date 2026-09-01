@@ -155,16 +155,40 @@ function resolveBaseDir(): string {
 let cachedPaths: DataPaths | null = null;
 
 /**
+ * Resolve runtime paths WITHOUT creating any directories or files.
+ *
+ * Auth-readiness probes use this before launching a passive browser so a fresh
+ * machine's zero state is measured faithfully: merely asking where a profile
+ * would live must not turn an absent profile into apparent local evidence.
+ * Normal execution should continue to call dataPaths(), which ensures the
+ * directories exist.
+ */
+export function peekDataPaths(): DataPaths {
+  const baseDir = resolveBaseDir();
+  const dataRepo = tryResolveDataRepo();
+  const dbDir = dataRepo ? join(dataRepo, ".publish-cli") : baseDir;
+  return {
+    baseDir,
+    xProfileDir: join(baseDir, "x-profile"),
+    xCookieCache: join(baseDir, "x-cookies.json"),
+    liProfileDir: join(baseDir, "li-profile"),
+    liCookieCache: join(baseDir, "li-cookies.json"),
+    redditProfileDir: join(baseDir, "reddit-profile"),
+    redditCookieCache: join(baseDir, "reddit-cookies.json"),
+    wechatTokenCache: join(baseDir, "wechat-token.json"),
+    dbFile: join(dbDir, "publish.db"),
+  };
+}
+
+/**
  * Resolve the runtime data paths and ensure the base dir + profile dir exist.
  * Idempotent and cached for the process lifetime.
  */
 export function dataPaths(): DataPaths {
   if (cachedPaths) return cachedPaths;
 
-  const baseDir = resolveBaseDir();
-  const xProfileDir = join(baseDir, "x-profile");
-  const liProfileDir = join(baseDir, "li-profile");
-  const redditProfileDir = join(baseDir, "reddit-profile");
+  const resolved = peekDataPaths();
+  const { baseDir, xProfileDir, liProfileDir, redditProfileDir } = resolved;
 
   // Machine-local SESSION/secret artifacts (browser profile + cookie cache) live
   // under baseDir (~/.publish-cli), off any synced drive. One persistent profile
@@ -177,22 +201,10 @@ export function dataPaths(): DataPaths {
   // DURABLE state (the dedupe DB) lives in the DATA REPO (the agent workspace) so
   // it travels with the workspace rather than the machine. Falls back to baseDir
   // when no data repo is resolvable (ad-hoc use, no workspace/env/dev-config).
-  const dataRepo = tryResolveDataRepo();
-  const dbDir = dataRepo ? join(dataRepo, ".publish-cli") : baseDir;
+  const dbDir = dirname(resolved.dbFile);
   mkdirSync(dbDir, { recursive: true });
 
-  cachedPaths = {
-    baseDir,
-    xProfileDir,
-    xCookieCache: join(baseDir, "x-cookies.json"),
-    liProfileDir,
-    liCookieCache: join(baseDir, "li-cookies.json"),
-    redditProfileDir,
-    redditCookieCache: join(baseDir, "reddit-cookies.json"),
-    // WeChat: API-driven, no browser profile — only a machine-local token cache.
-    wechatTokenCache: join(baseDir, "wechat-token.json"),
-    dbFile: join(dbDir, "publish.db"),
-  };
+  cachedPaths = resolved;
   return cachedPaths;
 }
 

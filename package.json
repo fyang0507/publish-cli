@@ -7,16 +7,20 @@
   },
   "files": [
     "dist/",
+    "docs/AUTH_READINESS.md",
+    "docs/PRODUCT_SPEC.md",
+    "docs/WECHAT_DESIGN.md",
     "skills/article-references/",
     "skills/publish/",
     "README.md",
-    "CLAUDE.md",
+    "AGENTS.md",
     ".env.example",
     "watch.yaml.example",
     "publish.config.dev.yaml.example"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && node scripts/install-agent-skill-symlinks.js"
+    "build": "rm -rf dist && tsc && node scripts/install-agent-skill-symlinks.js",
+    "test": "npm run build && node --test dist/auth/*.test.js"
   },
   "dependencies": {
     "@google/genai": "^1.48.0",

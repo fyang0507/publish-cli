@@ -13,6 +13,37 @@ npm run build     # compiles to dist/ and symlinks the `publish` skill into the 
 - The build symlinks `skills/publish/` into an agent skills directory. Override the
   target with the `PUBLISH_SKILLS_DIR` env var.
 
+## Check authentication readiness first
+
+Run this before any channel operation and after moving to a new machine or
+leaving a profile idle for a long time:
+
+```bash
+publish auth check --platform x,linkedin,reddit --json
+publish auth check --platform wechat --json
+```
+
+Always name the intended comma-separated platform set; there is no `--all`.
+Exit `0` means every requested platform has `ready: true`; exit `1` means at
+least one has `ready: false` and needs recovery; exit `2` means invalid command
+usage. The probe is passive: browser checks navigate an existing profile but
+never call `ensureSession()`, submit credentials, or open a composer. An absent
+or empty profile returns `login_required` without launching a browser or
+creating profile state. WeChat may use App ID/Secret to renew its normal
+short-lived token and reports that repair in `healed`.
+
+For browser recovery, follow `nextStep` with the headful browser agent that will
+continue the task. Complete login/CAPTCHA/QR/2FA with the operator, positively
+verify the authenticated UI, and continue in the same browser context. A missing
+selector is `probe_inconclusive`, not proof of logout. Do not copy cookie files
+between machines.
+
+Reddit auth preflight handles its known headless HTTP 403 wall before asking for
+recovery: it passively retries headful once, then uses `/api/me.json` if the DOM
+auth markers drift. Only structured account absence/auth rejection proves logout;
+an opaque/non-JSON 403 is a non-ready network error. The retry never clicks,
+fills, or logs in and is reported in `evidence.note`.
+
 ## Credentials — `.env`
 
 Copy `.env.example` → `.env` (gitignored) and set:
@@ -95,9 +126,13 @@ override the symlink target directly.
 
 ## First login (headful)
 
-The browser paths (`watch`, `draft`, `reply`, `linkedin draft`, and the `reddit`
-commands) auto-log-in on first use into a persistent profile, then reuse it.
-**X blocks headless login**, so run the first login with `--inspect` (headful):
+The execution paths can auto-log-in, but they are not readiness probes and must
+not be used to diagnose ambiguous auth state. Run `publish auth check` first.
+When its `nextStep` requires login, use the agent-owned headful browser context;
+**X blocks headless login** and Reddit commonly raises CAPTCHA.
+
+The legacy command-assisted setup paths remain available for explicit,
+operator-observed calibration:
 
 ```bash
 node dist/cli.js x watch --query "some topic" --inspect        # X profile

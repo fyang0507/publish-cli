@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Command } from "commander";
+import { Command, CommanderError } from "commander";
 import { registerWatchCommand } from "./commands/watch.js";
 import { registerDraftCommand } from "./commands/draft.js";
 import { registerReplyCommand } from "./commands/reply.js";
@@ -11,13 +11,24 @@ import { registerRedditSearchCommand } from "./commands/reddit-search.js";
 import { registerRedditDraftCommand } from "./commands/reddit-draft.js";
 import { registerWechatCheckCommand } from "./commands/wechat-check.js";
 import { registerWechatDraftCommand } from "./commands/wechat-draft.js";
+import { registerAuthCheckCommand } from "./commands/auth-check.js";
 
 const program = new Command();
+
+// Install the override before subcommands are created so Commander propagates it
+// to parse-time option errors raised by those child commands.
+program.exitOverride();
 
 program
   .name("publish")
   .description("Per-channel content distribution toolkit")
   .version("0.1.0");
+
+const auth = program
+  .command("auth")
+  .description("Passive authentication readiness checks and recovery descriptors");
+
+registerAuthCheckCommand(auth);
 
 // Channel-first: each channel groups its OWN action space, because those spaces
 // diverge (X needs create-watch-list; other channels won't). X is the only
@@ -78,4 +89,14 @@ registerWechatCheckCommand(wechat);
 // --- draft: owned-content publisher (native WeChat article drafts, never posts) ---
 registerWechatDraftCommand(wechat);
 
-program.parse();
+try {
+  await program.parseAsync();
+} catch (error) {
+  if (!(error instanceof CommanderError)) throw error;
+  if (error.exitCode === 0) {
+    process.exitCode = 0;
+  } else {
+    const isAuthCheck = process.argv[2] === "auth" && process.argv[3] === "check";
+    process.exitCode = isAuthCheck ? 2 : error.exitCode;
+  }
+}

@@ -92,7 +92,11 @@ function renderReport(r: CheckResult): string {
 
   if (r.ok) {
     lines.push("  ✓ Credentials — WECHAT_APP_ID and WECHAT_APP_SECRET present");
-    lines.push("  ✓ Token — minted via /cgi-bin/stable_token (cached machine-local)");
+    lines.push(
+      r.tokenRefreshed
+        ? "  ✓ Token — refreshed via /cgi-bin/stable_token (cached machine-local; healed: token_refreshed)"
+        : "  ✓ Token — valid cached stable-token reused",
+    );
     lines.push(`  ✓ IP allowlist — authenticated call succeeded through ${r.egressDescription}`);
     if (r.egressIp) lines.push(`      WeChat sees this egress as ${r.egressIp}`);
     lines.push("");
@@ -115,7 +119,11 @@ function renderReport(r: CheckResult): string {
       lines.push("      40013 = invalid AppID, 40125 = invalid AppSecret. Re-check WECHAT_APP_ID / WECHAT_APP_SECRET in .env.");
       lines.push("  · IP allowlist — skipped (token step failed)");
     } else {
-      lines.push("  ✓ Token — minted via /cgi-bin/stable_token (cached machine-local)");
+      lines.push(
+        r.tokenRefreshed
+          ? "  ✓ Token — refreshed via /cgi-bin/stable_token (cached machine-local; healed: token_refreshed)"
+          : "  ✓ Token — valid cached stable-token reused",
+      );
 
       if (r.stage === "ip") {
         lines.push("  ✗ IP allowlist — WeChat rejected this egress IP (40164 — not in whitelist)");

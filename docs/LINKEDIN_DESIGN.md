@@ -180,7 +180,7 @@ output is reproducible and verifiable.
 
 Every selector lives in one `LI_COMPOSER_SELECTORS` block, commented
 **best-effort / needs live calibration** — LinkedIn's DOM drifts like X's. Per
-CLAUDE.md "Verify live," none of it is trustworthy until run headful
+AGENTS.md "Verify live," none of it is trustworthy until run headful
 (`--inspect`) against real LinkedIn.
 
 ## 6. Config & state additions

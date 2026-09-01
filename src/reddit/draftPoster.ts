@@ -33,7 +33,7 @@
  * picker, nsfw/spoiler toggles, and especially the "Save Draft" affordance drift
  * like X's / LinkedIn's. Run `publish reddit draft ... --inspect` (headful) to
  * watch the flow and recalibrate. Nothing here is trustworthy until verified live
- * (CLAUDE.md "Verify live").
+ * (AGENTS.md "Verify live").
  *
  * The session module is the SINGLE authenticator — we never log in here; we only
  * borrow its persistent context.

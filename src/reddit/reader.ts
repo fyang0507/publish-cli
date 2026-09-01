@@ -34,7 +34,7 @@
  * mistaking the error envelope for a real (empty) contract.
  *
  * DRIFT / LIVE CALIBRATION: every endpoint + JSON field mapping here is
- * best-effort and needs live verification (CLAUDE.md "Verify live"); Reddit
+ * best-effort and needs live verification (AGENTS.md "Verify live"); Reddit
  * reshapes payloads and the composer's post-requirements transport.
  */
 

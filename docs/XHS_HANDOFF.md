@@ -253,4 +253,4 @@ run from the repo root (Playwright resolves from `node_modules`).
   `PUBLISH_DATA_DIR`; never commit `.env`.
 - **Design/taste stays orthogonal** — the XHS channel consumes cards + caption; it
   does not embed a renderer or style rules.
-- **Verify live before claiming a flow works** (CLAUDE.md).
+- **Verify live before claiming a flow works** (AGENTS.md).
