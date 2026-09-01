@@ -55,7 +55,7 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
       : "not ready";
   const out = [
     `${info.displayName} channel info`,
-    `Readiness: ${readinessLabel} (${readiness.status})`,
+    `${info.channel === "reddit" ? "Draft readiness" : "Readiness"}: ${readinessLabel} (${readiness.status})`,
     "Exit behavior: info returns 0 even when not ready; inspect readiness.ready/status in automation.",
   ];
 
@@ -84,13 +84,16 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
 }
 
 export function registerChannelInfoCommand(parent: Command, channel: AuthPlatform): void {
+  const readinessHelp = channel === "wechat"
+    ? "WeChat may perform its normal token exchange and report token_refreshed."
+    : "Browser readiness probes are passive.";
   parent
     .command("info")
     .description("Show Markdown channel guidance plus bounded auth readiness")
     .option("--json", "Emit the stable machine-readable channel-info envelope")
     .addHelpText(
       "after",
-      "\nReturns the complete channel boundary, authentication method, and platform specification/gotchas. Browser readiness probes are passive; WeChat may perform its normal token exchange and report token_refreshed. Readiness failures do not hide the static guidance or make info fail.\n",
+      `\nReturns the channel boundary, authentication method, and platform specification/gotchas. ${readinessHelp} Readiness failures do not hide the static guidance or make info fail.\n`,
     )
     .action(async (opts: ChannelInfoOptions) => {
       const execution = await executeChannelInfo(channel);

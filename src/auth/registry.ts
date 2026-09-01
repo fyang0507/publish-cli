@@ -48,7 +48,7 @@ function externallyOwnedDescriptor(
       liveProbe: "not_run",
       note: isXhs
         ? "This channel's authenticated browser context is owned by the browser agent, not publish-cli."
-        : "publish-cli does not access this website; authentication and composer verification belong to the human-operated handoff.",
+        : "publish-cli does not access this website; the human performs login, then the browser agent owns drafting and composer verification.",
     },
     healed: [],
     requiresHuman: true,
@@ -58,7 +58,7 @@ function externallyOwnedDescriptor(
       workflowRef: isXhs ? XHS_CAPABILITY_WORKFLOW_REF : ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
       instruction: isXhs
         ? "Open the creator portal with the browser agent, let the operator scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
-        : "Have the human open 1point3acres in a normal authorized browser, complete login or challenge, confirm the intended composer state, and continue the manual handoff in that same browser context; publish-cli and browser agents must not operate the website.",
+        : "Have the human open and log in to 1point3acres in a browser the agent can control. Then hand that same context to the agent to draft, save, and reopen the post; return to the human for review and any publish decision.",
       continueInSameContext: true,
     },
   };
@@ -85,8 +85,8 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/, /\/i\/flow\/login/],
       challengeUrlPatterns: [/challenge/i, /account\/access/i],
       workflowRef: BROWSER_AUTH_WORKFLOW_REF,
-      loginInstruction: "Complete X login in the browser context that will continue the publishing workflow; positively verify the authenticated Home UI before continuing.",
-      challengeInstruction: "Complete the visible X identity, CAPTCHA, 2FA, or checkpoint step with the operator; positively verify Home and continue in the same browser context.",
+      loginInstruction: "Run the intended publish x draft ... --inspect or publish x reply ... --inspect command, which opens the CLI-owned profile. Have the human complete login there, verify Home, and let the same command continue.",
+      challengeInstruction: "Run the intended X draft or reply with --inspect in the CLI-owned profile. Have the human complete the visible identity, CAPTCHA, 2FA, or checkpoint step, verify Home, and let the same command continue.",
     },
     linkedin: {
       platform: "linkedin",
@@ -107,8 +107,8 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/, /\/uas\/login/],
       challengeUrlPatterns: [/\/checkpoint\//, /challenge/i],
       workflowRef: BROWSER_AUTH_WORKFLOW_REF,
-      loginInstruction: "Complete LinkedIn login in the browser context that will continue the publishing workflow; positively verify the authenticated feed before continuing.",
-      challengeInstruction: "Complete the visible LinkedIn CAPTCHA, 2FA, identity, or device checkpoint with the operator; positively verify the feed and continue in the same browser context.",
+      loginInstruction: "Run the intended publish linkedin draft ... --inspect command, which opens the CLI-owned profile. Have the human complete login there, verify the feed, and let the same command continue.",
+      challengeInstruction: "Run the intended LinkedIn draft with --inspect in the CLI-owned profile. Have the human complete the visible CAPTCHA, 2FA, identity, or device checkpoint, verify the feed, and let the same command continue.",
     },
     reddit: {
       platform: "reddit",
@@ -129,8 +129,8 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/],
       challengeUrlPatterns: [/js_challenge=1/, /challenge/i],
       workflowRef: BROWSER_AUTH_WORKFLOW_REF,
-      loginInstruction: "Complete Reddit login in the browser context that will continue the publishing workflow; solve any CAPTCHA with the operator and positively verify the authenticated user menu.",
-      challengeInstruction: "Let the operator solve Reddit's CAPTCHA or identity challenge; positively verify the authenticated user menu and continue in the same browser context.",
+      loginInstruction: "Run the intended publish reddit draft ... --inspect command, which opens the CLI-owned profile. Have the human complete login or CAPTCHA there, verify the user menu, and let the same command continue.",
+      challengeInstruction: "Run the intended Reddit draft with --inspect in the CLI-owned profile. Have the human solve the CAPTCHA or identity challenge, verify the user menu, and let the same command continue.",
     },
   };
 }
@@ -164,7 +164,7 @@ function failureNextStep(platform: AuthPlatform, status: "network_error" | "prob
       status === "network_error"
         ? `Restore network access for ${platform}, then rerun publish auth check --platform ${platform}.`
         : humanHandoff
-          ? "Have the human inspect the 1point3acres login/composer state in a normal authorized browser; publish-cli and browser agents must not operate the website."
+          ? "Have the human log in to 1point3acres in a controllable browser, then let the agent inspect the composer, draft, save, and reopen the post in that same context."
         : `Inspect the ${platform} authentication workflow without exposing credentials, then rerun publish auth check --platform ${platform}; do not infer readiness from local state alone.`,
     continueInSameContext: browserOwned || humanHandoff,
   };

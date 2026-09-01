@@ -292,7 +292,7 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     assert.equal(result.evidence.liveProbe, "authenticated");
   });
 
-  test(`${platform}: fresh-machine zero state recovers through an agent-owned same-context login`, () => {
+  test(`${platform}: fresh-machine zero state points to the CLI-owned inspect flow`, () => {
     const result = evaluateBrowserReadiness(
       browserConfig(platform),
       ZERO,
@@ -301,7 +301,7 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     );
     assert.equal(result.ready, false);
     assert.equal(result.status, "login_required");
-    assert.equal(result.nextStep?.executor, "agent_browser");
+    assert.equal(result.nextStep?.executor, "operator");
     assert.equal(result.nextStep?.continueInSameContext, true);
   });
 
@@ -669,7 +669,7 @@ test("auth CLI help lists platform modes and removed --all fails actionably with
   assert.equal(help.status, 0);
   assert.match(help.stdout, /CLI-probed\s+x, linkedin, reddit, wechat/);
   assert.match(help.stdout, /Agent-browser\s+xhs/);
-  assert.match(help.stdout, /Human-handoff\s+1point3acres/);
+  assert.match(help.stdout, /Human-login\s+1point3acres/);
   assert.doesNotMatch(help.stdout, /--all/);
 
   const removed = spawnSync(process.execPath, [CLI_PATH, "auth", "check", "--all"], {

@@ -63,7 +63,7 @@ export function registerAuthCheckCommand(parent: Command): void {
     .option("--json", "Emit a sanitized machine-readable receipt")
     .addHelpText(
       "after",
-      "\nPlatform modes:\n  CLI-probed     x, linkedin, reddit, wechat\n  Agent-browser  xhs (returns agent_check_required with a browser-agent next step)\n  Human-handoff  1point3acres (returns agent_check_required with a human-only next step)\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
+      "\nPlatform modes:\n  CLI-probed     x, linkedin, reddit, wechat\n  Agent-browser  xhs (returns agent_check_required with a browser-agent next step)\n  Human-login    1point3acres (the human logs in, then hands the browser to the agent)\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
     )
     .action(async (opts: AuthCheckOptions) => {
       let platforms: AuthPlatform[];

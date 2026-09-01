@@ -196,7 +196,7 @@ export function inspectBrowserLocalEvidence(
 
 function browserNextStep(config: PassiveBrowserProbeConfig, challenge: boolean): AuthNextStep {
   return {
-    executor: "agent_browser",
+    executor: "operator",
     entryUrl: config.entryUrl,
     workflowRef: config.workflowRef,
     instruction: challenge ? config.challengeInstruction : config.loginInstruction,
@@ -263,10 +263,10 @@ export function evaluateBrowserReadiness(
     status: "probe_inconclusive",
     requiresHuman: false,
     nextStep: {
-      executor: "agent_browser",
+      executor: "operator",
       entryUrl: config.entryUrl,
       workflowRef: `${config.workflowRef}#probe-inconclusive`,
-      instruction: "Open the entry URL with a headful browser agent. Determine whether the page is authenticated, logged out, or challenged; do not infer logout from selector drift. If authenticated, continue the publishing workflow in that same browser context. Otherwise complete the returned login or human challenge before continuing.",
+      instruction: `The passive ${config.platform} probe was inconclusive. ${config.loginInstruction}`,
       continueInSameContext: true,
     },
   };

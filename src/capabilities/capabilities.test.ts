@@ -95,60 +95,64 @@ Platform guidance.
   assert.throws(() => parseChannelInfoMarkdown(valid, "fixture", "reddit"), /expected channel/);
 });
 
-test("free-text guidance preserves the complete channel responsibility and specification oracle", () => {
+test("free-text guidance preserves each channel's execution handoff and essential gotchas", () => {
   const x = `${CHANNEL_INFO_SOURCES.x.cliBoundary}\n${CHANNEL_INFO_SOURCES.x.authentication}\n${CHANNEL_INFO_SOURCES.x.platformGuidance}`;
-  assert.match(x, /publish x draft --format tweet/);
-  assert.match(x, /publish x draft --format thread/);
-  assert.match(x, /publish x draft --format article/);
+  assert.match(x, /watch List/);
+  assert.match(x, /tweet, thread, Article, or reply drafts/);
   assert.match(x, /5:2/);
   assert.match(x, /280/);
+  assert.match(x, /publish x draft --format article --from/);
+  assert.match(x, /intended draft or reply with `--inspect`/);
   assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
-  assert.match(x, /PUBLISH_DATA_DIR\/x-profile/);
-  assert.match(x, /no separate side-effect-free CLI login command/i);
-  assert.match(x, /publish x draft .*--inspect/s);
-  assert.match(x, /lexical full path/);
-  assert.match(x, /absolute distance 0\.02/);
+  assert.match(x, /credentials are missing or rejected/);
+  assert.doesNotMatch(x, /Run `publish x info`|readiness\.ready/);
 
-  const linkedin = `${CHANNEL_INFO_SOURCES.linkedin.authentication}\n${CHANNEL_INFO_SOURCES.linkedin.platformGuidance}`;
+  const linkedin = `${CHANNEL_INFO_SOURCES.linkedin.cliBoundary}\n${CHANNEL_INFO_SOURCES.linkedin.authentication}\n${CHANNEL_INFO_SOURCES.linkedin.platformGuidance}`;
+  assert.match(linkedin, /personal-feed text post/);
   assert.match(linkedin, /3,?000/);
   assert.match(linkedin, /3:1/);
   assert.match(linkedin, /4:5/);
-  assert.match(linkedin, /PUBLISH_DATA_DIR\/li-profile/);
-  assert.match(linkedin, /publish linkedin draft .*--inspect/s);
+  assert.match(linkedin, /credentials are missing or rejected/);
+  assert.match(linkedin, /intended draft with `--inspect`/);
+  assert.doesNotMatch(linkedin, /Run `publish linkedin info`|readiness\.ready/);
 
   const reddit = `${CHANNEL_INFO_SOURCES.reddit.cliBoundary}\n${CHANNEL_INFO_SOURCES.reddit.authentication}\n${CHANNEL_INFO_SOURCES.reddit.platformGuidance}`;
-  assert.match(reddit, /publish reddit inspect/);
-  assert.match(reddit, /publish reddit search/);
+  assert.match(reddit, /search for communities/);
+  assert.match(reddit, /inspect a community/);
   assert.match(reddit, /Save Draft/);
-  assert.match(reddit, /PUBLISH_DATA_DIR\/reddit-profile/);
-  assert.match(reddit, /publish reddit draft .*--inspect/s);
+  assert.match(reddit, /CAPTCHA/);
+  assert.match(reddit, /publish reddit draft --subreddit <name> --title <title>/);
+  assert.match(reddit, /intended draft with `--inspect`/);
+  assert.doesNotMatch(reddit, /Run `publish reddit info`|readiness\.ready/);
 
   const wechat = `${CHANNEL_INFO_SOURCES.wechat.cliBoundary}\n${CHANNEL_INFO_SOURCES.wechat.authentication}\n${CHANNEL_INFO_SOURCES.wechat.platformGuidance}`;
-  assert.match(wechat, /publish wechat draft/);
+  assert.match(wechat, /draft\/add/);
+  assert.match(wechat, /freepublish\/\*/);
   assert.match(wechat, /32.*16.*120.*字/s);
   assert.match(wechat, /2\.35:1/);
   assert.match(wechat, /1:1/);
-  assert.match(wechat, /Markdown file|--from/);
-  assert.match(wechat, /WECHAT_SSH_TUNNEL=publisher@203\.0\.113\.10/);
-  assert.match(wechat, /WECHAT_PROXY_URL=socks5:\/\//);
-  assert.match(wechat, /canonical single-channel preflight/);
-  assert.match(wechat, /same underlying readiness probe/);
+  assert.match(wechat, /WECHAT_SSH_TUNNEL/);
+  assert.match(wechat, /WECHAT_PROXY_URL/);
+  assert.match(wechat, /40164/);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
+  assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
+  assert.match(xhs, /agent is expected to use its own/);
   assert.match(xhs, /creator\.xiaohongshu\.com/);
   assert.match(xhs, /\.md|Markdown/);
   assert.match(xhs, /64/);
   assert.match(xhs, /10,?000/);
   assert.match(xhs, /1,?000/);
   assert.match(xhs, /browser-local/i);
-  assert.match(xhs, /copy its first Markdown H1/);
-  assert.match(xhs, /Plain long article is the default/);
-  assert.match(xhs, /下一步 triggers platform image generation/);
-  assert.match(xhs, /With no requested topics, add none/);
-  assert.match(xhs, /human may separately decide to publish manually/);
+  assert.match(xhs, /copy the first Markdown H1/);
+  assert.match(xhs, /Default to a plain long article/);
+  assert.match(xhs, /Only when image cards are requested/);
+  assert.match(xhs, /Only when topics are requested/);
 
   const acres = `${CHANNEL_INFO_SOURCES["1point3acres"].cliBoundary}\n${CHANNEL_INFO_SOURCES["1point3acres"].authentication}\n${CHANNEL_INFO_SOURCES["1point3acres"].platformGuidance}`;
-  assert.match(acres, /human.*normal browser|normal.*human.*browser/is);
+  assert.match(acres, /CLI offers no functionality to access or write 1point3acres/);
+  assert.match(acres, /human to open and log in/);
+  assert.match(acres, /agent takes over in that same context/);
   assert.match(acres, /98/);
   assert.match(acres, /29/);
   assert.match(acres, /28/);
@@ -243,8 +247,9 @@ test("external readiness descriptors remain actionable without a typed static wo
     info: CHANNEL_INFO_SOURCES["1point3acres"],
     readiness: acresReadiness,
   });
-  assert.match(acresRendered, /normal authorized browser/i);
-  assert.doesNotMatch(acresRendered, /agent-owned authentication/i);
+  assert.match(acresRendered, /human open and log in/i);
+  assert.match(acresRendered, /hand that same context to the agent/i);
+  assert.doesNotMatch(acresRendered, /browser agents must not operate/i);
 });
 
 test("X uses official twitter-text fixtures from issue #40", () => {
@@ -407,6 +412,11 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   const help = spawnSync(process.execPath, [CLI_PATH, "x", "info", "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.doesNotMatch(help.stdout, /--format/);
+  assert.doesNotMatch(help.stdout, /WeChat|token_refreshed/);
+
+  const wechatInfoHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "info", "--help"], { encoding: "utf8" });
+  assert.equal(wechatInfoHelp.status, 0);
+  assert.match(wechatInfoHelp.stdout, /token_refreshed/);
 
   const rejected = spawnSync(process.execPath, [CLI_PATH, "x", "info", "--format", "tweet"], { encoding: "utf8" });
   assert.equal(rejected.status, 2);
