@@ -71,7 +71,7 @@ non-Devvit external OAuth flow.
 | `src/reddit/draftPoster.ts` | `stageDraft` — composer → **"Save Draft"**; eligibility-block detection; Post is a FORBIDDEN selector; bail safeguard |
 | `src/commands/reddit-{inspect,search,draft}.ts` | the three commands; reuse `resolveContentInput` |
 | `src/cli.ts`, `src/config.ts`, `.env.example` | wiring: reddit group; `REDDIT_*` creds + `reddit-profile`/`reddit-cookies` in `dataPaths()` |
-| `skills/publish/{SKILL,SETUP,calibration}.md`, `AGENTS.md`, `README.md` | docs registrations |
+| `skills/publish/SKILL.md`, `AGENTS.md`, `README.md` | docs registrations |
 
 ## Verified ✅ (locally)
 

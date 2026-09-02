@@ -355,7 +355,7 @@ is trustworthy until run headful (`--inspect`) against real Reddit.
   (`<baseDir>/reddit-cookies.json`) — machine-local, **off Google Drive**, same
   posture as the X/LinkedIn profiles. `mkdirSync` the profile like the others.
 - No `watch.yaml` changes (publish-only). No change to
-  `scripts/install-agent-skill-symlinks.js` (Reddit lives inside the existing
+  `scripts/install-agent-skills.js` (Reddit lives inside the existing
   `publish` skill).
 
 ## 7. File map (additions)

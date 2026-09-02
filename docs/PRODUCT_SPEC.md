@@ -100,7 +100,7 @@ The watch loop earns the borrowed attention that the owned loop needs to land. T
 
 The **single source of truth for content is the local markdown filesystem**, not Notion.
 
-- Canonical drafts live under a per-article folder `<date>-<slug>/` inside the **caller-supplied data repo** (configurable via env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up; never a hardcoded personal path — see `skills/publish/references/setup.md`).
+- Canonical drafts live under a per-article folder `<date>-<slug>/` inside the **caller-supplied data repo** (configurable via env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up; never a hardcoded personal path — see [README](../README.md#state-and-skill-installation)).
 - Each article folder holds the **base draft**, images, prompts, and notes together (per that directory's `AGENTS.md` workflow).
 - publish-cli **reads** the canonical base draft from this folder. It does **not** write platform-variant files here as the primary output: the X publisher's real output is a **native draft created on X itself** (typed into X's composer, saved unsent). The canonical folder stays the human-owned drafting surface; the platform draft lives on the platform.
 - The generated tweet/thread/Article content can optionally be echoed to disk for inspection (notably in `--dry-run`, which never touches the browser), but that is a debug artifact, not the deliverable.
