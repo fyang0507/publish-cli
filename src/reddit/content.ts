@@ -1,8 +1,8 @@
 /**
  * Reddit self-post generation — DETERMINISTIC, plain-code transformation of
  * canonical markdown into a native Reddit self-post (title + body). NO LLM is
- * involved in any decision that affects correctness (char counting, title
- * derivation, the leading segment on overflow, the render/link advisories) so
+ * involved in any decision that affects correctness (char counting, title/body
+ * rejection, the render/link advisories) so
  * output is reproducible and verifiable, exactly like the X and LinkedIn content
  * generators (src/x/content.ts, src/linkedin/content.ts).
  *
@@ -28,8 +28,8 @@
  *   - Title: REQUIRED. From --title, else frontmatter `title`, else the leading
  *     Markdown H1. Cap 300 code points; over cap => ERROR, never truncation.
  *   - Body: Markdown kept verbatim (leading H1 stripped only if consumed as the
- *     title). Cap ~40 000 code points; over cap => leading segment + warning,
- *     NEVER silent truncation.
+ *     title). The 40,000-code-point local guard rejects before browser access;
+ *     caller content is never shortened.
  *   - Old-vs-new render advisory: on old.reddit, fenced code blocks and tables
  *     don't render; surface via codeFlags + a warning (advise 4-space-indented
  *     code / caution on tables).
@@ -39,14 +39,14 @@
 
 import { parseBaseMarkdown, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
 import { countUnicodeCodePoints as countChars } from "../capabilities/measurements.js";
+import { LocalValidationError } from "../capabilities/validation.js";
 import type { SubredditAbout, PostRequirements, FlairTemplate } from "./reader.js";
 import { parse } from "yaml";
 
 /** Reddit title cap, in Unicode code points. */
 export const REDDIT_TITLE_LIMIT = 300;
 /**
- * Reddit self-text body cap (~40k code points). Over cap => leading segment +
- * warning, never silent truncation.
+ * Reddit self-text body local transport guard, measured in Unicode code points.
  */
 export const REDDIT_BODY_LIMIT = 40000;
 
@@ -86,7 +86,7 @@ export interface GeneratedSelfPost {
   codeFlags: CodeBlockFlag[];
   /** Links surfaced with an informational placement note. */
   linkFlags: LinkFlag[];
-  /** Non-fatal advisories (overflow, old-reddit code/table rendering, links). */
+  /** Non-fatal advisories (old-reddit code/table rendering and links). */
   warnings: string[];
 }
 
@@ -165,23 +165,6 @@ function trimBlankEdges(text: string): string {
 }
 
 /**
- * Take the leading segment of an over-cap body without a silent mid-word cut:
- * slice to the cap on code-point boundaries, then back off to the last paragraph
- * break, newline, or space near the cap so the emitted segment ends cleanly.
- */
-function leadingSegment(text: string, cap: number): string {
-  const cps = [...text];
-  if (cps.length <= cap) return text;
-  let slice = cps.slice(0, cap).join("");
-  const para = slice.lastIndexOf("\n\n");
-  const nl = slice.lastIndexOf("\n");
-  const sp = slice.lastIndexOf(" ");
-  const cut = para >= cap * 0.6 ? para : nl >= cap * 0.6 ? nl : sp >= cap * 0.6 ? sp : -1;
-  if (cut > 0) slice = slice.slice(0, cut);
-  return slice.trimEnd();
-}
-
-/**
  * Collect link advisory flags from the body markdown (both `[text](url)` and bare
  * URLs), deduped by URL, with the Reddit informational note. Reddit keeps the body
  * verbatim, so scanning the body catches exactly the links that will be posted.
@@ -219,9 +202,9 @@ function collectLinkFlags(body: string): LinkFlag[] {
  *
  * Parses a leading `---` YAML frontmatter block (subreddit/title/flair), then
  * applies opts overrides. THROWS on a missing title or a title over
- * REDDIT_TITLE_LIMIT (never silent). Body over REDDIT_BODY_LIMIT => leading
- * segment + a warnings entry. The body is Markdown kept verbatim (a leading H1 is
- * stripped only when it was consumed as the title).
+ * REDDIT_TITLE_LIMIT (never silent). Body over REDDIT_BODY_LIMIT also throws.
+ * The body is Markdown kept verbatim (a leading H1 is stripped only when it was
+ * consumed as the title).
  */
 export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {}): GeneratedSelfPost {
   const warnings: string[] = [];
@@ -245,29 +228,48 @@ export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {})
   const titleFromH1 = !optTitle && !fmTitle && !!h1Title;
 
   if (!title) {
-    throw new Error(
+    throw new LocalValidationError(
       "Reddit self-post requires a title: pass --title, add a `title:` frontmatter field, " +
         "or start the markdown with an H1 (`# ...`).",
+      {
+        code: "reddit_title_missing",
+        field: "title",
+        actual: null,
+        expected: "non-empty --title, title frontmatter, or leading H1",
+        unit: null,
+      },
     );
   }
 
   const titleChars = countChars(title);
   if (titleChars > REDDIT_TITLE_LIMIT) {
-    throw new Error(
+    throw new LocalValidationError(
       `Title is ${titleChars} code points but Reddit's cap is ${REDDIT_TITLE_LIMIT}. ` +
         `Shorten the title (no silent truncation).`,
+      {
+        code: "reddit_title_too_long",
+        field: "title",
+        actual: titleChars,
+        expected: `<= ${REDDIT_TITLE_LIMIT}`,
+        unit: "unicode_code_points_transport_policy",
+      },
     );
   }
 
   // Body: keep the markdown verbatim; strip only a leading H1 consumed as title.
-  let body = trimBlankEdges(titleFromH1 ? stripLeadingH1(afterFm) : afterFm);
+  const body = trimBlankEdges(titleFromH1 ? stripLeadingH1(afterFm) : afterFm);
   const totalBodyChars = countChars(body);
   if (totalBodyChars > REDDIT_BODY_LIMIT) {
-    body = leadingSegment(body, REDDIT_BODY_LIMIT);
-    warnings.push(
-      `Body is ${totalBodyChars} code points but Reddit's cap is ${REDDIT_BODY_LIMIT}. ` +
-        `Emitted only the leading segment (${countChars(body)} chars) — NOT silently truncated. ` +
-        `Tighten the copy or split it into a follow-up comment.`,
+    throw new LocalValidationError(
+      `Body is ${totalBodyChars} code points but Reddit's local transport guard is ${REDDIT_BODY_LIMIT}. ` +
+        "Tighten the copy; no partial body was generated.",
+      {
+        code: "reddit_body_too_long",
+        field: "body",
+        actual: totalBodyChars,
+        expected: `<= ${REDDIT_BODY_LIMIT}`,
+        unit: "unicode_code_points_transport_policy",
+      },
     );
   }
 
@@ -459,8 +461,12 @@ export function renderSelfPostForInspection(p: GeneratedSelfPost): string {
   if (p.spoiler) flags.push("spoiler");
   if (flags.length) out.push(`flags: ${flags.join(", ")}`);
 
-  out.push("", `── title (${p.titleChars}/${REDDIT_TITLE_LIMIT} chars) ──`, p.title);
-  out.push("", `── body — Markdown, verbatim (${p.bodyChars}/${REDDIT_BODY_LIMIT} chars) ──`, p.body);
+  out.push("", `── title (${p.titleChars}/${REDDIT_TITLE_LIMIT} Unicode code points) ──`, p.title);
+  out.push(
+    "",
+    `── body — Markdown, verbatim (${p.bodyChars}/${REDDIT_BODY_LIMIT} Unicode code points) ──`,
+    p.body,
+  );
 
   if (p.codeFlags.length) {
     out.push(

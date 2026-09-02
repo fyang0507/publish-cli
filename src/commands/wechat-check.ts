@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { env } from "../config.js";
-import { createWeChatClient, type CheckResult } from "../wechat/client.js";
+import type { CheckResult } from "../wechat/client.js";
 
 /**
  * `publish wechat check` — the WeChat channel's read-only preflight verb
@@ -54,6 +54,7 @@ export function registerWechatCheckCommand(parent: Command): void {
       // command OWNS the client (and its one EgressHandle); tear it down in finally
       // so no ssh tunnel / dispatcher is left running. process.exit AFTER finally
       // (process.exit would skip a pending finally otherwise).
+      const { createWeChatClient } = await import("../wechat/client.js");
       const client = await createWeChatClient();
       let ok = false;
       try {

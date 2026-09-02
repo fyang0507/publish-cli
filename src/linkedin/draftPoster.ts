@@ -349,6 +349,11 @@ export async function stagePost(
     await typeText(page, editor, text);
 
     const mediaAttached = await attachMedia(page, media);
+    if (mediaAttached !== media.length) {
+      throw new Error(
+        `LinkedIn attached ${mediaAttached} of ${media.length} requested media files; refusing to save an incomplete draft.`,
+      );
+    }
 
     const saved = await saveAsDraftLinkedIn(page);
     const verified = await verifyDraftSaved(page, text);

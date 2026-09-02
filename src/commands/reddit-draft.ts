@@ -6,6 +6,7 @@ import {
   preflightSelfPost,
   type GeneratedSelfPost,
 } from "../reddit/content.js";
+import { isLocalValidationError, LocalValidationError } from "../capabilities/validation.js";
 
 /**
  * `publish reddit draft` — owned-content publisher for the Reddit channel
@@ -56,7 +57,14 @@ export function registerRedditDraftCommand(reddit: Command): void {
     .option("--dry-run", "Generate and validate locally; skips live subreddit preflight and composer")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .action(async (opts: RedditDraftOptions) => {
-      const md = resolveContentInput(opts);
+      let md: string;
+      try {
+        md = resolveContentInput(opts);
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
+        process.exit(2);
+      }
 
       // DETERMINISTIC generation (no LLM). Throws on missing / oversized title —
       // treat as a usage error (exit 2), same tier as resolveContentInput.
@@ -69,8 +77,9 @@ export function registerRedditDraftCommand(reddit: Command): void {
           nsfw: opts.nsfw,
           spoiler: opts.spoiler,
         });
-      } catch (err) {
-        console.error((err as Error).message);
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
         process.exit(2);
       }
 
@@ -79,9 +88,17 @@ export function registerRedditDraftCommand(reddit: Command): void {
 
       const subreddit = post.subreddit;
       if (!subreddit) {
-        console.error(
-          "\nNo target subreddit. Provide --subreddit <name> or a `subreddit:` frontmatter key.",
+        const error = new LocalValidationError(
+          "No target subreddit. Provide --subreddit <name> or a `subreddit:` frontmatter key.",
+          {
+            code: "reddit_subreddit_missing",
+            field: "target",
+            actual: null,
+            expected: "non-empty --subreddit or subreddit frontmatter",
+            unit: null,
+          },
         );
+        console.error(`\n${error.message}`);
         process.exit(2);
       }
 

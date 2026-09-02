@@ -22,15 +22,17 @@
  *     out of the opening tweet; move to a reply or the end).
  */
 
-import { GeminiClient } from "../gemini.js";
+import type { GeminiClient } from "../gemini.js";
 import type { ThinkingLevel } from "@google/genai";
 import {
   X_PREMIUM_POST_PLATFORM_MAX_LENGTH,
   X_STANDARD_POST_MAX_WEIGHTED_LENGTH,
+  LocalValidationError,
   countXWeightedLength,
   sliceByMeasuredLength,
   validateXPostText,
   validateXPremiumTransportText,
+  type LengthUnit,
 } from "../capabilities/validation.js";
 
 /** Hard character limits for the X composer. */
@@ -62,6 +64,21 @@ export interface LinkFlag {
   /** Visible link text if it came from a markdown []() link. */
   text?: string;
   /** Human-readable placement guidance. */
+  note: string;
+}
+
+/**
+ * A source line intentionally excluded from the tweet/thread prose stream.
+ * These are explicit fidelity receipts: the caller must be able to see every
+ * normalization that removed caller-supplied content rather than discovering
+ * the loss only after opening the staged draft.
+ */
+export interface ProseOmissionFlag {
+  kind: "title_heading" | "section_heading" | "metadata_like" | "markdown_image";
+  /** Exact caller-supplied line, without its trailing newline. */
+  source: string;
+  /** 1-based source line. */
+  sourceLine: number;
   note: string;
 }
 
@@ -114,7 +131,7 @@ export interface GeneratedContent {
   /** Effective per-post character limit used for validation. */
   limit: number;
   /** tweet: the single post text. */
-  tweet?: { text: string; chars: number };
+  tweet?: { text: string; chars: number; unit: LengthUnit };
   /** thread: ordered posts, hook first. */
   thread?: ThreadPost[];
   /**
@@ -129,7 +146,9 @@ export interface GeneratedContent {
   codeFlags: CodeBlockFlag[];
   /** Links surfaced with placement notes. */
   linkFlags: LinkFlag[];
-  /** Non-fatal advisories (e.g. tweet was truncated, content trimmed). */
+  /** Source lines omitted from tweet/thread prose, with exact fidelity evidence. */
+  fidelityFlags: ProseOmissionFlag[];
+  /** Non-fatal advisories; transport text is never silently shortened. */
   warnings: string[];
 }
 
@@ -165,6 +184,7 @@ interface ParsedDoc {
   prose: string;
   codeFlags: CodeBlockFlag[];
   linkFlags: LinkFlag[];
+  proseOmissions: ProseOmissionFlag[];
 }
 
 const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
@@ -176,12 +196,13 @@ const BARE_URL_RE = /(?<![("])\bhttps?:\/\/[^\s)]+/g;
  * code/link advisory flags. Deterministic and dependency-free.
  */
 export function parseBaseMarkdown(md: string): ParsedDoc {
-  const lines = md.replace(/\r\n/g, "\n").split("\n");
+  const lines = md.replace(/\r\n?/g, "\n").split("\n");
 
   let title = "";
   const codeFlags: CodeBlockFlag[] = [];
   const proseLines: string[] = [];
   const bodyLines: string[] = [];
+  const proseOmissions: ProseOmissionFlag[] = [];
 
   let inFence = false;
   let fenceMarker = "";
@@ -223,6 +244,12 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
       if (h1) {
         title = h1[1].trim();
         titleLineConsumed = true;
+        proseOmissions.push({
+          kind: "title_heading",
+          source: line,
+          sourceLine: i + 1,
+          note: "Consumed as the document title and omitted from tweet/thread transport text.",
+        });
         continue; // drop the title line from body/prose
       }
       if (line.trim() && !title) {
@@ -253,7 +280,20 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
     const isMetaPair = /^[A-Z][\w/]*(?: [\w/]+){0,2}:\s+\S/.test(line) && i < 8;
     const isImageOnly = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line);
     const isHeading = /^#{1,6}\s/.test(line);
-    if (isMetaPair || isImageOnly || isHeading) continue;
+    if (isMetaPair || isImageOnly || isHeading) {
+      const kind: ProseOmissionFlag["kind"] = isMetaPair
+        ? "metadata_like"
+        : isImageOnly
+          ? "markdown_image"
+          : "section_heading";
+      const note = isMetaPair
+        ? "Matched the leading metadata-like Key: value heuristic and was omitted from tweet/thread transport text."
+        : isImageOnly
+          ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
+          : "Section headings are omitted from the tweet/thread prose stream.";
+      proseOmissions.push({ kind, source: line, sourceLine: i + 1, note });
+      continue;
+    }
     proseLines.push(line);
   }
 
@@ -266,6 +306,7 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
     prose: proseLines.join("\n").trim(),
     codeFlags,
     linkFlags,
+    proseOmissions,
   };
 }
 
@@ -312,30 +353,10 @@ export function countChars(text: string): number {
 const countXPostChars = countXWeightedLength;
 type TextMeasure = (text: string) => number;
 
-/** Split prose into paragraphs (blank-line separated), trimmed, non-empty. */
-function toParagraphs(prose: string): string[] {
-  return prose
-    .split(/\n{2,}/)
-    .map((p) => p.replace(/\n/g, " ").trim())
-    .filter(Boolean);
-}
-
-/** Split a paragraph into sentences, keeping terminal punctuation. */
-function toSentences(paragraph: string): string[] {
-  // Intl.Segmenter covers the complete input instead of regex-matching only the
-  // text after the last URL/decimal/abbreviation period. Whitespace between
-  // segments is normalized when chunks are joined, but source tokens are never
-  // dropped.
-  return Array.from(
-    new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(paragraph),
-    ({ segment }) => segment,
-  ).filter((segment) => segment.trim().length > 0);
-}
-
 /**
- * Greedily pack pieces (paragraphs, then sentences if a paragraph overflows,
- * then hard word-wrap if a single sentence overflows) into chunks that each fit
- * within `limit`, RESPECTING sentence/paragraph boundaries where possible.
+ * Greedily pack contiguous source pieces into chunks that each fit within
+ * `limit`. Every whitespace byte belongs to exactly one chunk: tabs, single
+ * newlines, and repeated blank lines are never normalized while splitting.
  *
  * `reserve` characters are held back from the limit on every chunk to leave room
  * for the " n/N" numbering suffix added later.
@@ -351,54 +372,31 @@ function packChunks(
   let current = "";
 
   const flush = () => {
-    if (current.trim()) chunks.push(current.trim());
+    if (current) chunks.push(current);
     current = "";
   };
-  const tryAppend = (piece: string, sep: string): boolean => {
-    const candidate = current ? current + sep + piece : piece;
-    if (measure(candidate) <= effective) {
-      current = candidate;
-      return true;
-    }
-    return false;
-  };
 
-  for (const para of toParagraphs(prose)) {
-    if (measure(para) <= effective) {
-      if (!tryAppend(para, "\n\n")) {
-        flush();
-        current = para;
-      }
+  // Each piece is a non-whitespace run plus its exact following separator.
+  // This still prefers natural word boundaries, but concatenating the chunks
+  // after removing numbering reconstructs `prose` byte-for-byte.
+  const pieces = prose.match(/\S+\s*|\s+/gu) ?? [];
+  for (const piece of pieces) {
+    if (measure(current + piece) <= effective) {
+      current += piece;
       continue;
     }
-    // Paragraph too big: fall to sentences (flush whatever's buffered first).
     flush();
-    for (const sentence of toSentences(para)) {
-      if (measure(sentence) <= effective) {
-        // Intl.Segmenter returns the source separator as part of each segment.
-        // Appending an extra space corrupts languages that do not separate
-        // sentences with whitespace (for example punctuated Chinese prose).
-        if (!tryAppend(sentence, "")) {
-          flush();
-          current = sentence;
-        }
-        continue;
-      }
-      // Sentence too big: hard word-wrap as a last resort.
-      flush();
-      for (const word of sentence.split(/\s+/)) {
-        if (measure(word) > effective) {
-          // A single token longer than the limit — chunk it raw.
-          flush();
-          for (const slice of hardSlice(word, effective, measure)) chunks.push(slice);
-          continue;
-        }
-        if (!tryAppend(word, " ")) {
-          flush();
-          current = word;
-        }
-      }
-      flush();
+    if (measure(piece) <= effective) {
+      current = piece;
+      continue;
+    }
+
+    const slices = hardSlice(piece, effective, measure);
+    for (const slice of slices.slice(0, -1)) chunks.push(slice);
+    const last = slices.at(-1);
+    if (last) current = last;
+    if (slices.length === 0) {
+      throw new Error("Internal X thread packing error: source piece made no progress.");
     }
   }
   flush();
@@ -412,13 +410,20 @@ function hardSlice(token: string, limit: number, measure: TextMeasure): string[]
   while (remaining) {
     const slice = sliceByMeasuredLength(remaining, limit, measure);
     if (!slice) {
-      // This is unreachable for X's practical limits, but guarantees progress
-      // for a caller-supplied tiny limit without splitting UTF-16 surrogates.
       const first = Array.from(new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(remaining))[0]?.segment;
       if (!first) break;
-      out.push(first);
-      remaining = remaining.slice(first.length);
-      continue;
+      const measuredLength = measure(first);
+      throw new LocalValidationError(
+        `One grapheme is ${measuredLength} weighted chars, exceeding the X thread content budget of ${limit}. ` +
+          "It cannot be split without changing caller text; no partial thread was generated.",
+        {
+          code: "x_grapheme_exceeds_thread_budget",
+          field: "text",
+          actual: measuredLength,
+          expected: `<= ${limit}`,
+          unit: "twitter_text_weighted",
+        },
+      );
     }
     out.push(slice);
     remaining = remaining.slice(slice.length);
@@ -432,7 +437,8 @@ function hardSlice(token: string, limit: number, measure: TextMeasure): string[]
 
 async function maybeVoicePass(prose: string, opts: GenerateOptions): Promise<string> {
   if (!opts.voice) return prose;
-  const client = opts.voice.client ?? new GeminiClient();
+  const client =
+    opts.voice.client ?? new (await import("../gemini.js")).GeminiClient();
   const prompt = [
     "Lightly tailor the following prose for posting on X (Twitter).",
     "Keep the author's voice, claims, structure, and ordering intact.",
@@ -470,7 +476,11 @@ export async function generateContent(
   opts: GenerateOptions,
 ): Promise<GeneratedContent> {
   const parsed = parseBaseMarkdown(md);
-  const warnings: string[] = [];
+  const fidelityFlags = opts.format === "article" ? [] : parsed.proseOmissions;
+  const warnings: string[] = fidelityFlags.map(
+    (flag) =>
+      `Source line ${flag.sourceLine} (${flag.kind}) was omitted: ${JSON.stringify(flag.source)}. ${flag.note}`,
+  );
 
   const tweetLimit = opts.long ? opts.longLimit ?? TWEET_LIMIT_LONG : TWEET_LIMIT_DEFAULT;
 
@@ -481,18 +491,37 @@ export async function generateContent(
     limit: opts.format === "article" ? Number.POSITIVE_INFINITY : tweetLimit,
     codeFlags: parsed.codeFlags,
     linkFlags: parsed.linkFlags,
+    fidelityFlags,
     warnings,
+  };
+
+  const buildWithFidelityEvidence = <T>(build: () => T): T => {
+    try {
+      return build();
+    } catch (error) {
+      if (!(error instanceof LocalValidationError) || fidelityFlags.length === 0) throw error;
+      const evidence = fidelityFlags
+        .map(
+          (flag) =>
+            `line ${flag.sourceLine} [${flag.kind}] ${JSON.stringify(flag.source)}: ${flag.note}`,
+        )
+        .join("\n  ");
+      throw new LocalValidationError(
+        `${error.message}\nSource fidelity evidence for omitted lines:\n  ${evidence}`,
+        error.problem,
+      );
+    }
   };
 
   if (opts.format === "tweet") {
     base.limit = tweetLimit;
-    base.tweet = buildTweet(prose, tweetLimit, warnings, !!opts.long);
+    base.tweet = buildWithFidelityEvidence(() => buildTweet(prose, tweetLimit, !!opts.long));
     return base;
   }
 
   if (opts.format === "thread") {
     base.limit = TWEET_LIMIT_DEFAULT; // threads use the standard per-post limit
-    base.thread = buildThread(prose, TWEET_LIMIT_DEFAULT, warnings);
+    base.thread = buildWithFidelityEvidence(() => buildThread(prose, TWEET_LIMIT_DEFAULT));
     return base;
   }
 
@@ -504,49 +533,79 @@ export async function generateContent(
 function buildTweet(
   prose: string,
   limit: number,
-  warnings: string[],
   premiumTransportPolicy: boolean,
-): { text: string; chars: number } {
-  const collapsed = prose.replace(/\n{2,}/g, "\n\n").trim();
-  const measure = premiumTransportPolicy ? countChars : countXPostChars;
+): { text: string; chars: number; unit: LengthUnit } {
+  const collapsed = prose.trim();
   const validation = premiumTransportPolicy
     ? validateXPremiumTransportText(collapsed, limit)
     : validateXPostText(collapsed, limit);
-  if (validation.valid) {
-    return { text: collapsed, chars: validation.measuredLength };
+  if (!collapsed) {
+    throw new LocalValidationError("X post text is empty after Markdown normalization.", {
+      code: "x_text_empty",
+      field: "text",
+      actual: 0,
+      expected: "> 0",
+      unit: validation.unit,
+    });
   }
-  // Too long for a single tweet: take the leading text up to the limit on a
-  // sentence boundary where possible. We do NOT silently drop content quietly —
-  // we warn the caller so they can pick --format thread or --long instead.
-  const chunks = packChunks(collapsed, limit, 0, measure);
-  const text = chunks[0] ?? sliceByMeasuredLength(collapsed, limit, measure);
+  if (validation.valid) {
+    return { text: collapsed, chars: validation.measuredLength, unit: validation.unit };
+  }
   const unit = premiumTransportPolicy
     ? "Unicode code points under the local Premium transport policy"
     : "weighted chars";
-  warnings.push(
-    `Base content is ${validation.measuredLength} ${unit} but the tweet limit is ${limit}. ` +
-      `Emitted only the leading segment (${measure(text)} ${unit}). ` +
-      `Use --format thread to split it, or --long to raise the limit.`,
+  throw new LocalValidationError(
+    `Base content is ${validation.measuredLength} ${unit} but the X post limit is ${limit}. ` +
+      "Use --format thread for a lossless split of the normalized prose or supply shorter text; no partial post was generated.",
+    {
+      code: "x_text_too_long",
+      field: "text",
+      actual: validation.measuredLength,
+      expected: `<= ${limit}`,
+      unit: validation.unit,
+    },
   );
-  return { text, chars: measure(text) };
 }
 
-function buildThread(prose: string, limit: number, warnings: string[]): ThreadPost[] {
-  // Reserve room for a " n/N" suffix. N is unknown until we've packed, so we
-  // pack with a conservative reserve, then number, then re-validate.
-  const RESERVE = 8; // e.g. " 12/12" + margin
-  const chunks = packChunks(prose, limit, RESERVE);
-  if (chunks.length === 0) return [];
+function buildThread(prose: string, limit: number): ThreadPost[] {
+  if (!prose.trim()) {
+    throw new LocalValidationError("X thread text is empty after Markdown normalization.", {
+      code: "x_text_empty",
+      field: "text",
+      actual: 0,
+      expected: "> 0",
+      unit: "twitter_text_weighted",
+    });
+  }
+
+  // N is unknown until packing, so grow the suffix reserve and repack until the
+  // actual " n/N" suffix fits. This preserves every source token even for very
+  // large threads instead of trimming the final characters of a row.
+  let reserve = 8;
+  let chunks: string[];
+  for (;;) {
+    chunks = packChunks(prose, limit, reserve);
+    const total = chunks.length;
+    const requiredReserve = countXPostChars(` ${total}/${total}`);
+    if (requiredReserve <= reserve) break;
+    if (requiredReserve >= limit) {
+      throw new LocalValidationError("X thread numbering leaves no room for content.", {
+        code: "x_thread_too_many_segments",
+        field: "text",
+        actual: total,
+        expected: `numbering suffix shorter than ${limit} weighted chars`,
+        unit: "thread_segments",
+      });
+    }
+    reserve = requiredReserve;
+  }
 
   const total = chunks.length;
   const posts: ThreadPost[] = chunks.map((text, i) => {
     const suffix = ` ${i + 1}/${total}`;
-    let body = `${text}${suffix}`;
+    const body = `${text}${suffix}`;
     if (countXPostChars(body) > limit) {
-      // Extremely rare given the reserve; hard-trim to stay valid and warn.
-      const room = limit - countXPostChars(suffix);
-      body = `${sliceByMeasuredLength(text, Math.max(0, room), countXPostChars)}${suffix}`;
-      warnings.push(`Thread post ${i + 1}/${total} was trimmed to fit the ${limit}-char limit.`);
+      throw new Error(`Internal X thread packing error at post ${i + 1}/${total}.`);
     }
     return { index: i + 1, total, text: body, chars: countXPostChars(body) };
   });
@@ -778,12 +837,15 @@ export function renderForInspection(c: GeneratedContent): string {
   if (Number.isFinite(c.limit)) out.push(`per-post limit: ${c.limit}`);
 
   if (c.tweet) {
-    out.push("", "── tweet ──", c.tweet.text, `[${c.tweet.chars} chars]`);
+    const unit = c.tweet.unit === "twitter_text_weighted"
+      ? "twitter-text weighted chars"
+      : "Unicode code points (local Premium transport policy)";
+    out.push("", "── tweet ──", c.tweet.text, `[${c.tweet.chars} ${unit}]`);
   }
   if (c.thread) {
     out.push("", `── thread (${c.thread.length} posts) ──`);
     for (const p of c.thread) {
-      out.push("", `[${p.index}/${p.total}] (${p.chars} chars)`, p.text);
+      out.push("", `[${p.index}/${p.total}] (${p.chars} twitter-text weighted chars)`, p.text);
     }
   }
   if (c.article) {

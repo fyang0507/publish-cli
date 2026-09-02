@@ -34,7 +34,7 @@ How it differs from the X channel we already ship:
 ## 2. CLI surface
 
 ```
-publish linkedin draft --text "<post text>"
+publish linkedin draft (--text "<post text>" | --from <base.md|->)
                        [--media <path>...]   # repeatable; images attached in order
                        [--bold]              # opt-in Unicode-bold for **emphasis** (accessibility caveat, §4)
                        [--dry-run]           # generate only; no browser
@@ -49,12 +49,13 @@ const linkedin = program.command("linkedin")
 registerLinkedInDraftCommand(linkedin);
 ```
 
-**Input is `--text`, not `--from`.** `--from` is designed for the long-form
-article source the X publisher consumes; a LinkedIn post is short, so an inline
-`--text` string is the right ergonomics and suffices. (A `--from <file>`
-convenience alias that reads the file's text can be added later, but `--text` is
-the documented path.) There is no `--format` (one format) and no `--long` (single
-3 000 cap). `--media` is **explicit** — LinkedIn media is optional and
+**Exactly one of `--text` and `--from` is required.** `--text` is the ergonomic
+path for a short post. `--from <file>` and `--from -` support canonical Markdown
+and stdin; they strip a leading YAML mapping or empty frontmatter block. A leading
+`---` is reserved for frontmatter on file/stdin input, so malformed,
+unterminated, scalar, and sequence documents are rejected rather than leaked into
+the post. Inline `--text` keeps a leading `---` literal. There is no `--format`
+(one format) and no `--long` (single 3 000 cap). `--media` is **explicit** — LinkedIn media is optional and
 multi-image, so auto-discovering images next to a file (as the X hero flow does)
 would guess intent; explicit paths are the safe default.
 
@@ -128,10 +129,9 @@ own centralized, calibration-flagged `LI_COMPOSER_SELECTORS`.
 `generatePost(text, opts) -> GeneratedPost` — same discipline as X: plain code so
 output is reproducible and verifiable.
 
-- **Char fit.** Cap **3 000** code points (`countChars`). Over cap → emit the
-  leading segment + a warning (never silent truncation). Emoji ZWJ sequences
-  count as multiple code points → conservative over-count, the safe direction
-  (same rationale as the X `countChars` comment).
+- **Char fit.** Cap **3 000 UTF-16 code units**, as confirmed by the desktop
+  composer. Over cap → reject locally with the actual/maximum/unit and exit 2
+  before browser access. Never truncate or emit a partial post.
 - **Hook / fold advisory.** Compute the above-the-fold preview (first ~210 chars
   or up to the first blank line) and warn if the hook is weak (starts with a
   link, is a bare heading label, or is very short). Advisory only — we never
@@ -148,6 +148,10 @@ output is reproducible and verifiable.
   LinkedIn expects). No stripping, ever. (First-class per requirement.)
 - **Code blocks →** reuse `codeFlags`: "LinkedIn won't render code — paste a
   screenshot or add it as a document."
+- **Markdown images →** omit the parser-confirmed image token from plain-text
+  transport and surface its destination. Only explicit, locally validated
+  `--media` paths attach files. Media-only staging is unverified and unsupported;
+  non-empty rendered text remains required even when media is supplied.
 - **Links →** reuse `linkFlags`, reworded: "LinkedIn suppresses reach on body
   links — post this URL as the **first comment** instead." Surfaced in the result
   note (a first comment can't be pre-saved in a draft, so it's a human step
@@ -164,7 +168,9 @@ output is reproducible and verifiable.
    modal).
 2. `tolerantLocator` the composer contenteditable → `typeText(...)` the generated
    post (emoji + newlines intact).
-3. **Media (optional):** for each `--media` path, drive the "add media" control's
+3. **Media (optional):** validate each `--media` path locally in caller order
+   (readability, magic/header type, extension match, bytes, dimensions, and
+   aspect) before browser access, then drive the "add media" control's
    hidden `input[type=file]` via `setInputFiles` (same technique as the X hero
    upload, minus the 5:2 ratio gate — LinkedIn feed images are ratio-flexible).
    Handle the media preview / "Next" dialog with `optionalLocator`.
@@ -222,5 +228,6 @@ Rows 1–3 are pure refactors (X behavior unchanged) so LinkedIn is not a fork o
 - The "Save as draft" confirmation dialog wording/affordance is the highest-risk
   selector — mis-clicking must never fall through to Post (mirror X's
   "don't guess another button" safeguard in `saveAsDraft`).
-- LinkedIn's exact character-count semantics (code points vs. UTF-16) — we
-  over-count conservatively to avoid overflowing the composer.
+- Media count, maximum bytes/pixels, minimum dimensions, and accepted ratio
+  range remain server-authoritative because current live acceptance conflicts
+  with older documented limits. Measure and report them; do not hard-reject.

@@ -1,11 +1,9 @@
 import { Command, InvalidArgumentError, Option } from "commander";
 import {
   AUTH_PLATFORMS,
-  probeAuthPlatforms,
-  unexpectedProbeReadiness,
   type AuthPlatform,
   type AuthReadiness,
-} from "../auth/index.js";
+} from "../auth/types.js";
 
 interface AuthCheckOptions {
   platform?: string[];
@@ -18,6 +16,8 @@ export interface AuthCheckExecution {
   results: AuthReadiness[];
   exitCode: 0 | 1;
 }
+
+export type AuthPlatformsProbe = (platforms: AuthPlatform[]) => Promise<AuthReadiness[]>;
 
 function collectPlatforms(value: string, previous: string[] = []): string[] {
   const parts = value.split(",").map((part) => part.trim());
@@ -89,22 +89,29 @@ export function registerAuthCheckCommand(parent: Command): void {
 /** Injectable command boundary used by the CLI and deterministic regression tests. */
 export async function executeAuthCheck(
   platforms: AuthPlatform[],
-  probe: typeof probeAuthPlatforms = probeAuthPlatforms,
+  probe?: AuthPlatformsProbe,
 ): Promise<AuthCheckExecution> {
+  const registry = probe ? undefined : await import("../auth/registry.js");
+  const selectedProbe = probe ?? registry!.probeAuthPlatforms;
+  const unexpected = async (platform: AuthPlatform): Promise<AuthReadiness> => {
+    const module = registry ?? await import("../auth/registry.js");
+    return module.unexpectedProbeReadiness(platform, undefined);
+  };
+
   // probeAuthPlatforms already isolates per-platform failures. This outer
   // boundary protects the command if a future registry implementation rejects
   // before it can return receipts.
   let results: AuthReadiness[];
   try {
-    results = await probe(platforms);
+    results = await selectedProbe(platforms);
   } catch {
-    results = platforms.map((platform) => unexpectedProbeReadiness(platform, undefined));
+    results = await Promise.all(platforms.map(unexpected));
   }
 
   const byPlatform = new Map(results.map((result) => [result.platform, result]));
   if (platforms.some((platform) => !byPlatform.has(platform))) {
-    results = platforms.map(
-      (platform) => byPlatform.get(platform) ?? unexpectedProbeReadiness(platform, undefined),
+    results = await Promise.all(
+      platforms.map(async (platform) => byPlatform.get(platform) ?? await unexpected(platform)),
     );
   }
   return {

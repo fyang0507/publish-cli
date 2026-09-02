@@ -25,7 +25,13 @@ import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from
 import { dirname, extname, join } from "node:path";
 import { getBrowserContext, type EnsureSessionOptions } from "../session.js";
 import type { ArticleBlock, GeneratedContent, InlineRun } from "./content.js";
-import { isLivePositiveXArticleCoverPath } from "../capabilities/validation.js";
+import {
+  extractTweetId,
+  isLivePositiveXArticleCoverPath,
+} from "../capabilities/validation.js";
+
+// Preserve the existing public import while keeping parsing in a browser-free module.
+export { extractTweetId } from "../capabilities/validation.js";
 
 /**
  * Centralized composer/draft selectors. EVERY entry NEEDS LIVE CALIBRATION.
@@ -326,27 +332,6 @@ export interface StageReplyResult extends StageDraftResult {
 }
 
 export interface StageReplyOptions extends StageDraftOptions {}
-
-/**
- * Extract a numeric tweet id from a full X/Twitter status URL or accept a raw
- * id. Throws on anything that isn't a plausible id. Deterministic + testable.
- * Accepts: https://x.com/user/status/123, https://twitter.com/.../status/123?s=..,
- * /i/web/status/123, or a bare "123".
- */
-export function extractTweetId(input: string): string {
-  const raw = input.trim();
-  if (/^\d{5,25}$/.test(raw)) return raw;
-  // status/<id> anywhere in the URL/path.
-  const m = raw.match(/status(?:es)?\/(\d{5,25})/);
-  if (m) return m[1];
-  // Last-ditch: a long digit run in the string.
-  const d = raw.match(/(\d{10,25})/);
-  if (d) return d[1];
-  throw new Error(
-    `Could not extract a tweet id from "${input}". Pass a status URL ` +
-      "(https://x.com/<user>/status/<id>) or a raw numeric id.",
-  );
-}
 
 /**
  * Stage a REPLY to `toIdOrUrl` as a NATIVE DRAFT (issue #8). NEVER posts.

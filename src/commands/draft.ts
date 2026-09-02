@@ -7,6 +7,7 @@ import {
   type GeneratedContent,
   type XFormat,
 } from "../x/content.js";
+import { isLocalValidationError } from "../capabilities/validation.js";
 import { resolveContentInput } from "./contentInput.js";
 
 /**
@@ -96,14 +97,28 @@ export function registerDraftCommand(x: Command): void {
         process.exit(2);
       }
 
-      const md = resolveContentInput(opts);
+      let md: string;
+      try {
+        md = resolveContentInput(opts);
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
+        process.exit(2);
+      }
       // A real file base path (not stdin) — used to locate an article's hero
       // asset and to place the --dry-run artifact. Undefined for --text/stdin.
       const basePath = opts.from && opts.from !== "-" ? resolve(opts.from) : undefined;
 
       // DETERMINISTIC generation. No LLM voice pass by default (formatting,
       // splitting, and char-fit must stay reproducible).
-      const content = await generateContent(md, { format, long: opts.long });
+      let content: GeneratedContent;
+      try {
+        content = await generateContent(md, { format, long: opts.long });
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
+        process.exit(2);
+      }
 
       // Always show the generated content + advisory flags to the operator.
       console.log(renderForInspection(content));

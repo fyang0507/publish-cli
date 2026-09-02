@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { env } from "../config.js";
-import { BrowserReader, type XPost } from "../x/reader.js";
+import type { XPost } from "../x/reader.js";
 
 /**
  * `publish x history` — read the operator's OWN published posts and replies.
@@ -135,6 +135,7 @@ async function runHistory(opts: HistoryOptions): Promise<void> {
 
   // Reads run THROUGH the logged-in browser session (same mechanism as `watch`);
   // a headful login happens only if the persisted profile isn't authed.
+  const { BrowserReader } = await import("../x/reader.js");
   const reader = new BrowserReader({ inspect: opts.inspect });
   await reader.init();
 
