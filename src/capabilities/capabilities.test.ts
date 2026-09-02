@@ -149,6 +149,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(xhs, /10,?000/);
   assert.match(xhs, /1,?000/);
   assert.match(xhs, /browser-local/i);
+  assert.match(xhs, /Long-article drafts are browser-local.*maximum of 100/s);
+  assert.match(xhs, /observed behavior, not a universal limit/);
   assert.match(xhs, /copy the first Markdown H1/);
   assert.match(xhs, /Default to a plain long article/);
   assert.match(xhs, /Only when image cards are requested/);
@@ -156,11 +158,15 @@ test("free-text guidance preserves each channel's execution handoff and essentia
 
   const acres = `${CHANNEL_INFO_SOURCES["1point3acres"].cliBoundary}\n${CHANNEL_INFO_SOURCES["1point3acres"].authentication}\n${CHANNEL_INFO_SOURCES["1point3acres"].platformGuidance}`;
   assert.match(acres, /CLI offers no functionality to access or write 1point3acres/);
-  assert.match(acres, /human to open and log in/);
-  assert.match(acres, /agent takes over in that same context/);
+  assert.match(acres, /human must always perform login/);
+  assert.match(acres, /automation is available and the user has explicitly authorized it/);
+  assert.match(acres, /otherwise the human (?:follows|continues)/);
+  assert.doesNotMatch(acres, /agent takes over/);
   assert.match(acres, /98/);
   assert.match(acres, /29/);
   assert.match(acres, /28/);
+  assert.match(acres, /Observed theme choices: 职场感言, 请问贵司, 管理, 晋升, 老板相处, 辞职, 扩张, 绩效, 换组, 跳槽, 改行, 自我提升, 裁员, 新组上路, 同事协作, 带新人, 实习体验, 求比较\./);
+  assert.match(acres, /Observed theme choices: 其他, 求职简历, 找工就业, 实习, 选组选Offer, 应届生NG, ICC合同工, EE硬件, TeamMatch\./);
   assert.match(acres, /保存草稿/);
   assert.match(acres, /No calibrated authenticated\/save-success marker/);
 });
@@ -260,8 +266,11 @@ test("external readiness descriptors remain actionable without a typed static wo
   });
   assert.match(acresRendered, /human login required \(human_login_required\)/);
   assert.match(acresRendered, /human open and log in/i);
-  assert.match(acresRendered, /hand that same context to the agent/i);
-  assert.doesNotMatch(acresRendered, /browser agents must not operate/i);
+  assert.match(acresRendered, /automation is available and the user has explicitly authorized it/i);
+  assert.match(acresRendered, /otherwise the human follows the same guidance/i);
+  assert.equal(acresReadiness.nextStep?.executor, "human");
+  assert.equal(acresReadiness.nextStep?.continueInSameContext, true);
+  assert.equal(acresReadiness.requiresHuman, true);
   assert.doesNotMatch(acresRendered, /Recovery help:/);
 });
 

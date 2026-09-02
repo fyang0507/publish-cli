@@ -44,7 +44,7 @@ function externallyOwnedDescriptor(
       liveProbe: "not_run",
       note: isXhs
         ? "This channel's authenticated browser context is owned by the browser agent, not publish-cli."
-        : "publish-cli does not access this website; the human performs login, then the browser agent owns drafting and composer verification.",
+        : "publish-cli does not access this website. The human always performs login; afterward, a browser/computer-use agent may continue in the same context only when automation is available and the user has explicitly authorized it, otherwise the human follows the info guidance to fill, save, reopen, and verify.",
     },
     healed: [],
     requiresHuman: !isXhs,
@@ -53,7 +53,7 @@ function externallyOwnedDescriptor(
       entryUrl: isXhs ? XHS_ENTRY_URL : ONEPOINT3ACRES_ENTRY_URL,
       instruction: isXhs
         ? "Open the creator portal with the browser agent, let the human scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
-        : "Have the human open and log in to 1point3acres in a browser the agent can control. Then hand that same context to the agent to draft, save, and reopen the post; return to the human for review and any publish decision.",
+        : "Have the human open and log in to 1point3acres, preserving that browser context. After login, a browser/computer-use agent may follow publish 1point3acres info there only when automation is available and the user has explicitly authorized it; otherwise the human follows the same guidance to fill, save, reopen, and verify. The human retains every publish decision.",
       continueInSameContext: true,
     },
   };
@@ -178,7 +178,7 @@ function failureNextStep(platform: AuthPlatform, status: "network_error" | "prob
       status === "network_error"
         ? `Restore network access for ${platform}, then rerun publish auth check --platform ${platform}.`
         : humanHandoff
-          ? "Have the human log in to 1point3acres in a controllable browser, then let the agent inspect the composer, draft, save, and reopen the post in that same context."
+          ? "Have the human log in to 1point3acres, preserving that browser context. After login, a browser/computer-use agent may follow publish 1point3acres info there only when automation is available and the user has explicitly authorized it; otherwise the human follows the same fill, save, reopen, and verification guidance."
         : `Inspect the ${platform} authentication workflow without exposing credentials, then rerun publish auth check --platform ${platform}; do not infer readiness from local state alone.`,
     continueInSameContext: browserOwned || humanHandoff,
   };

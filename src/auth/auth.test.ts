@@ -609,7 +609,13 @@ test("registry exposes one shared probe seam for auth check and future info comm
   assert.equal(xhs.nextStep?.executor, "agent_browser");
   assert.equal(acres.nextStep?.executor, "human");
   assert.equal(xhs.requiresHuman, false);
+  assert.equal(acres.requiresHuman, true);
   assert.equal(acres.verificationMode, "human_handoff");
+  assert.match(acres.evidence.note ?? "", /human always performs login/i);
+  assert.match(acres.evidence.note ?? "", /automation is available and the user has explicitly authorized it/i);
+  assert.match(acres.evidence.note ?? "", /otherwise the human follows the info guidance/i);
+  assert.match(acres.nextStep?.instruction ?? "", /automation is available and the user has explicitly authorized it/i);
+  assert.match(acres.nextStep?.instruction ?? "", /otherwise the human follows the same guidance/i);
 });
 
 test("registry isolates a rejected platform and preserves multi-platform receipts", async () => {

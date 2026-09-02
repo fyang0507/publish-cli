@@ -33,11 +33,14 @@ scheduled publish action.
 ## 1point3acres discovery boundary
 
 `publish 1point3acres info` is an offline capability/manual-handoff contract.
-The CLI performs no crawl, login, composer fill, draft save, or submit action.
-`publish 1point3acres info` itself contains the curated forum mappings, weighted
-title evidence, destination-specific required metadata, and the complete textual
-handoff procedure. A human uses that handoff in a normal authorized browser,
-saves with `保存草稿`, and reopens `草稿箱`; the final submit action remains outside
+The CLI performs no crawl, login, composer fill, draft save, or submit action;
+a human always performs login and any challenge. After login, a
+browser/computer-use agent may continue in that same context only when
+automation is available and the user has explicitly authorized it; otherwise
+the human follows the same guidance to fill, save with
+`保存草稿`, reopen `草稿箱`, and verify the draft. `publish 1point3acres info` itself
+remains the authoritative execution oracle for forum mappings, weighted-title
+evidence, required metadata, and this procedure. Final submit is always outside
 the workflow.
 
 ## Capability matrix
