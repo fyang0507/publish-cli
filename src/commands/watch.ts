@@ -2,9 +2,8 @@ import { Command } from "commander";
 import { readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { loadWatchConfig, type TriageConfig, type WatchConfig } from "../config.js";
-import { SeenStore } from "../db.js";
 import { filterByLanguage, parseAllowedLanguages } from "../langFilter.js";
-import { BrowserReader, type XPost } from "../x/reader.js";
+import type { XPost } from "../x/reader.js";
 import { collapseThreads } from "../x/thread.js";
 import { triagePosts, type TriagedPost } from "../x/triage.js";
 
@@ -204,6 +203,7 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
   // a per-request transaction-id only its own page JS can mint, so we let the
   // real browser make the calls and capture its GraphQL responses. A (headful,
   // if --inspect) login happens only if the persisted profile isn't authed.
+  const { BrowserReader } = await import("../x/reader.js");
   const reader = new BrowserReader({ inspect: opts.inspect });
   await reader.init();
 
@@ -239,6 +239,7 @@ async function runWatchX(opts: WatchXOptions): Promise<void> {
 
     // Dedupe within this poll (a candidate can match multiple origins) and against
     // the persistent seen-store; only NEW candidates proceed to triage.
+    const { SeenStore } = await import("../db.js");
     const store = new SeenStore();
     try {
       const seenThisPoll = new Set<string>();

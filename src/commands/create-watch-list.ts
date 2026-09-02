@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { env } from "../config.js";
-import { XListManager, type XFollowedUser, type AddMemberResult } from "../x/lists.js";
+import type { XFollowedUser, AddMemberResult } from "../x/lists.js";
 
 /**
  * `publish x create-watch-list` — build/populate an X List, the PRECURSOR to
@@ -95,6 +95,7 @@ async function runCreateWatchList(opts: CreateWatchListOptions): Promise<void> {
   }
   const name = opts.name ?? (opts.xList ? undefined : "Watchlist");
 
+  const { XListManager } = await import("../x/lists.js");
   const mgr = new XListManager({ inspect: opts.inspect });
   await mgr.init();
 

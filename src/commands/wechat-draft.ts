@@ -3,7 +3,10 @@ import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { resolveContentInput, type ContentInputOptions } from "./contentInput.js";
 import { generateArticle, renderArticleForInspection, type GeneratedArticle } from "../wechat/content.js";
-import { createServerValidationReceipt } from "../capabilities/validation.js";
+import {
+  createServerValidationReceipt,
+  isLocalValidationError,
+} from "../capabilities/validation.js";
 
 /**
  * `publish wechat draft` — owned-content publisher for the WeChat Official Account
@@ -58,7 +61,14 @@ export function registerWechatDraftCommand(parent: Command): void {
     .option("--out <file.html>", "Write the rendered inline-styled HTML to a file for inspection")
     .option("--dry-run", "Render + validate only; NO network, NO token, NO upload, NO draft/add")
     .action(async (opts: WechatDraftOptions) => {
-      const md = resolveContentInput(opts);
+      let md: string;
+      try {
+        md = resolveContentInput(opts);
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
+        process.exit(2);
+      }
 
       // Relative cover / body-image paths resolve against the --from file's directory
       // (so `./imgs/x.png` loads next to the article), or the CWD for inline --text / stdin.
@@ -80,8 +90,9 @@ export function registerWechatDraftCommand(parent: Command): void {
           keepLinks: opts.keepLinks,
           baseDir,
         });
-      } catch (err) {
-        console.error((err as Error).message);
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
         process.exit(2);
       }
 
@@ -101,7 +112,8 @@ export function registerWechatDraftCommand(parent: Command): void {
       // above is the whole run. No token minted, no image uploaded, no draft/add.
       if (opts.dryRun) {
         console.log(
-          "\n[dry-run] Deterministic render + metadata validation passed. " +
+          "\n[dry-run] Deterministic render + local validation passed; measured image facts are above, " +
+            "and listed server-authoritative constraints remain unverified. " +
             "No token minted, no images uploaded, no draft/add call — nothing staged.\n" +
             "  Re-run without --dry-run to upload the cover/body images and stage the native draft.",
         );

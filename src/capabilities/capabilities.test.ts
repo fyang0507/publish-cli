@@ -28,6 +28,32 @@ import {
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const CHECKED_AT = "2026-09-01T00:00:00.000Z";
 
+function pngHeader(width: number, height: number): Buffer {
+  const buffer = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer);
+  buffer.write("IHDR", 12, "ascii");
+  buffer.writeUInt32BE(width, 16);
+  buffer.writeUInt32BE(height, 20);
+  return buffer;
+}
+
+function bmpHeader(width: number, height: number): Buffer {
+  const buffer = Buffer.alloc(26);
+  buffer.write("BM", 0, "ascii");
+  buffer.writeUInt32LE(12, 14);
+  buffer.writeUInt16LE(width, 18);
+  buffer.writeUInt16LE(height, 20);
+  return buffer;
+}
+
+function gifHeader(width: number, height: number): Buffer {
+  const buffer = Buffer.alloc(10);
+  buffer.write("GIF89a", 0, "ascii");
+  buffer.writeUInt16LE(width, 6);
+  buffer.writeUInt16LE(height, 8);
+  return buffer;
+}
+
 function ready(channel: (typeof AUTH_PLATFORMS)[number]): AuthReadiness {
   return {
     platform: channel,
@@ -104,6 +130,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /publish x draft --format article --from/);
   assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
   assert.match(x, /directory containing the `--from` Markdown/);
+  assert.match(x, /leading H1.*later heading lines.*image-only lines.*`Key: value`/s);
+  assert.match(x, /exact source-line fidelity warning/);
   assert.match(x, /intended authenticated action with `--inspect`/);
   assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
   assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
@@ -117,6 +145,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(linkedin, /4:5/);
   assert.match(linkedin, /credentials are missing or rejected/);
   assert.match(linkedin, /intended draft with `--inspect`/);
+  assert.match(linkedin, /recognized JPEG, PNG, GIF, or WebP magic\/header/);
+  assert.match(linkedin, /dimension-unreadable, and extension-mismatch inputs are rejected locally/);
   assert.doesNotMatch(linkedin, /Run `publish linkedin info`|readiness\.ready/);
 
   const reddit = `${CHANNEL_INFO_SOURCES.reddit.cliBoundary}\n${CHANNEL_INFO_SOURCES.reddit.authentication}\n${CHANNEL_INFO_SOURCES.reddit.platformGuidance}`;
@@ -138,6 +168,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(wechat, /WECHAT_PROXY_URL/);
   assert.match(wechat, /socks5:\/\//);
   assert.match(wechat, /40164/);
+  assert.match(wechat, /Header-invalid, dimension-unreadable, and extension-mismatch inputs/);
+  assert.match(wechat, /covers then allow BMP\/GIF\/JPEG\/PNG.*body images allow only JPEG\/PNG/s);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
   assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
@@ -176,13 +208,6 @@ test("X Article cover selection has a deterministic lexical tie-break", async ()
   try {
     const basePath = join(dir, "article.md");
     writeFileSync(basePath, "# Article\n");
-    const pngHeader = (width: number, height: number) => {
-      const buffer = Buffer.alloc(24);
-      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buffer);
-      buffer.writeUInt32BE(width, 16);
-      buffer.writeUInt32BE(height, 20);
-      return buffer;
-    };
     writeFileSync(join(dir, "z-cover.png"), pngHeader(1500, 600));
     writeFileSync(join(dir, "a-cover.png"), pngHeader(1500, 600));
 
@@ -297,10 +322,17 @@ test("X uses official twitter-text fixtures from issue #40", () => {
   assert.equal(validateXPostText("汉".repeat(141)).valid, false);
 });
 
-test("X generation validates weighted CJK", async () => {
-  const x = await generateContent("汉".repeat(141), { format: "tweet" });
-  assert.equal(x.tweet?.chars, 280);
-  assert.ok(x.warnings.some((warning) => /282/.test(warning)));
+test("X generation rejects rather than shortening weighted overflow", async () => {
+  await assert.rejects(
+    generateContent("汉".repeat(141), { format: "tweet" }),
+    (error: Error & { problem?: { actual?: number; expected?: string; unit?: string } }) => {
+      assert.match(error.message, /282 weighted chars/);
+      assert.equal(error.problem?.actual, 282);
+      assert.equal(error.problem?.expected, "<= 280");
+      assert.equal(error.problem?.unit, "twitter_text_weighted");
+      return true;
+    },
+  );
 });
 
 test("X thread splitting preserves URLs, punctuation, CJK, NFD, and ZWJ content", async () => {
@@ -367,9 +399,16 @@ test("LinkedIn uses live-confirmed UTF-16 fixtures from issue #41", () => {
     assert.equal(validateLinkedInPostText(fixture).valid, false);
   }
 
-  const linkedin = generatePost("😀".repeat(1501));
-  assert.equal(linkedin.chars, 3000);
-  assert.ok(linkedin.warnings.some((warning) => /3002/.test(warning)));
+  assert.throws(
+    () => generatePost("😀".repeat(1501)),
+    (error: Error & { problem?: { actual?: number; expected?: string; unit?: string } }) => {
+      assert.match(error.message, /3002 UTF-16 code units/);
+      assert.equal(error.problem?.actual, 3002);
+      assert.equal(error.problem?.expected, "<= 3000");
+      assert.equal(error.problem?.unit, "utf16_code_units");
+      return true;
+    },
+  );
 });
 
 test("server-authoritative validation receipts preserve sanitized unknown errors", () => {
@@ -392,35 +431,53 @@ test("WeChat leaves unknown 字 measurement to the server and omits derived dige
   const dir = mkdtempSync(join(tmpdir(), "publish-wechat-capability-"));
   try {
     const cover = join(dir, "cover.bmp");
-    writeFileSync(cover, "fixture");
+    writeFileSync(cover, bmpHeader(900, 900));
     const article = generateArticle(`# ${"题".repeat(64)}\n\nBody paragraph`, { cover });
     assert.equal(article.title, "题".repeat(64));
     assert.equal(article.digest, "");
     assert.ok(article.warnings.some((warning) => /first 54 字/.test(warning)));
 
     const bodyGif = join(dir, "body.gif");
-    writeFileSync(bodyGif, "fixture");
+    writeFileSync(bodyGif, gifHeader(800, 600));
     assert.throws(
       () => generateArticle("# Title\n\n![body](body.gif)", { cover, baseDir: dir }),
-      /body image must use \.jpg\/\.jpeg\/\.png/,
+      (error: unknown) => {
+        const local = error as Error & {
+          problem?: { code?: string; actual?: string; expected?: string; unit?: string };
+        };
+        assert.equal(
+          local.message,
+          `body image must use .jpg/.jpeg/.png ` +
+            `(actual: image/gif; expected: .jpg/.jpeg/.png): ${bodyGif}`,
+        );
+        assert.doesNotMatch(local.message, /Please report this|markedjs/);
+        assert.equal(local.problem?.code, "wechat_image_type_unsupported");
+        assert.equal(local.problem?.actual, "image/gif");
+        assert.equal(local.problem?.expected, ".jpg/.jpeg/.png");
+        assert.equal(local.problem?.unit, "content_type");
+        return true;
+      },
     );
 
     const documentedLabelCover = join(dir, "documented-label-cover.jpg");
     const documentedLabelBody = join(dir, "documented-label-body.png");
-    writeFileSync(documentedLabelCover, "");
-    writeFileSync(documentedLabelBody, "");
+    writeFileSync(documentedLabelCover, Buffer.from([
+      0xff, 0xd8, 0xff, 0xc0, 0x00, 0x11, 0x08, 0x02, 0x58, 0x03, 0x20,
+      0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x00, 0x03, 0x11, 0x00, 0xff, 0xd9,
+    ]));
+    writeFileSync(documentedLabelBody, pngHeader(800, 600));
     truncateSync(documentedLabelCover, 10_000_000);
     truncateSync(documentedLabelBody, 1_000_000);
-    assert.deepEqual(validateWechatLocalImage(documentedLabelCover, "cover"), {
-      valid: true,
-      surface: "cover",
-      extension: ".jpg",
-      contentType: "image/jpeg",
-      sizeBytes: 10_000_000,
-      maximumBytes: null,
-      error: null,
-    });
-    assert.equal(validateWechatLocalImage(documentedLabelBody, "body").valid, true);
+    const validatedCover = validateWechatLocalImage(documentedLabelCover, "cover");
+    assert.equal(validatedCover.valid, true);
+    assert.equal(validatedCover.contentType, "image/jpeg");
+    assert.equal(validatedCover.sizeBytes, 10_000_000);
+    assert.equal(validatedCover.width, 800);
+    assert.equal(validatedCover.height, 600);
+    assert.equal(validatedCover.maximumBytes, null);
+    const validatedBody = validateWechatLocalImage(documentedLabelBody, "body");
+    assert.equal(validatedBody.valid, true);
+    assert.equal(validatedBody.maximumBytes, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

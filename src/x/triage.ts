@@ -1,4 +1,4 @@
-import { GeminiClient } from "../gemini.js";
+import type { GeminiClient } from "../gemini.js";
 import type { TriageConfig } from "../config.js";
 import type { XPost } from "./reader.js";
 
@@ -40,10 +40,11 @@ export async function triagePosts(
   posts: XPost[],
   triageConfig: TriageConfig,
   model: string,
-  gemini: GeminiClient = new GeminiClient(),
+  gemini?: GeminiClient,
   batchSize = 25,
 ): Promise<TriagedPost[]> {
   if (posts.length === 0) return [];
+  const client = gemini ?? new (await import("../gemini.js")).GeminiClient();
 
   const byId = new Map(posts.map((p) => [p.id, p]));
   const results: TriagedPost[] = [];
@@ -54,7 +55,7 @@ export async function triagePosts(
 
     let verdicts: TriageResult[] = [];
     try {
-      const raw = await gemini.triage(model, prompt);
+      const raw = await client.triage(model, prompt);
       verdicts = parseTriageJson(raw);
     } catch (err) {
       // Triage is advisory; one bad batch shouldn't sink the whole poll. Emit

@@ -167,7 +167,8 @@ sourceUrl: https://example.com/original
 ```
 
 `--dry-run` renders the HTML, resolves + validates all metadata, and reports the
-body-image / cover / link plan **without any network call** (no token, no upload,
+cover/body-image MIME, byte size, dimensions, aspect, order, and the remaining
+server-authoritative constraints **without any network call** (no token, no upload,
 no `draft/add`) — the WeChat analog of Reddit's browser-free dry-run. Combined with
 `--out`, the operator can eyeball the exact HTML before spending a token or an
 allowlisted call.
@@ -335,9 +336,10 @@ draft assembler needs, with **no network and no LLM**:
    numbered footnote list showing the URL as text) — the reference's default and the
    WeChat-friendly choice. `--keep-links` opts out and leaves inline links as-is.
    Links to `mp.weixin.qq.com` are always kept inline.
-5. **Return** `{ title, author, digest, html, coverPath, sourceUrl, bodyImages[],
-   linkFlags, warnings[] }`. `bodyImages[]` are the local paths the assembler must
-   upload + rewrite. `warnings[]` carries advisories (omitted digest delegated to
+5. **Return** `{ title, author, digest, html, coverPath, coverValidation,
+   sourceUrl, bodyImages[], linkFlags, warnings[] }`. `bodyImages[]` carry the
+   local path plus measured validation result the assembler must upload + rewrite.
+   `warnings[]` carries advisories (omitted digest delegated to
    WeChat, links converted to citations, remote image found) — printed for the
    operator, never silent.
 
@@ -354,12 +356,16 @@ non-WeChat hosts are stripped from published articles. Two upload paths, both in
   /cgi-bin/media/uploadimg` → returns a WeChat CDN **URL**; the assembler rewrites
   the corresponding `<img src>` to that URL. Official documentation says jpg/png
   and `1MB以下`; exact byte semantics are unresolved and server-authoritative, so
-  the CLI validates the extension and file presence but does not invent a local
-  byte cutoff. Auto-compression is a follow-up (§8).
+  the CLI validates readable-file status, JPEG/PNG magic/header, extension match,
+  byte size, and readable dimensions/aspect, then reports the measured values
+  without inventing a local byte/dimension/ratio cutoff. Auto-compression is a
+  follow-up (§8).
 - **Cover (`thumb_media_id`):** `POST /cgi-bin/material/add_material?type=image` →
   returns a **permanent-material** `media_id` used as the article's
-  `thumb_media_id`. Official documentation labels the maximum `10M`; exact byte
-  semantics remain unresolved/server-authoritative. Note: this consumes the
+  `thumb_media_id`. The CLI accepts locally confirmed BMP/PNG/JPEG/GIF header
+  types and reports bytes/dimensions/aspect. Official documentation labels the
+  maximum `10M`; exact bytes, dimension/ratio/pixel limits, and body-image count
+  remain unresolved/server-authoritative. Note: this consumes the
   account's permanent-material quota; a future optimization could dedupe by
   content hash (§8).
 - **Remote images** (`http(s)://` sources in the markdown): flagged as a

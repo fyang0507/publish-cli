@@ -1,7 +1,14 @@
 import { Command } from "commander";
-import { generateContent, renderForInspection } from "../x/content.js";
+import {
+  generateContent,
+  renderForInspection,
+  type GeneratedContent,
+} from "../x/content.js";
+import {
+  extractTweetId,
+  isLocalValidationError,
+} from "../capabilities/validation.js";
 import { resolveContentInput } from "./contentInput.js";
-import { ReplyLedger } from "../db.js";
 
 /**
  * `publish x reply` — stage a NATIVE X REPLY draft targeted at an existing tweet
@@ -47,11 +54,16 @@ export function registerReplyCommand(x: Command): void {
     .action(async (opts: ReplyXOptions) => {
       // Resolve content (inline --text or --from file/stdin) up front so a usage
       // error fails fast before we touch the browser or the ledger.
-      const md = resolveContentInput(opts);
+      let md: string;
+      try {
+        md = resolveContentInput(opts);
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        console.error(error.message);
+        process.exit(2);
+      }
 
-      // Resolve/validate the target id up front so a bad --to fails fast (even in
-      // --dry-run). Import lazily so --dry-run/--help don't pull in Playwright.
-      const { extractTweetId } = await import("../x/draftPoster.js");
+      // Resolve/validate the target id in the dependency-light validation layer.
       let replyToId: string;
       try {
         replyToId = extractTweetId(opts.to);
@@ -61,10 +73,39 @@ export function registerReplyCommand(x: Command): void {
         return;
       }
 
-      // WRITE-DEDUP (issue #10): a reply is a write, so it gets its own
-      // idempotency guarantee independent of the read-path SeenStore. Refuse to
-      // re-stage a reply to a tweet already in the ledger unless --force. In
-      // --dry-run we only WARN (nothing is staged, so nothing to prevent).
+      // DETERMINISTIC generation. A reply is a single tweet by default; if the
+      // content overflows the limit, fall back to a thread so nothing is dropped.
+      let content: GeneratedContent;
+      let overflowed = false;
+      try {
+        content = await generateContent(md, { format: "tweet", long: opts.long });
+      } catch (error) {
+        if (!isLocalValidationError(error)) throw error;
+        if (error.problem.code !== "x_text_too_long") {
+          console.error(error.message);
+          process.exit(2);
+        }
+        overflowed = true;
+        try {
+          content = await generateContent(md, { format: "thread", long: opts.long });
+        } catch (threadError) {
+          if (!isLocalValidationError(threadError)) throw threadError;
+          console.error(threadError.message);
+          process.exit(2);
+        }
+      }
+      if (overflowed) {
+        console.log(
+          `[note] Reply content exceeds the single-post limit — staging it as a ${content.thread?.length ?? 0}-post reply thread.`,
+        );
+      }
+
+      console.log(`Replying to tweet ${replyToId}:\n`);
+      console.log(renderForInspection(content));
+
+      // WRITE-DEDUP (issue #10): validation above completes before durable state
+      // is opened. Refuse an intentional duplicate unless --force.
+      const { ReplyLedger } = await import("../db.js");
       const ledger = new ReplyLedger();
       const prior = ledger.find(replyToId);
       if (prior && !opts.force) {
@@ -83,22 +124,6 @@ export function registerReplyCommand(x: Command): void {
           return;
         }
       }
-
-      // DETERMINISTIC generation. A reply is a single tweet by default; if the
-      // content overflows the limit, fall back to a thread so nothing is dropped.
-      const tweet = await generateContent(md, { format: "tweet", long: opts.long });
-      const overflowed = tweet.warnings.some((w) => /leading segment/i.test(w));
-      const content = overflowed
-        ? await generateContent(md, { format: "thread", long: opts.long })
-        : tweet;
-      if (overflowed) {
-        console.log(
-          `[note] Reply content exceeds the single-post limit — staging it as a ${content.thread?.length ?? 0}-post reply thread.`,
-        );
-      }
-
-      console.log(`Replying to tweet ${replyToId}:\n`);
-      console.log(renderForInspection(content));
 
       if (opts.dryRun) {
         ledger.close();

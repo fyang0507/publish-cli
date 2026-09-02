@@ -1,10 +1,5 @@
 import { Command } from "commander";
-import {
-  probeAuth,
-  unexpectedProbeReadiness,
-  type AuthPlatform,
-  type AuthReadiness,
-} from "../auth/index.js";
+import type { AuthPlatform, AuthReadiness } from "../auth/types.js";
 import {
   CHANNEL_INFO_SCHEMA_VERSION,
   getChannelInfoSource,
@@ -25,13 +20,15 @@ export type ChannelInfoProbe = (channel: AuthPlatform) => Promise<AuthReadiness>
 
 export async function executeChannelInfo(
   channel: AuthPlatform,
-  authProbe: ChannelInfoProbe = probeAuth,
+  authProbe?: ChannelInfoProbe,
   now: () => number = Date.now,
 ): Promise<ChannelInfoExecution> {
   let readiness: AuthReadiness;
   try {
-    readiness = await authProbe(channel);
+    const probe = authProbe ?? (await import("../auth/registry.js")).probeAuth;
+    readiness = await probe(channel);
   } catch (error) {
+    const { unexpectedProbeReadiness } = await import("../auth/registry.js");
     readiness = unexpectedProbeReadiness(channel, error, now());
   }
 

@@ -270,8 +270,9 @@ plain code, reproducible, verifiable, no LLM deciding content.
   error, never silent truncation.
 - **Body → Markdown, kept verbatim.** Reddit renders GFM-ish Markdown, so we do
   **not** flatten (the key divergence from LinkedIn). Strip only a leading H1 if
-  it was consumed as the title. Cap **~40 000** code points; over cap → emit
-  leading segment + warning.
+  it was consumed as the title. The local transport guard is **40 000 Unicode
+  code points**; over cap → reject with exit 2 before browser access. Never
+  shorten caller content.
 - **Old-vs-new render advisory.** `publish reddit info --json` is the current
   channel contract. The generator still advises 4-space-indented code and
   cautions on tables for old.reddit. Reuse `codeFlags` to surface this. The

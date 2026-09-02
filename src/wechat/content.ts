@@ -43,7 +43,12 @@ import { parseBaseMarkdown, type LinkFlag } from "../x/content.js";
 import { resolve as resolvePath } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { marked, Renderer } from "marked";
-import { assertWechatLocalImage } from "../capabilities/validation.js";
+import {
+  LocalValidationError,
+  WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS,
+  assertWechatLocalImage,
+  type LocalImageValidationResult,
+} from "../capabilities/validation.js";
 
 /** WeChat's own article domain — links here are always kept inline (never cited). */
 const WECHAT_HOST = "mp.weixin.qq.com";
@@ -80,6 +85,13 @@ export interface BodyImage {
   src: string;
   /** The resolved local filesystem path (absolute, against `baseDir`) — the client reads this to upload. */
   path: string;
+  /** Locally measured header facts; platform acceptance limits remain unknown. */
+  validation: LocalImageValidationResult;
+}
+
+interface PendingBodyImage {
+  src: string;
+  path: string;
 }
 
 /** Result of a WeChat article generation run. */
@@ -94,6 +106,8 @@ export interface GeneratedArticle {
   html: string;
   /** Resolved local cover path (absolute) — draft.ts uploads it as thumb_media_id. */
   coverPath: string;
+  /** Locally measured cover facts; platform acceptance limits remain unknown. */
+  coverValidation: LocalImageValidationResult;
   /** content_source_url (阅读原文), if any. */
   sourceUrl?: string;
   /** LOCAL images referenced by `<img>` in html, first-seen order (draft.ts uploads + rewrites). */
@@ -287,7 +301,8 @@ interface RenderContext {
   keepLinks: boolean;
   /** Base dir for resolving relative local image paths (the markdown file's dir, or cwd). */
   baseDir: string;
-  bodyImages: BodyImage[];
+  /** Collected during rendering; validated only after marked.parse returns. */
+  bodyImages: PendingBodyImage[];
   remoteImages: string[];
   citations: Citation[];
   citeByUrl: Map<string, number>;
@@ -374,9 +389,13 @@ function buildRenderer(ctx: RenderContext): Renderer {
     // Local image: keep the src VERBATIM in the html so draft.ts can string-match +
     // rewrite it to the uploaded WeChat CDN URL. Collect the raw src PLUS its path
     // resolved against baseDir (the markdown file's dir) so the client reads the file
-    // next to the article, not from the process CWD (first-seen order, deduped by src).
+    // next to the article, not from the process CWD (first-seen order, deduped by
+    // src). Do not validate inside a Renderer callback: Marked catches renderer
+    // exceptions and appends its own bug-report text, polluting our typed local
+    // validation message.
     if (!ctx.bodyImages.some((b) => b.src === href)) {
-      ctx.bodyImages.push({ src: href, path: resolvePath(ctx.baseDir, href) });
+      const path = resolvePath(ctx.baseDir, href);
+      ctx.bodyImages.push({ src: href, path });
     }
     return `<img src="${href}" alt="${alt}" style="${S.img}">`;
   };
@@ -433,9 +452,16 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   const title = optTitle || fmTitle || h1Title;
   const titleFromH1 = !optTitle && !fmTitle && !!h1Title;
   if (!title) {
-    throw new Error(
+    throw new LocalValidationError(
       "WeChat article requires a title: pass --title, add a `title:` frontmatter field, " +
         "or start the markdown with an H1 (`# ...`).",
+      {
+        code: "wechat_title_missing",
+        field: "title",
+        actual: null,
+        expected: "non-empty --title, title frontmatter, or leading H1",
+        unit: null,
+      },
     );
   }
   // Relative cover / body-image paths resolve against the markdown file's dir
@@ -445,13 +471,20 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   // --- cover (REQUIRED) ---
   const coverRaw = (opts.cover ?? data.cover)?.trim();
   if (!coverRaw) {
-    throw new Error(
+    throw new LocalValidationError(
       "WeChat article requires a cover image (封面 / thumb_media_id): pass --cover <image.(bmp|png|jpg|jpeg|gif)>, " +
         "or add a `coverImage`/`cover`/`image` frontmatter field.",
+      {
+        code: "wechat_cover_missing",
+        field: "media",
+        actual: null,
+        expected: "one local BMP, PNG, JPEG, or GIF cover image",
+        unit: null,
+      },
     );
   }
   const coverPath = resolvePath(baseDir, coverRaw);
-  assertWechatLocalImage(coverPath, "cover");
+  const coverValidation = assertWechatLocalImage(coverPath, "cover");
 
   // --- author ---
   const author = (opts.author ?? data.author ?? "").trim();
@@ -470,6 +503,12 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   };
   const renderer = buildRenderer(ctx);
   const bodyHtml = marked.parse(bodyMarkdown, { renderer }) as string;
+  // Validate outside Marked's renderer call stack so LocalValidationError text
+  // and structured actual/expected/unit evidence pass through unchanged.
+  const bodyImages: BodyImage[] = ctx.bodyImages.map((image) => ({
+    ...image,
+    validation: assertWechatLocalImage(image.path, "body"),
+  }));
   const html = bodyHtml + renderCitations(ctx.citations);
 
   // --- digest (摘要) ---
@@ -500,8 +539,6 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
         `article would drop them. Reference local image files instead (auto reupload is a follow-up).`,
     );
   }
-  for (const image of ctx.bodyImages) assertWechatLocalImage(image.path, "body");
-
   const linkFlags = collectLinkFlags(bodyMarkdown);
 
   return {
@@ -510,8 +547,9 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
     digest,
     html,
     coverPath,
+    coverValidation,
     sourceUrl: (opts.sourceUrl ?? data.sourceUrl)?.trim() || undefined,
-    bodyImages: ctx.bodyImages,
+    bodyImages,
     linkFlags,
     warnings,
   };
@@ -532,15 +570,29 @@ export function renderArticleForInspection(a: GeneratedArticle): string {
   out.push(`title (documented 32 字; server-authoritative measurement): ${a.title}`);
   out.push(`author: ${a.author || "(none)"}`);
   out.push(`digest (documented 120 字; omitted => first 54 字): ${a.digest || "(omitted)"}`);
-  out.push(`cover: ${a.coverPath}`);
+  out.push("", "── local image validation ──");
+  out.push(
+    `cover: ${a.coverPath}`,
+    `  ${a.coverValidation.contentType}; ${a.coverValidation.width}x${a.coverValidation.height}; ` +
+      `${a.coverValidation.sizeBytes} bytes; aspect ${a.coverValidation.aspectRatio?.toFixed(4)}`,
+  );
   if (a.sourceUrl) out.push(`source url (阅读原文): ${a.sourceUrl}`);
 
   if (a.bodyImages.length) {
     out.push("", `── body images (${a.bodyImages.length}, uploaded to WeChat on a real run) ──`);
     for (const img of a.bodyImages) {
-      out.push(img.src === img.path ? `  ${img.src}` : `  ${img.src}  →  ${img.path}`);
+      out.push(
+        img.src === img.path ? `  ${img.src}` : `  ${img.src}  →  ${img.path}`,
+        `    ${img.validation.contentType}; ${img.validation.width}x${img.validation.height}; ` +
+          `${img.validation.sizeBytes} bytes; aspect ${img.validation.aspectRatio?.toFixed(4)}`,
+      );
     }
   }
+
+  out.push(
+    "locally verified: readable file, magic/header type, extension match, dimensions, bytes, caller order",
+    `server-authoritative/unverified: ${WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS.join(", ")}`,
+  );
 
   out.push("", "── HTML body (inline-styled; <img src> rewritten on a real run) ──", a.html);
 
