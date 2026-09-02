@@ -15,7 +15,7 @@ The agent chooses the destination and flair from live inspection, prepares compl
 
 `search` and `inspect` are logged-out reads. Reddit may return a non-JSON 403/network-security wall; the CLI retries headfully once, and that response is a read/network block rather than proof of logout.
 
-Drafting uses a CLI-owned Playwright persistent profile with `REDDIT_USERNAME` and `REDDIT_PASSWORD` (`REDDIT_EMAIL` when requested). Authentication can fail because credentials are missing or rejected, the session expired, Reddit requires CAPTCHA or another human challenge, the account is ineligible for the community, the network is blocked, or selector drift made the probe inconclusive.
+Drafting uses a CLI-owned Playwright persistent profile. `REDDIT_USERNAME` and `REDDIT_PASSWORD` enable auto-fill (`REDDIT_EMAIL` only when requested), but under `--inspect` the human may enter credentials manually. Authentication can fail because credentials are rejected, the session expired, Reddit requires CAPTCHA or another human challenge, the account is ineligible for the community, the network is blocked, or selector drift made the probe inconclusive.
 
 To establish or recover the draft session, the agent starts the intended draft with `--inspect`; that command opens the CLI-owned profile, the human completes login/CAPTCHA there, and the same command continues afterward.
 

@@ -102,7 +102,10 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /5:2/);
   assert.match(x, /280/);
   assert.match(x, /publish x draft --format article --from/);
-  assert.match(x, /intended draft or reply with `--inspect`/);
+  assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
+  assert.match(x, /directory containing the `--from` Markdown/);
+  assert.match(x, /intended authenticated action with `--inspect`/);
+  assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
   assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
   assert.match(x, /credentials are missing or rejected/);
   assert.doesNotMatch(x, /Run `publish x info`|readiness\.ready/);
@@ -133,11 +136,13 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(wechat, /1:1/);
   assert.match(wechat, /WECHAT_SSH_TUNNEL/);
   assert.match(wechat, /WECHAT_PROXY_URL/);
+  assert.match(wechat, /socks5:\/\//);
   assert.match(wechat, /40164/);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
   assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
   assert.match(xhs, /agent is expected to use its own/);
+  assert.match(xhs, /documented external workflow/);
   assert.match(xhs, /creator\.xiaohongshu\.com/);
   assert.match(xhs, /\.md|Markdown/);
   assert.match(xhs, /64/);
@@ -157,6 +162,7 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(acres, /29/);
   assert.match(acres, /28/);
   assert.match(acres, /保存草稿/);
+  assert.match(acres, /No calibrated authenticated\/save-success marker/);
 });
 
 test("X Article cover selection has a deterministic lexical tie-break", async () => {
@@ -221,6 +227,7 @@ test("human info is readiness-first and renders the three Markdown sections", ()
   assert.ok(rendered.indexOf("Readiness: ready") < rendered.indexOf("## CLI boundary"));
   assert.match(rendered, /Healed: token_refreshed/);
   assert.match(rendered, /Exit behavior: info returns 0 even when not ready/);
+  assert.match(rendered, /publish wechat info --json/);
   assert.match(rendered, /## CLI boundary/);
   assert.match(rendered, /## Authentication/);
   assert.match(rendered, /## Platform specification and gotchas/);
@@ -237,8 +244,12 @@ test("external readiness descriptors remain actionable without a typed static wo
     readiness: xhsReadiness,
   });
   assert.match(xhsRendered, /external preflight required \(agent_check_required\)/);
+  assert.match(xhsRendered, /Next owner: agent_browser/);
+  assert.doesNotMatch(xhsRendered, /Next owner: agent_browser \(human participation required\)/);
   assert.match(xhsRendered, /Next: Open the creator portal with the browser agent/);
   assert.match(xhsRendered, /continue.*same browser context/is);
+  assert.doesNotMatch(xhsRendered, /Recovery help:/);
+  assert.equal(xhsReadiness.requiresHuman, false);
 
   const acresReadiness = await registry["1point3acres"]();
   const acresRendered = renderChannelInfo({
@@ -247,9 +258,11 @@ test("external readiness descriptors remain actionable without a typed static wo
     info: CHANNEL_INFO_SOURCES["1point3acres"],
     readiness: acresReadiness,
   });
+  assert.match(acresRendered, /human login required \(human_login_required\)/);
   assert.match(acresRendered, /human open and log in/i);
   assert.match(acresRendered, /hand that same context to the agent/i);
   assert.doesNotMatch(acresRendered, /browser agents must not operate/i);
+  assert.doesNotMatch(acresRendered, /Recovery help:/);
 });
 
 test("X uses official twitter-text fixtures from issue #40", () => {
@@ -417,6 +430,22 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   const wechatInfoHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "info", "--help"], { encoding: "utf8" });
   assert.equal(wechatInfoHelp.status, 0);
   assert.match(wechatInfoHelp.stdout, /token_refreshed/);
+
+  const xDraftHelp = spawnSync(process.execPath, [CLI_PATH, "x", "draft", "--help"], { encoding: "utf8" });
+  assert.equal(xDraftHelp.status, 0);
+  assert.match(xDraftHelp.stdout, /Required: tweet \| thread \| article/);
+  assert.match(xDraftHelp.stdout, /local 25,000-code-point guard/);
+
+  const redditDraftHelp = spawnSync(process.execPath, [CLI_PATH, "reddit", "draft", "--help"], { encoding: "utf8" });
+  assert.equal(redditDraftHelp.status, 0);
+  assert.match(redditDraftHelp.stdout, /validate locally; skips live subreddit\s+preflight/);
+
+  const wechatCheckHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "check", "--help"], { encoding: "utf8" });
+  assert.equal(wechatCheckHelp.status, 0);
+  assert.match(wechatCheckHelp.stdout, /WECHAT_SSH_TUNNEL=\[user@\]host\[:port\]/);
+  assert.match(wechatCheckHelp.stdout, /WECHAT_PROXY_URL=socks5:\/\//);
+  assert.match(wechatCheckHelp.stdout, /developers\.weixin\.qq\.com\/platform/);
+  assert.match(wechatCheckHelp.stdout, /If it returns 40164, add the exact reported egress IP/);
 
   const rejected = spawnSync(process.execPath, [CLI_PATH, "x", "info", "--format", "tweet"], { encoding: "utf8" });
   assert.equal(rejected.status, 2);

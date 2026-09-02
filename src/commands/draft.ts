@@ -76,10 +76,10 @@ export function registerDraftCommand(x: Command): void {
   x
     .command("draft")
     .description("Stage a NATIVE X draft (tweet/thread/article) from a canonical base markdown — never posts")
-    .requiredOption("--format <format>", "tweet | thread | article")
+    .requiredOption("--format <format>", "Required: tweet | thread | article")
     .option("--text <content>", "Content inline (tweet/thread only; exactly one of --text / --from)")
     .option("--from <base.md>", "Path to the canonical base markdown ('-' = stdin)")
-    .option("--long", "Raise the tweet limit to the Premium long-post cap (default up to 25000)")
+    .option("--long", "Use the local 25,000-code-point guard for Premium long posts; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .action(async (opts: DraftXOptions) => {

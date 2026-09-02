@@ -48,7 +48,10 @@ function browserConfig(platform: "x" | "linkedin" | "reddit"): PassiveBrowserPro
     challengeSelectors: ["#challenge"],
     loggedOutUrlPatterns: [/login/],
     challengeUrlPatterns: [/challenge/],
-    workflowRef: `${platform}#authentication`,
+    credentialsConfigured: true,
+    manualLoginSupported: false,
+    workflowRef: `publish ${platform} draft --help`,
+    credentialsInstruction: "Configure credentials before continuing.",
     loginInstruction: "Log in and continue in the same context.",
     challengeInstruction: "Complete the challenge and continue in the same context.",
   };
@@ -301,7 +304,8 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     );
     assert.equal(result.ready, false);
     assert.equal(result.status, "login_required");
-    assert.equal(result.nextStep?.executor, "operator");
+    assert.equal(result.nextStep?.executor, "agent");
+    assert.equal(result.requiresHuman, platform === "reddit");
     assert.equal(result.nextStep?.continueInSameContext, true);
   });
 
@@ -354,6 +358,36 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     assert.notEqual(result.status, "login_required");
   });
 }
+
+test("browser zero state distinguishes required credentials from login", () => {
+  const result = evaluateBrowserReadiness(
+    { ...browserConfig("x"), credentialsConfigured: false },
+    ZERO,
+    { kind: "logged_out" },
+    CHECKED_AT,
+  );
+  assert.equal(result.status, "credentials_missing");
+  assert.equal(result.evidence.credentialsConfigured, false);
+  assert.equal(result.nextStep?.executor, "human");
+  assert.match(result.nextStep?.instruction ?? "", /Configure credentials/);
+});
+
+test("Reddit inspect flow can recover through manual credential entry", () => {
+  const result = evaluateBrowserReadiness(
+    {
+      ...browserConfig("reddit"),
+      credentialsConfigured: false,
+      manualLoginSupported: true,
+      loginInstruction: "Enter credentials manually in the inspected browser.",
+    },
+    ZERO,
+    { kind: "logged_out" },
+    CHECKED_AT,
+  );
+  assert.equal(result.status, "login_required");
+  assert.equal(result.evidence.credentialsConfigured, false);
+  assert.match(result.nextStep?.instruction ?? "", /manually/);
+});
 
 test("empty profile directories are not meaningful local evidence", () => {
   const dir = mkdtempSync(join(tmpdir(), "publish-auth-empty-"));
@@ -431,7 +465,10 @@ test("wechat: fresh-machine missing credentials returns executable setup nextSte
   assert.equal(result.requiresHuman, true);
   assert.match(result.nextStep?.instruction ?? "", /WECHAT_APP_ID/);
   assert.match(result.nextStep?.instruction ?? "", /WECHAT_PROXY_URL/);
+  assert.match(result.nextStep?.instruction ?? "", /socks5:\/\//);
   assert.match(result.nextStep?.instruction ?? "", /publish wechat check/);
+  assert.equal(result.nextStep?.executor, "human");
+  assert.equal(result.nextStep?.entryUrl, "https://developers.weixin.qq.com/platform/");
 });
 
 test("wechat: expired token is renewed automatically and reported in healed", async () => {
@@ -566,11 +603,12 @@ test("registry exposes one shared probe seam for auth check and future info comm
   const xhs = await registry.xhs();
   const acres = await registry["1point3acres"]();
   assert.equal(xhs.status, "agent_check_required");
-  assert.equal(acres.status, "agent_check_required");
+  assert.equal(acres.status, "human_login_required");
   assert.equal(xhs.nextStep?.continueInSameContext, true);
   assert.equal(acres.nextStep?.continueInSameContext, true);
   assert.equal(xhs.nextStep?.executor, "agent_browser");
   assert.equal(acres.nextStep?.executor, "human");
+  assert.equal(xhs.requiresHuman, false);
   assert.equal(acres.verificationMode, "human_handoff");
 });
 
@@ -670,6 +708,8 @@ test("auth CLI help lists platform modes and removed --all fails actionably with
   assert.match(help.stdout, /CLI-probed\s+x, linkedin, reddit, wechat/);
   assert.match(help.stdout, /Agent-browser\s+xhs/);
   assert.match(help.stdout, /Human-login\s+1point3acres/);
+  assert.match(help.stdout, /nextStep\.executor owns and initiates the immediate step/);
+  assert.match(help.stdout, /requiresHuman=true only when.*immediate step.*human participation/);
   assert.doesNotMatch(help.stdout, /--all/);
 
   const removed = spawnSync(process.execPath, [CLI_PATH, "auth", "check", "--all"], {

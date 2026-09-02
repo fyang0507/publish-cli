@@ -13,9 +13,9 @@ The agent supplies and previews the final text and image order, stages the draft
 
 ## Authentication
 
-LinkedIn uses a separate CLI-owned Playwright persistent profile with `LI_USERNAME` and `LI_PASSWORD` (`LI_EMAIL` when a checkpoint requests it). First login or a challenge is completed by the human in the headful `--inspect` browser; an unrelated browser session does not transfer.
+LinkedIn uses a separate CLI-owned Playwright persistent profile. Configure `LI_USERNAME`, `LI_PASSWORD`, and `LI_EMAIL` before the first content-bearing command; this transport does not support manual credential entry or transfer an unrelated browser session.
 
-To establish or recover that session, the agent starts the intended draft with `--inspect`; that command opens the CLI-owned profile, the human completes login/checkpoints there, and the same command continues afterward.
+To establish or recover that session, the agent starts the intended draft with `--inspect`; that command opens the CLI-owned profile, the human completes any checkpoint there, and the same command continues afterward.
 
 Authentication can fail because credentials are missing or rejected, the persisted session expired, LinkedIn requires a checkpoint, the network failed, or selector drift made the probe inconclusive. Profile and cookie files are only evidence; the auth receipt is the current result.
 

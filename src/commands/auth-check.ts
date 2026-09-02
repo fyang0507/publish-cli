@@ -63,7 +63,7 @@ export function registerAuthCheckCommand(parent: Command): void {
     .option("--json", "Emit a sanitized machine-readable receipt")
     .addHelpText(
       "after",
-      "\nPlatform modes:\n  CLI-probed     x, linkedin, reddit, wechat\n  Agent-browser  xhs (returns agent_check_required with a browser-agent next step)\n  Human-login    1point3acres (the human logs in, then hands the browser to the agent)\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
+      "\nPlatform modes:\n  CLI-probed     x, linkedin, reddit, wechat\n  Agent-browser  xhs (returns agent_check_required with a browser-agent next step)\n  Human-login    1point3acres (the human logs in, then hands the browser to the agent)\n\nReceipt roles:\n  nextStep.executor owns and initiates the immediate step. requiresHuman=true only when that immediate step cannot finish without human participation; conditional later escalation remains false until encountered.\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
     )
     .action(async (opts: AuthCheckOptions) => {
       let platforms: AuthPlatform[];
@@ -142,7 +142,7 @@ export function renderAuthReport(results: AuthReadiness[]): string {
     if (result.nextStep) {
       lines.push(`  next: ${result.nextStep.instruction}`);
       if (result.nextStep.entryUrl) lines.push(`  entry: ${result.nextStep.entryUrl}`);
-      lines.push(`  workflow: ${result.nextStep.workflowRef}`);
+      if (result.nextStep.workflowRef) lines.push(`  help: ${result.nextStep.workflowRef}`);
     }
     lines.push("");
   }

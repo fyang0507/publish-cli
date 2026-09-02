@@ -9,7 +9,7 @@ displayName: Xiaohongshu / RedNote
 
 The CLI offers no functionality to access or write Xiaohongshu. The agent is expected to use its own headful browser/computer-use tools to import a long article, resolve platform choices, save it, and reopen the browser-local draft. The human handles QR login, reviews generated cards/cover and the reopened draft, and makes the final publish decision.
 
-The supported workflow below is long-article import. Direct image-text staging is not yet specified well enough to claim support.
+The documented external workflow below is long-article import. Direct image-text staging is not yet specified well enough to claim support.
 
 ## Authentication
 

@@ -9,7 +9,7 @@ import {
 import type { AuthNextStep, AuthReadiness } from "./types.js";
 
 const WECHAT_SETUP_WORKFLOW_REF =
-  "skills/publish/SETUP.md#wechat-channel--credentials--fixed-egress-ip-the-gcloud-dependency";
+  "publish wechat check --help";
 
 export interface WeChatAuthDependencies {
   credentialsConfigured(): boolean;
@@ -31,9 +31,10 @@ function nextStep(
 ): AuthNextStep {
   if (status === "credentials_missing" || status === "credentials_rejected") {
     return {
-      executor: "operator",
+      executor: "human",
+      entryUrl: "https://developers.weixin.qq.com/platform/",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
-      instruction: "Set valid WECHAT_APP_ID and WECHAT_APP_SECRET in .env plus exactly one of WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL, then run the canonical single-channel preflight: publish wechat check.",
+      instruction: "Have the human obtain valid WECHAT_APP_ID and WECHAT_APP_SECRET from the WeChat Developer Platform. Then the agent sets them in .env, configures exactly one fixed egress (WECHAT_SSH_TUNNEL=[user@]host[:port] or WECHAT_PROXY_URL=socks5://[user:pass@]host:port; http(s) is also accepted), and runs publish wechat check. If it returns 40164, add the exact reported egress IP to IP白名单 and rerun.",
       continueInSameContext: false,
     };
   }
@@ -49,14 +50,14 @@ function nextStep(
   }
   if (status === "network_error") {
     return {
-      executor: "operator",
+      executor: "agent",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
       instruction: "Restore WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL connectivity to api.weixin.qq.com, then rerun publish wechat check.",
       continueInSameContext: false,
     };
   }
   return {
-    executor: "operator",
+    executor: "agent",
     workflowRef: WECHAT_SETUP_WORKFLOW_REF,
     instruction: "Inspect the sanitized WeChat probe stage and egress configuration, then rerun publish wechat check; do not assume readiness without an authenticated API success.",
     continueInSameContext: false,

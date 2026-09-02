@@ -53,7 +53,7 @@ export function registerRedditDraftCommand(reddit: Command): void {
     .option("--flair <id|text>", "Flair template id, or text matched to a template")
     .option("--nsfw", "Mark the post NSFW")
     .option("--spoiler", "Mark the post as a spoiler")
-    .option("--dry-run", "Generate + preflight-validate only; do not open the composer")
+    .option("--dry-run", "Generate and validate locally; skips live subreddit preflight and composer")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .action(async (opts: RedditDraftOptions) => {
       const md = resolveContentInput(opts);

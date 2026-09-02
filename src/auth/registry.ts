@@ -1,9 +1,7 @@
-import { peekDataPaths } from "../config.js";
+import { env, peekDataPaths } from "../config.js";
 import {
   ONEPOINT3ACRES_ENTRY_URL,
-  ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
   XHS_ENTRY_URL,
-  XHS_CAPABILITY_WORKFLOW_REF,
 } from "../capabilities/workflows.js";
 import { LI_LOGIN_SELECTORS } from "../linkedin/session.js";
 import { REDDIT_LOGIN_SELECTORS } from "../reddit/session.js";
@@ -31,8 +29,6 @@ export interface AuthProbeDependencies {
 export type AuthProbe = () => Promise<AuthReadiness>;
 export type AuthProbeRegistry = Record<AuthPlatform, AuthProbe>;
 
-const BROWSER_AUTH_WORKFLOW_REF = "skills/publish/SETUP.md#first-login-headful";
-
 function externallyOwnedDescriptor(
   platform: Extract<AuthPlatform, "xhs" | "1point3acres">,
   nowMs: number,
@@ -41,7 +37,7 @@ function externallyOwnedDescriptor(
   return {
     platform,
     ready: false,
-    status: "agent_check_required",
+    status: isXhs ? "agent_check_required" : "human_login_required",
     checkedAt: new Date(nowMs).toISOString(),
     verificationMode: isXhs ? "browser_agent" : "human_handoff",
     evidence: {
@@ -51,13 +47,12 @@ function externallyOwnedDescriptor(
         : "publish-cli does not access this website; the human performs login, then the browser agent owns drafting and composer verification.",
     },
     healed: [],
-    requiresHuman: true,
+    requiresHuman: !isXhs,
     nextStep: {
       executor: isXhs ? "agent_browser" : "human",
       entryUrl: isXhs ? XHS_ENTRY_URL : ONEPOINT3ACRES_ENTRY_URL,
-      workflowRef: isXhs ? XHS_CAPABILITY_WORKFLOW_REF : ONEPOINT3ACRES_CAPABILITY_WORKFLOW_REF,
       instruction: isXhs
-        ? "Open the creator portal with the browser agent, let the operator scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
+        ? "Open the creator portal with the browser agent, let the human scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
         : "Have the human open and log in to 1point3acres in a browser the agent can control. Then hand that same context to the agent to draft, save, and reopen the post; return to the human for review and any publish decision.",
       continueInSameContext: true,
     },
@@ -84,9 +79,12 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       ],
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/, /\/i\/flow\/login/],
       challengeUrlPatterns: [/challenge/i, /account\/access/i],
-      workflowRef: BROWSER_AUTH_WORKFLOW_REF,
-      loginInstruction: "Run the intended publish x draft ... --inspect or publish x reply ... --inspect command, which opens the CLI-owned profile. Have the human complete login there, verify Home, and let the same command continue.",
-      challengeInstruction: "Run the intended X draft or reply with --inspect in the CLI-owned profile. Have the human complete the visible identity, CAPTCHA, 2FA, or checkpoint step, verify Home, and let the same command continue.",
+      credentialsConfigured: !!env.X_USERNAME && !!env.X_PASSWORD && !!env.X_EMAIL,
+      manualLoginSupported: false,
+      workflowRef: "publish x --help",
+      credentialsInstruction: "Have the human provision X_USERNAME, X_PASSWORD, and X_EMAIL in .env. Then the agent runs its intended authenticated X action with --inspect; do not stage a draft merely to authenticate a read/list action.",
+      loginInstruction: "Run the intended authenticated X action with --inspect (create-watch-list, watch, draft, reply, or history), which opens the CLI-owned profile. Let that same command continue after login.",
+      challengeInstruction: "Run the intended authenticated X action with --inspect in the CLI-owned profile. Have the human complete the visible identity, CAPTCHA, 2FA, or checkpoint step, verify Home, and let the same command continue.",
     },
     linkedin: {
       platform: "linkedin",
@@ -106,7 +104,10 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       ],
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/, /\/uas\/login/],
       challengeUrlPatterns: [/\/checkpoint\//, /challenge/i],
-      workflowRef: BROWSER_AUTH_WORKFLOW_REF,
+      credentialsConfigured: !!env.LI_USERNAME && !!env.LI_PASSWORD && !!env.LI_EMAIL,
+      manualLoginSupported: false,
+      workflowRef: "publish linkedin draft --help",
+      credentialsInstruction: "Have the human provision LI_USERNAME, LI_PASSWORD, and LI_EMAIL in .env. Then the agent runs the intended publish linkedin draft ... --inspect command.",
       loginInstruction: "Run the intended publish linkedin draft ... --inspect command, which opens the CLI-owned profile. Have the human complete login there, verify the feed, and let the same command continue.",
       challengeInstruction: "Run the intended LinkedIn draft with --inspect in the CLI-owned profile. Have the human complete the visible CAPTCHA, 2FA, identity, or device checkpoint, verify the feed, and let the same command continue.",
     },
@@ -128,8 +129,11 @@ function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserPro
       ],
       loggedOutUrlPatterns: [/\/login(?:$|[/?#])/],
       challengeUrlPatterns: [/js_challenge=1/, /challenge/i],
-      workflowRef: BROWSER_AUTH_WORKFLOW_REF,
-      loginInstruction: "Run the intended publish reddit draft ... --inspect command, which opens the CLI-owned profile. Have the human complete login or CAPTCHA there, verify the user menu, and let the same command continue.",
+      credentialsConfigured: !!env.REDDIT_USERNAME && !!env.REDDIT_PASSWORD,
+      manualLoginSupported: true,
+      workflowRef: "publish reddit draft --help",
+      credentialsInstruction: "Set REDDIT_USERNAME and REDDIT_PASSWORD in .env, or enter them manually in the visible browser opened by the intended publish reddit draft ... --inspect command.",
+      loginInstruction: "Run the intended publish reddit draft ... --inspect command, which opens the CLI-owned profile. Configured credentials are auto-filled; if absent, the human may enter them manually and solve CAPTCHA in that visible window. Verify the user menu and let the same command continue.",
       challengeInstruction: "Run the intended Reddit draft with --inspect in the CLI-owned profile. Have the human solve the CAPTCHA or identity challenge, verify the user menu, and let the same command continue.",
     },
   };
@@ -157,9 +161,19 @@ export function createAuthProbeRegistry(deps: AuthProbeDependencies = {}): AuthP
 function failureNextStep(platform: AuthPlatform, status: "network_error" | "probe_inconclusive") {
   const browserOwned = platform === "xhs";
   const humanHandoff = platform === "1point3acres";
+  const workflowRef =
+    platform === "x"
+      ? "publish x --help"
+      : platform === "linkedin"
+        ? "publish linkedin draft --help"
+        : platform === "reddit"
+          ? "publish reddit draft --help"
+          : platform === "wechat"
+            ? "publish wechat check --help"
+            : undefined;
   return {
-    executor: browserOwned ? ("agent_browser" as const) : humanHandoff ? ("human" as const) : ("operator" as const),
-    workflowRef: `${platform}#auth-probe-${status === "network_error" ? "network" : "inconclusive"}`,
+    executor: browserOwned ? ("agent_browser" as const) : humanHandoff ? ("human" as const) : ("agent" as const),
+    ...(workflowRef ? { workflowRef } : {}),
     instruction:
       status === "network_error"
         ? `Restore network access for ${platform}, then rerun publish auth check --platform ${platform}.`

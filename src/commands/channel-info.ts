@@ -52,18 +52,23 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
     ? "ready"
     : readiness.status === "agent_check_required"
       ? "external preflight required"
+      : readiness.status === "human_login_required"
+        ? "human login required"
       : "not ready";
   const out = [
     `${info.displayName} channel info`,
     `${info.channel === "reddit" ? "Draft readiness" : "Readiness"}: ${readinessLabel} (${readiness.status})`,
-    "Exit behavior: info returns 0 even when not ready; inspect readiness.ready/status in automation.",
+    `Exit behavior: info returns 0 even when not ready; run publish ${info.channel} info --json and inspect readiness.ready/status in automation.`,
   ];
 
   if (readiness.healed.length) out.push(`Healed: ${readiness.healed.join(", ")}`);
   if (readiness.nextStep) {
+    out.push(
+      `Next owner: ${readiness.nextStep.executor}${readiness.requiresHuman ? " (human participation required)" : ""}`,
+    );
     out.push(`Next: ${readiness.nextStep.instruction}`);
     if (readiness.nextStep.entryUrl) out.push(`Recovery entry: ${readiness.nextStep.entryUrl}`);
-    out.push(`Recovery reference: ${readiness.nextStep.workflowRef}`);
+    if (readiness.nextStep.workflowRef) out.push(`Recovery help: ${readiness.nextStep.workflowRef}`);
   }
 
   out.push(
@@ -86,7 +91,9 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
 export function registerChannelInfoCommand(parent: Command, channel: AuthPlatform): void {
   const readinessHelp = channel === "wechat"
     ? "WeChat may perform its normal token exchange and report token_refreshed."
-    : "Browser readiness probes are passive.";
+    : channel === "xhs" || channel === "1point3acres"
+      ? "Info returns an external handoff descriptor and does not access the platform."
+      : "Browser readiness probes are passive.";
   parent
     .command("info")
     .description("Show Markdown channel guidance plus bounded auth readiness")

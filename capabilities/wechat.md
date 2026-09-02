@@ -15,6 +15,10 @@ The agent prepares the article and assets, configures fixed egress, runs dry-run
 
 WeChat uses `WECHAT_APP_ID` and `WECHAT_APP_SECRET` over the Official Account API, not a browser profile. Every call must use one stable, allowlisted egress configured with either `WECHAT_SSH_TUNNEL` or `WECHAT_PROXY_URL`; a short-lived stable token is cached locally and may be renewed automatically.
 
+Accepted forms are `WECHAT_SSH_TUNNEL=[user@]host[:port]` or `WECHAT_PROXY_URL=socks5://[user:pass@]host:port` (also `http://` or `https://`). Set exactly one, using a host whose public IP is stable.
+
+Provision credentials at `https://developers.weixin.qq.com/platform/`, configure one stable egress, then run `publish wechat check`. If it returns `40164`, add the exact egress IP reported by WeChat to IP白名单 with an admin QR scan, then rerun the check. Do not guess the proxy endpoint's outbound IP.
+
 Authentication can fail because credentials are missing or rejected, token exchange fails, error `40164` reports an egress IP absent from IP白名单, the SSH tunnel/proxy or network fails, or the API response is inconclusive. There is no allowlist-edit API: a human must add the reported IP in the developer console and approve it by QR scan.
 
 ## Platform specification and gotchas

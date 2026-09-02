@@ -31,7 +31,10 @@ export interface PassiveBrowserProbeConfig {
   challengeSelectors: string[];
   loggedOutUrlPatterns: RegExp[];
   challengeUrlPatterns: RegExp[];
+  credentialsConfigured: boolean;
+  manualLoginSupported: boolean;
   workflowRef: string;
+  credentialsInstruction: string;
   loginInstruction: string;
   challengeInstruction: string;
 }
@@ -194,14 +197,26 @@ export function inspectBrowserLocalEvidence(
   };
 }
 
-function browserNextStep(config: PassiveBrowserProbeConfig, challenge: boolean): AuthNextStep {
+function browserNextStep(
+  config: PassiveBrowserProbeConfig,
+  kind: "credentials" | "login" | "challenge",
+): AuthNextStep {
   return {
-    executor: "operator",
+    executor: kind === "credentials" || kind === "challenge" ? "human" : "agent",
     entryUrl: config.entryUrl,
     workflowRef: config.workflowRef,
-    instruction: challenge ? config.challengeInstruction : config.loginInstruction,
+    instruction:
+      kind === "credentials"
+        ? config.credentialsInstruction
+        : kind === "challenge"
+          ? config.challengeInstruction
+          : config.loginInstruction,
     continueInSameContext: true,
   };
+}
+
+function missingRequiredCredentials(config: PassiveBrowserProbeConfig): boolean {
+  return !config.credentialsConfigured && !config.manualLoginSupported;
 }
 
 export function evaluateBrowserReadiness(
@@ -216,6 +231,7 @@ export function evaluateBrowserReadiness(
     verificationMode: "passive_browser" as const,
     evidence: {
       ...local,
+      credentialsConfigured: config.credentialsConfigured,
       liveProbe: live.kind,
       ...(live.note ? { note: live.note } : {}),
     },
@@ -226,12 +242,13 @@ export function evaluateBrowserReadiness(
     return { ...common, ready: true, status: "ready", requiresHuman: false };
   }
   if (live.kind === "logged_out") {
+    const credentialsMissing = missingRequiredCredentials(config);
     return {
       ...common,
       ready: false,
-      status: "login_required",
-      requiresHuman: true,
-      nextStep: browserNextStep(config, false),
+      status: credentialsMissing ? "credentials_missing" : "login_required",
+      requiresHuman: credentialsMissing || config.platform === "reddit",
+      nextStep: browserNextStep(config, credentialsMissing ? "credentials" : "login"),
     };
   }
   if (live.kind === "challenge") {
@@ -240,7 +257,7 @@ export function evaluateBrowserReadiness(
       ready: false,
       status: "human_challenge_required",
       requiresHuman: true,
-      nextStep: browserNextStep(config, true),
+      nextStep: browserNextStep(config, "challenge"),
     };
   }
   if (live.kind === "network_error") {
@@ -250,8 +267,8 @@ export function evaluateBrowserReadiness(
       status: "network_error",
       requiresHuman: false,
       nextStep: {
-        executor: "operator",
-        workflowRef: `${config.workflowRef}#probe-network`,
+        executor: "agent",
+        workflowRef: config.workflowRef,
         instruction: `Restore network/browser access to ${config.entryUrl}, then rerun publish auth check --platform ${config.platform}.`,
         continueInSameContext: false,
       },
@@ -263,9 +280,9 @@ export function evaluateBrowserReadiness(
     status: "probe_inconclusive",
     requiresHuman: false,
     nextStep: {
-      executor: "operator",
+      executor: "agent",
       entryUrl: config.entryUrl,
-      workflowRef: `${config.workflowRef}#probe-inconclusive`,
+      workflowRef: config.workflowRef,
       instruction: `The passive ${config.platform} probe was inconclusive. ${config.loginInstruction}`,
       continueInSameContext: true,
     },
@@ -282,20 +299,22 @@ export function zeroStateBrowserReadiness(
   local: BrowserLocalEvidence,
   checkedAt = new Date().toISOString(),
 ): AuthReadiness {
+  const credentialsMissing = missingRequiredCredentials(config);
   return {
     platform: config.platform,
     ready: false,
-    status: "login_required",
+    status: credentialsMissing ? "credentials_missing" : "login_required",
     checkedAt,
     verificationMode: "passive_browser",
     evidence: {
       ...local,
+      credentialsConfigured: config.credentialsConfigured,
       liveProbe: "not_run",
       note: "No meaningful persistent browser profile exists. The live probe was skipped so auth check remains idempotent and does not create browser state.",
     },
     healed: [],
-    requiresHuman: true,
-    nextStep: browserNextStep(config, false),
+    requiresHuman: credentialsMissing || config.platform === "reddit",
+    nextStep: browserNextStep(config, credentialsMissing ? "credentials" : "login"),
   };
 }
 
