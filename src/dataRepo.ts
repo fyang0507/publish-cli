@@ -6,8 +6,9 @@ import { parse as parseYaml } from "yaml";
 
 /**
  * Data-repo resolution — where publish-cli's DURABLE state lives (the SQLite
- * dedupe store, and the target for the agent-skill symlink). This is the agent's
- * WORKSPACE, not a machine-local scratch dir. Mirrors outreach-cli's dataRepo.ts.
+ * dedupe store, and the target for installed copies of the agent skills). This
+ * is the agent's WORKSPACE, not a machine-local scratch dir. Mirrors
+ * outreach-cli's dataRepo.ts.
  *
  * NOTE the split: the persistent browser profile + cookie cache are machine-local
  * SESSION/secret artifacts and stay under PUBLISH_DATA_DIR (~/.publish-cli),
@@ -49,7 +50,7 @@ function cliRepoRoot(): string {
 /**
  * Locate publish.config.dev.yaml next to the CLI, if present, and read its
  * `data_repo_path` (or null if absent/blank). This is the sticky dev override so
- * the build-time symlink step (whose cwd is the CLI repo, not the workspace)
+ * the build-time skill-install step (whose cwd is the CLI repo, not the workspace)
  * still finds the data repo without an env var. Relative values are based on
  * the config file's directory.
  */

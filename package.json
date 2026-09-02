@@ -20,7 +20,7 @@
     "publish.config.dev.yaml.example"
   ],
   "scripts": {
-    "build": "rm -rf dist && tsc && node scripts/install-agent-skill-symlinks.js",
+    "build": "rm -rf dist && tsc && node scripts/install-agent-skills.js",
     "test": "npm run build && node --test $(find dist -type f -name '*.test.js' -print)"
   },
   "dependencies": {
