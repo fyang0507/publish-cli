@@ -272,11 +272,11 @@ plain code, reproducible, verifiable, no LLM deciding content.
   **not** flatten (the key divergence from LinkedIn). Strip only a leading H1 if
   it was consumed as the title. Cap **~40 000** code points; over cap → emit
   leading segment + warning.
-- **Old-vs-new render advisory.** Per
-  [PLATFORM_CAPABILITIES.md](./skills/publish/PLATFORM_CAPABILITIES.md): on
-  old.reddit, fenced code + tables don't render — advise 4-space-indented code and
-  caution on tables. Reuse `codeFlags` to surface this. The composer is switched
-  to **Markdown mode** so syntax is taken literally, not as rich text.
+- **Old-vs-new render advisory.** `publish reddit info --json` is the current
+  channel contract. The generator still advises 4-space-indented code and
+  cautions on tables for old.reddit. Reuse `codeFlags` to surface this. The
+  composer is switched to **Markdown mode** so syntax is taken literally, not as
+  rich text.
 - **Link advisory.** Reuse `linkFlags` (informational; Reddit has no
   LinkedIn-style reach penalty, but flags bare/duplicated URLs).
 
@@ -415,7 +415,7 @@ headful (`--inspect`) against real Reddit before claiming any of this works:
   rather than erroring the whole run. Watch for read rate-limiting.
 - **Markdown fidelity.** Round-trip the body on new *and* old Reddit (fenced code,
   tables, headings) to confirm the "keep verbatim, Markdown mode" assumption and
-  validate the PLATFORM_CAPABILITIES render profile empirically.
+  validate the current `publish reddit info` render contract empirically.
 - **Native draft semantics.** Confirm "Save Draft" stages a private draft
   reachable later, and that the verify step can find it reliably.
 - **Eligibility-gate detection.** Karma/age gates are AutoMod-enforced and not in

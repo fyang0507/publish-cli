@@ -6,9 +6,9 @@
 future instruction changes here. `CLAUDE.md` is a checkout-only compatibility
 symlink to `AGENTS.md`; never maintain it as a separate copy.
 
-Per-channel content-distribution toolkit for growing the operator's AI-community audience. Binary: `publish`. **Channels built today: X** (a WATCH loop for borrowed-reach + a drafting-only PUBLISH for owned-content), **LinkedIn** (drafting-only PUBLISH), **Reddit** (drafting-only PUBLISH — self-posts) **and WeChat** (微信公众号; drafting-only PUBLISH — article self-posts, the first API-driven channel). Every PUBLISH path is **draft-only — it never posts**.
+Per-channel content-distribution toolkit for growing the operator's AI-community audience. Binary: `publish`. **Channels built today: X** (a WATCH loop for borrowed-reach + a drafting-only PUBLISH for owned-content), **LinkedIn** (drafting-only PUBLISH), **Reddit** (drafting-only PUBLISH — self-posts) **and WeChat** (微信公众号; drafting-only PUBLISH — article self-posts, the first API-driven channel). Xiaohongshu and 1point3acres expose native `info` contracts for agent-browser and human-handoff execution rather than CLI website transports. Every PUBLISH path is **draft-only — it never posts**.
 
-Companion docs: [README.md](./README.md) (usage), [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) (vision/roadmap), [skills/publish/SETUP.md](./skills/publish/SETUP.md) (setup) and [skills/publish/SKILL.md](./skills/publish/SKILL.md) (agent-facing capability layer).
+Companion docs: [README.md](./README.md) (usage), [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) (vision/roadmap), [skills/publish/references/setup.md](./skills/publish/references/setup.md) (setup) and [skills/publish/SKILL.md](./skills/publish/SKILL.md) (agent-facing capability layer).
 
 ## Hard boundary
 
@@ -156,7 +156,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/commands/wechat-{check,draft}.ts` | WeChat command bodies |
 | `scripts/install-agent-skill-symlinks.js` | post-build: chmod bin + symlink skill into `<data_repo>/.agents/skills` |
 | `skills/article-references/` | compact essay-reference research, source-selection, formatting, and safe Notion update workflow |
-| `skills/publish/` | agent-facing capability layer, shipped as a whole dir (SKILL.md router + SETUP.md + calibration.md + PLATFORM_CAPABILITIES.md). Symlinked into other workspaces, so intra-skill links MUST be `./`-relative — never escape the folder (e.g. `../../docs/…`). |
+| `skills/publish/` | agent-facing capability layer, shipped as a whole dir: a concise `SKILL.md` router plus state-dependent setup and per-transport calibration references. The former prose capability matrix is deliberately retired because channel facts and executor guidance come from native `publish <channel> info [--json]`, not duplicated skill files. Symlinked into other workspaces, so intra-skill links MUST stay relative and inside the folder. |
 
 ## Build & checks
 

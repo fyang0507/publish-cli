@@ -125,7 +125,7 @@ Steps, each reported as ✓/✗ with actionable next steps (never opaque failure
 
 | Step | What it does | On failure |
 |---|---|---|
-| Credentials | `WECHAT_APP_ID` + `WECHAT_APP_SECRET` present | Point at `.env` / SETUP.md |
+| Credentials | `WECHAT_APP_ID` + `WECHAT_APP_SECRET` present | Point at `.env` / `skills/publish/references/setup.md` |
 | Token | `POST /cgi-bin/stable_token` → cache it (§3.2) | Surface `errcode`/`errmsg` (e.g. `40013` invalid appid, `40125` invalid secret) |
 | IP allowlist | one harmless authenticated call; catch `40164` and **parse the egress IP from `errmsg`** | Print: *"WeChat sees this machine as `<ip>` — add it at 公众号设置 → 安全中心 → IP白名单: https://mp.weixin.qq.com/…"* |
 

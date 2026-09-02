@@ -93,7 +93,7 @@ One unattended credential login (Playwright over a **persistent** profile) backs
 ### State lives in two homes
 
 - **Machine-local session artifacts** — the persistent browser profile + cookie cache — live under `PUBLISH_DATA_DIR` (default `${HOME}/.publish-cli`), **never** inside this repo (it sits on Google Drive and the constant churn would thrash Drive sync).
-- **Durable state** — the sqlite dedupe store — lives in the **data repo** at `<data_repo>/.publish-cli/`, so it travels with the agent workspace. The data repo resolves via `PUBLISH_DATA_REPO` → `publish.config.dev.yaml` → a `.agents/workspace.yaml` walk-up; if unresolved it falls back to `PUBLISH_DATA_DIR`. See [skills/publish/SETUP.md](./skills/publish/SETUP.md).
+- **Durable state** — the sqlite dedupe store — lives in the **data repo** at `<data_repo>/.publish-cli/`, so it travels with the agent workspace. The data repo resolves via `PUBLISH_DATA_REPO` → `publish.config.dev.yaml` → a `.agents/workspace.yaml` walk-up; if unresolved it falls back to `PUBLISH_DATA_DIR`. See [skills/publish/references/setup.md](./skills/publish/references/setup.md).
 
 ```
 ~/.publish-cli/                 # machine-local (PUBLISH_DATA_DIR)
@@ -106,7 +106,7 @@ One unattended credential login (Playwright over a **persistent** profile) backs
 
 ## Canonical content
 
-The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from` (or, for short tweets/replies, inline via `--text` — no scratch file; `--from -` reads stdin). The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/SETUP.md](./skills/publish/SETUP.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
+The source of truth for content is caller-supplied local markdown, passed to the publisher via `--from` (or, for short tweets/replies, inline via `--text` — no scratch file; `--from -` reads stdin). The data repo that holds it is configurable (env `PUBLISH_DATA_REPO`, or a `.agents/workspace.yaml` walk-up) — see [skills/publish/references/setup.md](./skills/publish/references/setup.md) for setup specifics. Notion is the post-publish record, not the drafting surface.
 
 ## Usage
 
