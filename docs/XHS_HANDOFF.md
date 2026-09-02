@@ -1,5 +1,12 @@
 # XHS (小红书 / RedNote) channel — research & spike handoff (2026-07-06)
 
+> **Historical handoff:** the broad "no web draft" conclusion below predates
+> the authenticated long-article spike tracked in issue #35. The `写长文`
+> surface now has a verified browser-local temporary-save/draft path. It is not
+> cloud-synced and disappears when browser data is cleared. Image-text still has
+> no equivalent native web-draft boundary. Use `publish xhs info` for the current
+> bounded capability record.
+
 Self-contained pickup notes for a **future agent**. This is the state BEFORE any
 design or channel code: research is done, a login-persistence spike is done and
 green, and the design is intentionally **NOT written yet** (operator's call).

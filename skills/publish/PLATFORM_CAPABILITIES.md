@@ -10,6 +10,36 @@ research against current docs (snoomark/GFM). X tweet/thread = plaintext (known)
 WeChat article = **empirical** — inline-CSS survival verified live in the WeChat
 草稿箱 (draft box) preview, 2026-07-04.
 
+For operational limits and readiness, use `publish <channel> info [--json]`.
+Its versioned envelope separates the three Markdown guidance sections from
+passive `readiness`. Unknown or server-authoritative limits remain explicit in
+the prose rather than being inferred.
+
+## Xiaohongshu discovery boundary
+
+`publish xhs info` describes the initial `long_article` / `写长文` format and
+returns `agent_check_required` with the creator entry URL. Authentication and
+drafting belong to the agent-owned headful browser context: let the operator
+complete QR login when required, positively verify the creator UI, and continue
+in that same context. The long-article terminal state is a browser-local draft,
+not a cloud draft; it disappears if browser data is cleared and must be reopened
+before a workflow claims persistence. The CLI does not implement selectors,
+import, composer, or draft execution. `publish xhs info` itself is the execution
+oracle: its free-text boundary, authentication, and platform-guidance sections
+tell a capable headful browser agent how to import, optionally run one-click
+layout/topics, save, and reopen the draft. Never click a final, private, or
+scheduled publish action.
+
+## 1point3acres discovery boundary
+
+`publish 1point3acres info` is an offline capability/manual-handoff contract.
+The CLI performs no crawl, login, composer fill, draft save, or submit action.
+`publish 1point3acres info` itself contains the curated forum mappings, weighted
+title evidence, destination-specific required metadata, and the complete textual
+handoff procedure. A human uses that handoff in a normal authorized browser,
+saves with `保存草稿`, and reopens `草稿箱`; the final submit action remains outside
+the workflow.
+
 ## Capability matrix
 
 | Feature | X tweet/thread | X Articles | Reddit self-post |
@@ -30,7 +60,7 @@ WeChat article = **empirical** — inline-CSS survival verified live in the WeCh
 | Inline images in body | media attach | ✓ Insert → Media (+ **5:2 hero** to publish) | **✗ in Markdown body** (needs a separate image/gallery post) |
 | Emoji | native | ✓ `btn-emoji` | unicode only |
 | Superscript / spoilers | ✗ | ✗ | ✓ (reddit-only; old-reddit CSS-dependent) |
-| Max length | 280 (25k premium) | large | 40,000 chars |
+| Max length | weighted 280; Premium platform max 25k, draft-tested only at 281/500 | unknown | nominal 40,000 code points |
 
 ### WeChat article (微信公众号) — API-driven, HTML body
 
@@ -52,6 +82,7 @@ styles ONLY** — the draft editor's sanitizer strips `<style>`/`<link>` tags an
 | Inline images in body | ✓ **but must be WeChat-hosted** — local images auto-uploaded to the WeChat CDN; **remote images are dropped** |
 | Links | **mostly deactivated** in article bodies (`mp.weixin.qq.com` links kept inline) → send others to **bottom citations** |
 | Cover image | **required** (`thumb_media_id`, uploaded as permanent material) |
+| Field limits | documented title/author/digest 32/16/120 字; exact measurement unknown/server-authoritative; omitted digest uses first 54 字 |
 | LaTeX / math | **unknown — verify live** (no assumption made) |
 | Max length | large limit |
 

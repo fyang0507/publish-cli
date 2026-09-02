@@ -8,6 +8,9 @@ import {
 } from "../wechat/client.js";
 import type { AuthNextStep, AuthReadiness } from "./types.js";
 
+const WECHAT_SETUP_WORKFLOW_REF =
+  "publish wechat check --help";
+
 export interface WeChatAuthDependencies {
   credentialsConfigured(): boolean;
   inspectTokenCache(): TokenCacheEvidence;
@@ -28,9 +31,10 @@ function nextStep(
 ): AuthNextStep {
   if (status === "credentials_missing" || status === "credentials_rejected") {
     return {
-      executor: "operator",
-      workflowRef: "wechat#credentials",
-      instruction: "Set valid WECHAT_APP_ID and WECHAT_APP_SECRET in .env, then run publish auth check --platform wechat.",
+      executor: "human",
+      entryUrl: "https://developers.weixin.qq.com/platform/",
+      workflowRef: WECHAT_SETUP_WORKFLOW_REF,
+      instruction: "Have the human obtain valid WECHAT_APP_ID and WECHAT_APP_SECRET from the WeChat Developer Platform. Then the agent sets them in .env, configures exactly one fixed egress (WECHAT_SSH_TUNNEL=[user@]host[:port] or WECHAT_PROXY_URL=socks5://[user:pass@]host:port; http(s) is also accepted), and runs publish wechat check. If it returns 40164, add the exact reported egress IP to IP白名单 and rerun.",
       continueInSameContext: false,
     };
   }
@@ -39,23 +43,23 @@ function nextStep(
     return {
       executor: "human",
       entryUrl: "https://developers.weixin.qq.com/platform/",
-      workflowRef: "wechat#ip-allowlist",
-      instruction: `Add the observed egress IP${ip ? ` ${ip}` : ""} to IP白名单 and approve with the admin WeChat QR scan; then rerun publish auth check --platform wechat.`,
+      workflowRef: WECHAT_SETUP_WORKFLOW_REF,
+      instruction: `Add the observed egress IP${ip ? ` ${ip}` : ""} to IP白名单 and approve with the admin WeChat QR scan; then rerun publish wechat check.`,
       continueInSameContext: false,
     };
   }
   if (status === "network_error") {
     return {
-      executor: "operator",
-      workflowRef: "wechat#egress",
-      instruction: "Restore the configured proxy/SSH/direct egress to api.weixin.qq.com, then rerun publish auth check --platform wechat.",
+      executor: "agent",
+      workflowRef: WECHAT_SETUP_WORKFLOW_REF,
+      instruction: "Restore WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL connectivity to api.weixin.qq.com, then rerun publish wechat check.",
       continueInSameContext: false,
     };
   }
   return {
-    executor: "operator",
-    workflowRef: "wechat#probe-inconclusive",
-    instruction: "Inspect the sanitized WeChat probe stage and egress configuration, then rerun publish auth check --platform wechat; do not assume readiness without an authenticated API success.",
+    executor: "agent",
+    workflowRef: WECHAT_SETUP_WORKFLOW_REF,
+    instruction: "Inspect the sanitized WeChat probe stage and egress configuration, then rerun publish wechat check; do not assume readiness without an authenticated API success.",
     continueInSameContext: false,
   };
 }
@@ -84,7 +88,7 @@ export async function probeWechatAuth(
       verificationMode: "api",
       evidence,
       healed: [],
-      requiresHuman: false,
+      requiresHuman: true,
       nextStep: nextStep("credentials_missing"),
     };
   }
@@ -149,7 +153,10 @@ export async function probeWechatAuth(
           ...base.evidence,
           liveProbe: status === "network_error" ? "network_error" : "inconclusive",
         },
-        requiresHuman: status === "ip_not_allowlisted",
+        requiresHuman:
+          status === "credentials_missing" ||
+          status === "credentials_rejected" ||
+          status === "ip_not_allowlisted",
         nextStep: nextStep(status, result),
       };
     }

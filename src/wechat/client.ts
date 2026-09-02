@@ -30,17 +30,18 @@
  * before trusting parseEgressIpFrom40164.
  */
 
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { Blob } from "node:buffer";
 import { fetch, FormData, type RequestInit } from "undici";
 import { createEgress, type EgressHandle } from "./egress.js";
-import { env, dataPaths, peekDataPaths } from "../config.js";
+import { env, peekDataPaths } from "../config.js";
+import {
+  assertWechatLocalImage,
+  type WeChatImageSurface,
+} from "../capabilities/validation.js";
 
 const API_BASE = "https://api.weixin.qq.com";
-
-/** uploadimg accepts jpg/png ≤1MB this phase (auto-compression is a follow-up). */
-const BODY_IMAGE_MAX_BYTES = 1024 * 1024;
 
 /** Refresh the cached token when fewer than 5 minutes remain (stable_token overlap). */
 const TOKEN_REFRESH_MARGIN_MS = 5 * 60 * 1000;
@@ -105,9 +106,9 @@ export type CheckResult =
     };
 
 export interface WeChatClient {
-  /** stable_token with cache at dataPaths().wechatTokenCache; refresh when <5min remain (or force). */
+  /** stable_token cached at PUBLISH_DATA_DIR/wechat-token.json; refresh when <5min remain (or force). */
   ensureToken(force?: boolean): Promise<string>;
-  /** POST /cgi-bin/media/uploadimg (multipart) -> CDN URL string. jpg/png ≤1MB (oversized => throw). */
+  /** POST /cgi-bin/media/uploadimg -> CDN URL. jpg/png locally; exact bytes remain server-authoritative. */
   uploadBodyImage(localPath: string): Promise<string>;
   /** POST /cgi-bin/material/add_material?type=image (multipart) -> thumb media_id (permanent material). */
   uploadCover(localPath: string): Promise<string>;
@@ -156,41 +157,27 @@ export function inspectTokenCache(nowMs = Date.now()): TokenCacheEvidence {
 
 function writeTokenCache(cache: TokenCacheFile): void {
   // NEVER persist app_secret — only the short-lived token + its expiry.
-  writeFileSync(dataPaths().wechatTokenCache, JSON.stringify(cache, null, 2), { mode: 0o600 });
+  const file = peekDataPaths().wechatTokenCache;
+  mkdirSync(dirname(file), { recursive: true });
+  writeFileSync(file, JSON.stringify(cache, null, 2), { mode: 0o600 });
 }
 
-/** Read + validate an image for a multipart upload; enforce an optional size cap. */
+/** Read an image after the same deterministic preflight used by dry-run. */
 function readImageForUpload(
   localPath: string,
   label: string,
-  maxBytes?: number,
+  surface: WeChatImageSurface,
 ): { blob: Blob; filename: string } {
-  if (!existsSync(localPath)) {
-    throw new Error(`[wechat-client] ${label} not found: ${localPath}`);
+  let validation;
+  try {
+    validation = assertWechatLocalImage(localPath, surface);
+  } catch (error) {
+    throw new Error(`[wechat-client] ${label}: ${(error as Error).message}`);
   }
-  const ext = extname(localPath).toLowerCase();
-  const contentType =
-    ext === ".png"
-      ? "image/png"
-      : ext === ".jpg" || ext === ".jpeg"
-        ? "image/jpeg"
-        : ext === ".gif"
-          ? "image/gif"
-          : "";
-  if (!contentType) {
-    throw new Error(
-      `[wechat-client] ${label} must be a .png/.jpg/.jpeg image (got "${ext || "no extension"}"): ${localPath}`,
-    );
-  }
-  const size = statSync(localPath).size;
-  if (maxBytes && size > maxBytes) {
-    throw new Error(
-      `[wechat-client] ${label} is ${(size / 1024).toFixed(0)}KB, over the ` +
-        `${(maxBytes / 1024).toFixed(0)}KB limit: ${localPath}. Compress it and retry ` +
-        `(auto-compression is a follow-up).`,
-    );
-  }
-  const blob = new Blob([readFileSync(localPath)], { type: contentType });
+  const blob = new Blob(
+    [readFileSync(localPath)],
+    { type: validation.contentType ?? "application/octet-stream" },
+  );
   return { blob, filename: basename(localPath) };
 }
 
@@ -242,7 +229,7 @@ class WeChatClientImpl implements WeChatClient {
 
   async uploadBodyImage(localPath: string): Promise<string> {
     const token = await this.ensureToken();
-    const { blob, filename } = readImageForUpload(localPath, "body image", BODY_IMAGE_MAX_BYTES);
+    const { blob, filename } = readImageForUpload(localPath, "body image", "body");
     const form = new FormData();
     form.append("media", blob, filename);
     const json = await this.request(`/cgi-bin/media/uploadimg?access_token=${encodeURIComponent(token)}`, {
@@ -257,7 +244,7 @@ class WeChatClientImpl implements WeChatClient {
 
   async uploadCover(localPath: string): Promise<string> {
     const token = await this.ensureToken();
-    const { blob, filename } = readImageForUpload(localPath, "cover image");
+    const { blob, filename } = readImageForUpload(localPath, "cover image", "cover");
     const form = new FormData();
     form.append("media", blob, filename);
     const json = await this.request(

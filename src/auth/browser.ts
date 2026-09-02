@@ -3,7 +3,9 @@ import {
   readFileSync,
   statSync,
 } from "node:fs";
-import { join } from "node:path";
+import { cp, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type {
   AuthNextStep,
@@ -29,7 +31,10 @@ export interface PassiveBrowserProbeConfig {
   challengeSelectors: string[];
   loggedOutUrlPatterns: RegExp[];
   challengeUrlPatterns: RegExp[];
+  credentialsConfigured: boolean;
+  manualLoginSupported: boolean;
   workflowRef: string;
+  credentialsInstruction: string;
   loginInstruction: string;
   challengeInstruction: string;
 }
@@ -43,6 +48,11 @@ type PassiveContextLauncher = (
   headless: boolean,
 ) => Promise<BrowserContext>;
 
+interface PassiveProfileSnapshot {
+  profileDir: string;
+  cleanup(): Promise<void>;
+}
+
 interface BrowserProbeAttempt {
   observation: BrowserLiveObservation;
   accessBlocked: boolean;
@@ -55,6 +65,68 @@ const PROFILE_MARKERS = [
   join("Default", "Network", "Cookies"),
   join("Default", "History"),
 ];
+
+const VOLATILE_CHROME_PROFILE_NAMES = new Set([
+  "DevToolsActivePort",
+  "SingletonCookie",
+  "SingletonLock",
+  "SingletonSocket",
+]);
+
+/** Authentication-bearing state needed for a live UI probe; caches are omitted. */
+const PASSIVE_PROFILE_STATE_PATHS = [
+  "Local State",
+  join("Default", "Preferences"),
+  join("Default", "Secure Preferences"),
+  join("Default", "Cookies"),
+  join("Default", "Cookies-journal"),
+  join("Default", "Network", "Cookies"),
+  join("Default", "Network", "Cookies-journal"),
+  join("Default", "Local Storage"),
+  join("Default", "Session Storage"),
+  join("Default", "IndexedDB"),
+  join("Default", "WebStorage"),
+] as const;
+
+/**
+ * Chrome rewrites a user-data directory even when automation only reads a page.
+ * Passive probes therefore launch against a short-lived profile snapshot, never
+ * the operator's persistent profile. The snapshot is removed after each attempt.
+ */
+export async function createPassiveProfileSnapshot(
+  sourceProfileDir: string,
+): Promise<PassiveProfileSnapshot> {
+  const root = await mkdtemp(join(tmpdir(), "publish-auth-probe-"));
+  const profileDir = join(root, "profile");
+  try {
+    for (const relativePath of PASSIVE_PROFILE_STATE_PATHS) {
+      const source = join(sourceProfileDir, relativePath);
+      if (!existsSync(source)) continue;
+      const destination = join(profileDir, relativePath);
+      await mkdir(dirname(destination), { recursive: true });
+      await cp(source, destination, {
+        recursive: true,
+        force: true,
+        preserveTimestamps: true,
+        filter: (candidate) =>
+          !VOLATILE_CHROME_PROFILE_NAMES.has(basename(candidate)),
+      });
+    }
+  } catch (error) {
+    await rm(root, { recursive: true, force: true }).catch(() => {});
+    throw error;
+  }
+
+  let cleaned = false;
+  return {
+    profileDir,
+    cleanup: async () => {
+      if (cleaned) return;
+      cleaned = true;
+      await rm(root, { recursive: true, force: true });
+    },
+  };
+}
 
 function fileAgeDays(path: string, nowMs: number): number | undefined {
   try {
@@ -125,14 +197,26 @@ export function inspectBrowserLocalEvidence(
   };
 }
 
-function browserNextStep(config: PassiveBrowserProbeConfig, challenge: boolean): AuthNextStep {
+function browserNextStep(
+  config: PassiveBrowserProbeConfig,
+  kind: "credentials" | "login" | "challenge",
+): AuthNextStep {
   return {
-    executor: "agent_browser",
+    executor: kind === "credentials" || kind === "challenge" ? "human" : "agent",
     entryUrl: config.entryUrl,
     workflowRef: config.workflowRef,
-    instruction: challenge ? config.challengeInstruction : config.loginInstruction,
+    instruction:
+      kind === "credentials"
+        ? config.credentialsInstruction
+        : kind === "challenge"
+          ? config.challengeInstruction
+          : config.loginInstruction,
     continueInSameContext: true,
   };
+}
+
+function missingRequiredCredentials(config: PassiveBrowserProbeConfig): boolean {
+  return !config.credentialsConfigured && !config.manualLoginSupported;
 }
 
 export function evaluateBrowserReadiness(
@@ -147,6 +231,7 @@ export function evaluateBrowserReadiness(
     verificationMode: "passive_browser" as const,
     evidence: {
       ...local,
+      credentialsConfigured: config.credentialsConfigured,
       liveProbe: live.kind,
       ...(live.note ? { note: live.note } : {}),
     },
@@ -157,12 +242,13 @@ export function evaluateBrowserReadiness(
     return { ...common, ready: true, status: "ready", requiresHuman: false };
   }
   if (live.kind === "logged_out") {
+    const credentialsMissing = missingRequiredCredentials(config);
     return {
       ...common,
       ready: false,
-      status: "login_required",
-      requiresHuman: true,
-      nextStep: browserNextStep(config, false),
+      status: credentialsMissing ? "credentials_missing" : "login_required",
+      requiresHuman: credentialsMissing || config.platform === "reddit",
+      nextStep: browserNextStep(config, credentialsMissing ? "credentials" : "login"),
     };
   }
   if (live.kind === "challenge") {
@@ -171,7 +257,7 @@ export function evaluateBrowserReadiness(
       ready: false,
       status: "human_challenge_required",
       requiresHuman: true,
-      nextStep: browserNextStep(config, true),
+      nextStep: browserNextStep(config, "challenge"),
     };
   }
   if (live.kind === "network_error") {
@@ -181,8 +267,8 @@ export function evaluateBrowserReadiness(
       status: "network_error",
       requiresHuman: false,
       nextStep: {
-        executor: "operator",
-        workflowRef: `${config.workflowRef}#probe-network`,
+        executor: "agent",
+        workflowRef: config.workflowRef,
         instruction: `Restore network/browser access to ${config.entryUrl}, then rerun publish auth check --platform ${config.platform}.`,
         continueInSameContext: false,
       },
@@ -194,10 +280,10 @@ export function evaluateBrowserReadiness(
     status: "probe_inconclusive",
     requiresHuman: false,
     nextStep: {
-      executor: "agent_browser",
+      executor: "agent",
       entryUrl: config.entryUrl,
-      workflowRef: `${config.workflowRef}#probe-inconclusive`,
-      instruction: "Open the entry URL with a headful browser agent. Determine whether the page is authenticated, logged out, or challenged; do not infer logout from selector drift. If authenticated, continue the publishing workflow in that same browser context. Otherwise complete the returned login or human challenge before continuing.",
+      workflowRef: config.workflowRef,
+      instruction: `The passive ${config.platform} probe was inconclusive. ${config.loginInstruction}`,
       continueInSameContext: true,
     },
   };
@@ -213,20 +299,22 @@ export function zeroStateBrowserReadiness(
   local: BrowserLocalEvidence,
   checkedAt = new Date().toISOString(),
 ): AuthReadiness {
+  const credentialsMissing = missingRequiredCredentials(config);
   return {
     platform: config.platform,
     ready: false,
-    status: "login_required",
+    status: credentialsMissing ? "credentials_missing" : "login_required",
     checkedAt,
     verificationMode: "passive_browser",
     evidence: {
       ...local,
+      credentialsConfigured: config.credentialsConfigured,
       liveProbe: "not_run",
       note: "No meaningful persistent browser profile exists. The live probe was skipped so auth check remains idempotent and does not create browser state.",
     },
     healed: [],
-    requiresHuman: true,
-    nextStep: browserNextStep(config, false),
+    requiresHuman: credentialsMissing || config.platform === "reddit",
+    nextStep: browserNextStep(config, credentialsMissing ? "credentials" : "login"),
   };
 }
 
@@ -422,15 +510,17 @@ export class PlaywrightPassiveBrowserBackend implements BrowserProbeBackend {
     headless: boolean,
   ): Promise<BrowserProbeAttempt> {
     let context: BrowserContext | undefined;
+    let snapshot: PassiveProfileSnapshot | undefined;
     try {
       try {
-        context = await this.launchContext(config.profileDir, headless);
+        snapshot = await createPassiveProfileSnapshot(config.profileDir);
+        context = await this.launchContext(snapshot.profileDir, headless);
       } catch {
         return {
           accessBlocked: false,
           observation: {
             kind: "inconclusive",
-            note: "Passive browser could not launch. Install Chrome or run npx playwright install chromium, then retry.",
+            note: "Passive browser could not snapshot or launch the local profile. Check filesystem space and Chrome installation, then retry.",
           },
         };
       }
@@ -477,6 +567,7 @@ export class PlaywrightPassiveBrowserBackend implements BrowserProbeBackend {
       };
     } finally {
       await context?.close().catch(() => {});
+      await snapshot?.cleanup().catch(() => {});
     }
   }
 

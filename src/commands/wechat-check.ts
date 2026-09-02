@@ -32,6 +32,10 @@ export function registerWechatCheckCommand(parent: Command): void {
     .command("check")
     .description("Verify WeChat credentials + token + IP allowlist (travel-aware) — read-only, stages nothing")
     .option("--json", "Machine-readable output (default: human report)")
+    .addHelpText(
+      "after",
+      "\nProvisioning console:\n  https://developers.weixin.qq.com/platform/\n  Obtain the Official Account App ID/Secret. Allowlist changes require an admin WeChat QR scan.\n\nFixed egress (set exactly one):\n  WECHAT_SSH_TUNNEL=[user@]host[:port]\n  WECHAT_PROXY_URL=socks5://[user:pass@]host:port\n  WECHAT_PROXY_URL=https://[user:pass@]host:port\n\nSequence:\n  1. Configure credentials and one stable egress.\n  2. Run publish wechat check.\n  3. If it returns 40164, add the exact reported egress IP to IP白名单 in the console above.\n  4. Rerun publish wechat check.\n",
+    )
     .action(async (opts: WechatCheckOptions) => {
       // Step 1 is LOCAL: short-circuit on missing credentials before any network so
       // an empty .env fails clearly offline (never as an opaque 40013 downstream).
@@ -108,7 +112,7 @@ function renderReport(r: CheckResult): string {
 
   if (r.stage === "credentials") {
     lines.push("  ✗ Credentials — WECHAT_APP_ID / WECHAT_APP_SECRET missing or invalid");
-    lines.push("      Set them in .env (see .env.example / skills/publish/SETUP.md), then re-run.");
+    lines.push("      Set them in .env, run publish wechat check --help for fixed-egress syntax, then re-run.");
     lines.push("  · Token — skipped (credentials step failed)");
     lines.push("  · IP allowlist — skipped (credentials step failed)");
   } else {

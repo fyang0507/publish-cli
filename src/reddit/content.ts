@@ -37,7 +37,8 @@
  *     body-link reach penalty, but flag bare/duplicated URLs).
  */
 
-import { parseBaseMarkdown, countChars, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
+import { parseBaseMarkdown, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
+import { countUnicodeCodePoints as countChars } from "../capabilities/measurements.js";
 import type { SubredditAbout, PostRequirements, FlairTemplate } from "./reader.js";
 import { parse } from "yaml";
 

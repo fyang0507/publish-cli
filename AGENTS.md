@@ -27,6 +27,9 @@ contract in [issue #45](https://github.com/fyang0507/publish-cli/issues/45).
 - Auth preflight must be passive for browser channels: it must not call
   `ensureSession()`, submit stored credentials, or reinterpret navigation failure
   or selector drift as logout.
+- Launch passive browser probes against an ephemeral copy of the persistent
+  profile. Chrome rewrites user-data directories during read-only navigation, so
+  `auth check` / `info` must never launch against the operator's original profile.
 - Distinguish `login_required`, `human_challenge_required`, missing/rejected
   credentials, IP allowlist failure, network failure, and
   `probe_inconclusive`; return a sanitized, structured `nextStep` for each.
@@ -52,24 +55,26 @@ recovery path pass.
 
 ## What it is
 
-The CLI is **channel-first**: `publish <channel> <action>` (each channel has its own action space). Four channels today: `x`, `linkedin`, `reddit`, and `wechat`.
+The CLI is **channel-first**: `publish <channel> <action>` (each channel has its own action space). X, LinkedIn, Reddit, and WeChat have CLI transports; Xiaohongshu and 1point3acres currently expose static capability/readiness boundaries only.
+
+- `publish <channel> info [--json]` — versioned Markdown guidance plus passive readiness for `x`, `linkedin`, `reddit`, `wechat`, `xhs`, and `1point3acres`. Returns every configured format at once under three free-text sections (CLI boundary, authentication, and platform specification/gotchas), succeeds even when auth is not ready, and never logs in or opens a composer.
 
 - `publish x create-watch-list` — build/populate the account-watch List from who you follow → prints the id for `watch --x-list`. Never posts (writes List membership only).
 - `publish x watch` — poll queries / Lists → dedupe → cheap-LLM triage (Gemini, low reasoning effort) → ranked reply candidates. Accounts are watched via a List (`--x-list`), never one-by-one. The `x-list` spelling is unified across `watch` and `create-watch-list`.
 - `publish x draft` — canonical markdown (`--from`) or inline `--text` → tweet / thread / article → **native X draft**.
 - `publish x reply --to <id|url> (--text <s> | --from <md>)` — stage a native reply draft (overflow → thread); never posts.
 - `publish x history [--handle <h>] [--include posts|replies|all] [--since <iso>] [--limit <n>]` — read-only: read the operator's OWN published posts + replies live from X (reusing the browser GraphQL-capture reader), filtering out reposts / others' quoted tweets, so a multi-day campaign agent can see what it already published and avoid repeating itself. Writes no state; reflects only what is LIVE on X (staged-but-unposted drafts don't appear). Never posts.
-- `publish linkedin draft (--text <s> | --from <md>)` — inline text (primary) or markdown → a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) → **native LinkedIn draft** via "Save as draft"; never posts. LinkedIn has no WATCH capability today (PUBLISH only).
+- `publish linkedin draft (--text <s> | --from <md>)` — inline text (primary) or markdown → a single LinkedIn **post** (3,000 UTF-16 code-unit cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) → **native LinkedIn draft** via "Save as draft"; never posts. LinkedIn has no WATCH capability today (PUBLISH only).
 - `publish reddit inspect <sub>...` / `publish reddit search "<query>"` — read-only discovery: `inspect` reports each named subreddit's posting contract (subscribers, allowed types, rules, flairs, post requirements); `search` lists candidate subreddits. Facts only, no LLM ranking — the agent judges.
 - `publish reddit draft --subreddit <name> --title <t> (--text <s> | --from <md>) [--flair <id|text>]` — canonical markdown (kept ~verbatim; Reddit renders Markdown) → a single **self-post** → **native Reddit draft** via "Save Draft"; never posts. Enforces the target subreddit's contract before staging. Reddit has no WATCH capability today (PUBLISH only).
 - `publish wechat check` — read-only preflight: verify credentials, mint a stable-token, and confirm the egress IP the API sees is in the account's IP allowlist (travel-aware). Never writes.
-- `publish wechat draft --from <base.md> --cover <img> (or --text)` — canonical markdown → title + **inline-styled HTML** body + cover → a single **article** (`article_type=news`) → a **native draft in the 草稿箱** via `draft/add`; never publishes. Enforces title ≤64 / digest ≤120 code points (ERROR over cap), requires a cover, uploads local body images to WeChat's CDN, and default-converts external links to bottom citations. WeChat has no WATCH capability today (PUBLISH only).
+- `publish wechat draft --from <base.md> --cover <img> (or --text)` — canonical markdown → title + **inline-styled HTML** body + cover → a single **article** (`article_type=news`) → a **native draft in the 草稿箱** via `draft/add`; never publishes. The official title/author/digest limits are 32/16/120 `字`, but exact Unicode measurement is unresolved and server-authoritative. A cover is required; local body images upload to WeChat's CDN; external links default to bottom citations. WeChat has no WATCH capability today (PUBLISH only).
 
 Short posts/replies take inline `--text`; `--from` (with `-` = stdin) is for longer, file-based canonical markdown (WeChat is long-form — `--from` primary). All resolve through the shared `src/commands/contentInput.ts` (exactly-one-of validation).
 
 ## Stack
 
-TypeScript + Node **ESM** (`"type": "module"`, `module`/`moduleResolution` = `Node16`) — **import local files with the `.js` extension**. `commander` CLI (each command file exports a `register*Command(parent)`). `@google/genai` (Gemini triage/tailoring), `better-sqlite3` (dedupe store), `playwright` (browser), `yaml` (`watch.yaml`), `dotenv` (`.env`). WeChat (API-driven) adds `marked` (markdown → inline-styled HTML) and `undici`/`socks`/`socks-proxy-agent` (the fixed-egress-IP dispatcher + ssh/SOCKS tunnel).
+TypeScript + Node **ESM** (`"type": "module"`, `module`/`moduleResolution` = `Node16`) — **import local files with the `.js` extension**. `commander` CLI (each command file exports a `register*Command(parent)`). `twitter-text` supplies X's official weighted counting semantics. `@google/genai` (Gemini triage/tailoring), `better-sqlite3` (dedupe store), `playwright` (browser), `yaml` (`watch.yaml`), `dotenv` (`.env`). WeChat (API-driven) adds `marked` (markdown → inline-styled HTML) and `undici`/`socks`/`socks-proxy-agent` (the fixed-egress-IP dispatcher + ssh/SOCKS tunnel).
 
 ## X access = one browser, both directions
 
@@ -84,7 +89,7 @@ A single Playwright **persistent-profile** browser (one unattended credential lo
 
 LinkedIn is a browser-driven PUBLISH channel that mirrors X's persistent-profile model with a **separate** session (`src/linkedin/session.ts`, profile `<PUBLISH_DATA_DIR>/li-profile`, creds `LI_USERNAME`/`LI_PASSWORD`/`LI_EMAIL`) — one unattended credential login, headful `--inspect` for first login / calibration. It does **not** share X's `src/session.ts`; the design-doc `createBrowserSession` factory lift is deferred to protect the shipped X code.
 
-- **Reuse by import, not by editing X:** `src/linkedin/*` imports the channel-agnostic helpers (`parseBaseMarkdown`/`countChars` from `src/x/content.ts`; `tolerantLocator`/`optionalLocator`/`typeText` from `src/x/draftPoster.ts`; `resolveContentInput` from `src/commands/contentInput.ts`). Do NOT relocate/rewrite X's browser modules for LinkedIn's sake.
+- **Reuse by import, not by editing X:** `src/linkedin/*` imports channel-agnostic helpers (`parseBaseMarkdown` from `src/x/content.ts`; UTF-16 validation from `src/capabilities/`; `tolerantLocator`/`optionalLocator`/`typeText` from `src/x/draftPoster.ts`; `resolveContentInput` from `src/commands/contentInput.ts`). Do NOT relocate/rewrite X's browser modules for LinkedIn's sake.
 - **Composer facts (calibrated live 2026-07, drift-prone):** open via `feed/?shareActive=true` (`/sharing/compose` 404s as a direct URL); editor is TipTap `div.ProseMirror[contenteditable]`; LinkedIn **auto-restores the last draft into the composer**, so the poster select-all-clears before typing; save = close (`aria-label="Dismiss"`) → text button **"Save as draft"** (never the sibling "Discard" or "Post" — both are documented FORBIDDEN selectors no code path clicks).
 
 ## Reddit reuses the browser-driven pattern (its own profile)
@@ -95,7 +100,7 @@ Reddit is a browser-driven PUBLISH channel that mirrors the X/LinkedIn persisten
 
 WeChat (微信公众号 / Official Account) is the first channel that does **NOT** use Playwright — it calls the official Official Account API (`api.weixin.qq.com`) over HTTPS. Auth = `WECHAT_APP_ID`/`WECHAT_APP_SECRET` → a cached **stable-token** (`/cgi-bin/stable_token`), cache at `<PUBLISH_DATA_DIR>/wechat-token.json` (machine-local, off Drive). **No browser, no persistent profile, no cookie cache.** See [docs/WECHAT_DESIGN.md](./docs/WECHAT_DESIGN.md).
 
-- **Reuse by import, not by editing X:** `src/wechat/*` imports the channel-agnostic helpers (`parseBaseMarkdown`/`countChars` from `src/x/content.ts`; `resolveContentInput` from `src/commands/contentInput.ts`) and adds a `marked`-based renderer that emits **inline `style=` on every element** — WeChat's draft sanitizer strips `<style>`/`<link>`/CSS classes, so styling MUST be inlined. Deterministic, no LLM. Do NOT relocate/rewrite X's modules for WeChat's sake.
+- **Reuse by import, not by editing X:** `src/wechat/*` imports channel-agnostic helpers (`parseBaseMarkdown` from `src/x/content.ts`; `resolveContentInput` from `src/commands/contentInput.ts`) and adds a `marked`-based renderer that emits **inline `style=` on every element** — WeChat's draft sanitizer strips `<style>`/`<link>`/CSS classes, so styling MUST be inlined. Deterministic, no LLM. Do NOT guess `字` measurement with a shared Unicode counter. Do NOT relocate/rewrite X's modules for WeChat's sake.
 - **Hard boundary is structural (the API analog of the browser channels' forbidden selectors):** save (`/cgi-bin/draft/add`) and publish (`/cgi-bin/freepublish/submit`) are **different endpoints**. Only `draft/add` (+ `stable_token`, `media/uploadimg`, `material/add_material`, and the read-only `get_api_domain_ip` for the IP check) is ever called. `freepublish/*` and `message/mass/*` are **FORBIDDEN** — never imported/called (a boundary comment in `client.ts` enumerates them). There is no code path that publishes.
 - **IP allowlist (IP白名单):** WeChat gates **ALL** API calls by source IP (including the token fetch itself; an unlisted IP → error `40164`). The allowlist has **no edit API**, requires a manual **admin QR re-scan** per change, and caps at **15 IPs** — so it cannot be automated. The channel instead routes **every** call through **one fixed egress IP allowlisted once** (fixed-egress-IP mode): `WECHAT_SSH_TUNNEL` (the CLI auto-spawns/tears down an `ssh -N -D` SOCKS5 tunnel) or `WECHAT_PROXY_URL` (http(s)/socks5) — a single egress seam in `client.ts`/`egress.ts`. This keeps a traveling / VPN operator zero-touch: the account's egress never changes even as the operator's real IP does. The admin console for the allowlist migrated 2025-12-01 to the 微信开发者平台 (`developers.weixin.qq.com/platform/`). Built + live-verified 2026-07-04.
 
@@ -123,6 +128,8 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/cli.ts` | `publish` program; registers the `x` group (`create-watch-list` / `watch` / `draft` / `reply` / `history`), the `linkedin` group (`draft`), the `reddit` group (`inspect` / `search` / `draft`) and the `wechat` group (`check` / `draft`) |
 | `src/config.ts` | env (X + LinkedIn + Reddit + WeChat creds, `TRIAGE_MODEL`, `WECHAT_SSH_TUNNEL`/`WECHAT_PROXY_URL`), `dataPaths()` (x-/li-/reddit-profile + cookie caches + `wechatTokenCache`), `loadWatchConfig()` |
 | `src/dataRepo.ts` | `resolveDataRepo()` — env → dev config → workspace walk-up |
+| `capabilities/` | Human-editable Markdown source for each channel's CLI boundary, authentication method, and platform specification/gotchas; loaded directly at runtime |
+| `src/capabilities/` | Minimal Markdown loader/schema plus reusable confirmed measurement/validation helpers |
 | `src/session.ts` | X Playwright persistent-profile login; `ensureSession`/`getCookies`/`getBrowserContext` |
 | `src/gemini.ts` | `@google/genai` client: `generate()` + `triage()` |
 | `src/db.ts` | `better-sqlite3` `SeenStore` (dedupe), db in the data repo |
@@ -132,7 +139,7 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/x/content.ts` | canonical-markdown parser → tweet / thread / article blocks (shared by LinkedIn) |
 | `src/x/draftPoster.ts` | composer automation: stage native tweet/thread/article/reply drafts (exports shared locator/typing primitives) |
 | `src/linkedin/session.ts` | LinkedIn persistent-profile login (structural sibling of `src/session.ts`) |
-| `src/linkedin/content.ts` | `generatePost` — deterministic markdown → LinkedIn plain-text post (3000-char cap, hook/link advisories) |
+| `src/linkedin/content.ts` | `generatePost` — deterministic markdown → LinkedIn plain-text post (3,000 UTF-16 code-unit cap, hook/link advisories) |
 | `src/linkedin/draftPoster.ts` | LinkedIn composer automation: stage a native post draft via "Save as draft" (never posts) |
 | `src/reddit/session.ts` | Reddit persistent-profile login (structural sibling of `src/session.ts`); `ensureSession`/`getBrowserContext`/`getCookies`/`closeSession` |
 | `src/reddit/reader.ts` | authenticated JSON reads for `inspect` / `search` / draft preflight (`about` / `about/rules` / `link_flair_v2` / `subreddits/search`) + `post_requirements` response capture |
@@ -140,9 +147,10 @@ Source of truth = caller-supplied local markdown via `--from` (or inline `--text
 | `src/reddit/draftPoster.ts` | Reddit composer automation: stage a native self-post draft via "Save Draft" (never posts) |
 | `src/wechat/client.ts` | WeChat API backbone: stable-token mint + cache, image uploads, `addDraft`, the single egress seam, `40164` (IP-not-allowlisted) parsing; documents the FORBIDDEN `freepublish/*` / `message/mass/*` endpoints |
 | `src/wechat/egress.ts` | fixed-egress-IP dispatcher — routes API calls through `WECHAT_SSH_TUNNEL` (auto-spawned `ssh -N -D` SOCKS5) or `WECHAT_PROXY_URL` (http(s)/socks5) |
-| `src/wechat/content.ts` | `generateArticle` — canonical markdown → title + inline-styled HTML body (`marked`, `style=` on every element), caps/advisories (reuses `src/x/content.ts`) |
+| `src/wechat/content.ts` | `generateArticle` — canonical markdown → title + inline-styled HTML body (`marked`, `style=` on every element), with unresolved `字` limits left server-authoritative |
 | `src/wechat/draft.ts` | draft orchestration: upload cover + body images, rewrite image `src`s to CDN URLs, then `draft/add` (never publishes) |
 | `src/commands/contentInput.ts` | shared `--text` / `--from` / stdin resolution (exactly-one-of) for `draft` / `reply` / `linkedin draft` / `reddit draft` / `wechat draft` |
+| `src/commands/channel-info.ts` | Shared `publish <channel> info [--json]` command; Markdown guidance plus passive shared-auth readiness |
 | `src/commands/{create-watch-list,watch,draft,reply,history,linkedin-draft}.ts` | command bodies |
 | `src/commands/reddit-{inspect,search,draft}.ts` | Reddit command bodies |
 | `src/commands/wechat-{check,draft}.ts` | WeChat command bodies |

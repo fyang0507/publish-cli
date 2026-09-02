@@ -12,6 +12,7 @@ export type AuthPlatform = (typeof AUTH_PLATFORMS)[number];
 export type AuthStatus =
   | "ready"
   | "agent_check_required"
+  | "human_login_required"
   | "login_required"
   | "human_challenge_required"
   | "credentials_missing"
@@ -45,9 +46,11 @@ export interface AuthEvidence {
 }
 
 export interface AuthNextStep {
-  executor: "agent_browser" | "human" | "operator";
+  /** Role that owns and initiates the immediate next step. */
+  executor: "agent" | "agent_browser" | "human";
   entryUrl?: string;
-  workflowRef: string;
+  /** Optional separately discoverable help command. Omit when this info response is the complete workflow. */
+  workflowRef?: string;
   instruction: string;
   continueInSameContext: boolean;
 }
@@ -58,9 +61,10 @@ export interface AuthReadiness {
   ready: boolean;
   status: AuthStatus;
   checkedAt: string;
-  verificationMode: "passive_browser" | "api" | "browser_agent";
+  verificationMode: "passive_browser" | "api" | "browser_agent" | "human_handoff";
   evidence: AuthEvidence;
   healed: string[];
+  /** True only when the immediate next step cannot complete without human participation. */
   requiresHuman: boolean;
   nextStep?: AuthNextStep;
 }

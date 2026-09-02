@@ -15,7 +15,7 @@
  * lives here.
  *
  * LinkedIn rules (LINKEDIN_DESIGN.md §4):
- *   - Single post, hard cap 3000 code points. Over cap => emit the leading
+ *   - Single post, hard cap 3000 UTF-16 code units. Over cap => emit the leading
  *     segment + a warning; NEVER silent truncation.
  *   - Above-the-fold hook advisory: the preview LinkedIn shows before "…see more"
  *     (first ~210 chars or up to the first blank line). Warn if the hook is weak.
@@ -29,10 +29,16 @@
  *   - Hashtags -> advisory: keep 3–5, at the end.
  */
 
-import { parseBaseMarkdown, countChars, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
+import { parseBaseMarkdown, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
+import {
+  LINKEDIN_POST_MAX_UTF16_CODE_UNITS,
+  countUtf16CodeUnits,
+  sliceByMeasuredLength,
+  validateLinkedInPostText,
+} from "../capabilities/validation.js";
 
-/** LinkedIn's single hard character cap for a feed post (code points). */
-export const LINKEDIN_POST_LIMIT = 3000;
+/** LinkedIn's live-confirmed feed-post cap, measured in UTF-16 code units. */
+export const LINKEDIN_POST_LIMIT = LINKEDIN_POST_MAX_UTF16_CODE_UNITS;
 /** Approximate above-the-fold preview length before LinkedIn shows "…see more". */
 export const LINKEDIN_FOLD_CHARS = 210;
 /** Below this the hook reads as too thin to earn the expand. */
@@ -258,9 +264,8 @@ function renderPlainText(md: string, bold: boolean): RenderedText {
  * emits a warning alongside.
  */
 function leadingSegment(text: string, cap: number): string {
-  const cps = [...text];
-  if (cps.length <= cap) return text;
-  let slice = cps.slice(0, cap).join("");
+  if (countUtf16CodeUnits(text) <= cap) return text;
+  let slice = sliceByMeasuredLength(text, cap, countUtf16CodeUnits);
   // Prefer a paragraph break, then a newline, then a word boundary near the cap.
   const para = slice.lastIndexOf("\n\n");
   const nl = slice.lastIndexOf("\n");
@@ -273,8 +278,9 @@ function leadingSegment(text: string, cap: number): string {
 /** Compute the above-the-fold preview: up to the first blank line, capped at ~210. */
 function computeHook(text: string): string {
   const firstBlock = text.split(/\n\s*\n/)[0] ?? text;
-  const cps = [...firstBlock];
-  return cps.length <= LINKEDIN_FOLD_CHARS ? firstBlock : cps.slice(0, LINKEDIN_FOLD_CHARS).join("");
+  return countUtf16CodeUnits(firstBlock) <= LINKEDIN_FOLD_CHARS
+    ? firstBlock
+    : sliceByMeasuredLength(firstBlock, LINKEDIN_FOLD_CHARS, countUtf16CodeUnits);
 }
 
 /** Count hashtag tokens (#word), excluding markdown heading markers. */
@@ -300,18 +306,19 @@ export function generatePost(md: string, opts: GeneratePostOptions = {}): Genera
   const { text: rendered, firstLineWasHeading, firstLineWasLink } = renderPlainText(md, bold);
 
   let text = rendered;
-  const total = countChars(rendered);
-  if (total > LINKEDIN_POST_LIMIT) {
+  const validation = validateLinkedInPostText(rendered);
+  const total = validation.measuredLength;
+  if (!validation.valid) {
     text = leadingSegment(rendered, LINKEDIN_POST_LIMIT);
     warnings.push(
       `Post is ${total} chars but LinkedIn's cap is ${LINKEDIN_POST_LIMIT}. ` +
-        `Emitted only the leading segment (${countChars(text)} chars) — NOT silently truncated. ` +
+        `Emitted only the leading segment (${countUtf16CodeUnits(text)} UTF-16 code units) — NOT silently truncated. ` +
         `Tighten the copy, or split it into a post + a follow-up comment.`,
     );
   }
 
   const hook = computeHook(text);
-  const hookChars = countChars(hook.trim());
+  const hookChars = countUtf16CodeUnits(hook.trim());
   if (firstLineWasLink) {
     warnings.push(
       "Weak hook: the post opens with a link. LinkedIn's preview shows the first ~210 chars — lead with a claim/story, and move the link to the first comment.",
@@ -345,7 +352,7 @@ export function generatePost(md: string, opts: GeneratePostOptions = {}): Genera
     format: "post",
     limit: LINKEDIN_POST_LIMIT,
     text,
-    chars: countChars(text),
+    chars: countUtf16CodeUnits(text),
     hook,
     usedBold: bold,
     codeFlags: parsed.codeFlags,

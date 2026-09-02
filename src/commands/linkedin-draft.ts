@@ -15,7 +15,7 @@ import { resolveContentInput } from "./contentInput.js";
  *      short-to-medium post), or from a canonical base markdown file via --from
  *      ('-' reads stdin). Exactly one of the two.
  *   2. DETERMINISTIC generation (src/linkedin/content.ts; plain code, no LLM):
- *      single post, 3000-char cap (over cap → leading segment + warning, never
+ *      single post, 3,000 UTF-16 code-unit cap (over cap → leading segment + warning, never
  *      silent truncation), above-the-fold hook advisory, markdown → plain text,
  *      emoji passthrough, code/link advisories, optional Unicode-bold (--bold).
  *   3. --dry-run: generate + print the inspection ONLY; no browser.
@@ -24,7 +24,7 @@ import { resolveContentInput } from "./contentInput.js";
  *      SAVE AS A NATIVE DRAFT — never Post.
  *
  * There is intentionally NO --format (a LinkedIn post is one format) and NO --long
- * (a single 3000-char cap).
+ * (a single 3,000 UTF-16 code-unit cap).
  */
 
 interface LinkedInDraftOptions {

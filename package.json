@@ -6,6 +6,7 @@
     "publish": "dist/cli.js"
   },
   "files": [
+    "capabilities/",
     "dist/",
     "docs/AUTH_READINESS.md",
     "docs/PRODUCT_SPEC.md",
@@ -20,7 +21,7 @@
   ],
   "scripts": {
     "build": "rm -rf dist && tsc && node scripts/install-agent-skill-symlinks.js",
-    "test": "npm run build && node --test dist/auth/*.test.js"
+    "test": "npm run build && node --test $(find dist -type f -name '*.test.js' -print)"
   },
   "dependencies": {
     "@google/genai": "^1.48.0",
@@ -31,12 +32,14 @@
     "playwright": "^1.48.0",
     "socks": "^2.8.9",
     "socks-proxy-agent": "^10.1.0",
+    "twitter-text": "^3.1.0",
     "undici": "^8.5.0",
     "yaml": "^2.8.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.2",
+    "@types/twitter-text": "^3.1.10",
     "typescript": "^6.0.2"
   }
 }

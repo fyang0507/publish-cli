@@ -1,6 +1,28 @@
 # publish-cli
 
-A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. Each channel exposes a **PUBLISH** capability and (optionally) a **WATCH** capability; a task layer composes them. **Channels today: X** (WATCH + PUBLISH), **LinkedIn** (PUBLISH — `linkedin draft`), **Reddit** (PUBLISH — `reddit inspect` / `search` / `draft`, self-posts) **and WeChat** (PUBLISH — `wechat check` / `draft`, article self-posts). Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for the full vision and roadmap, and [AGENTS.md](./AGENTS.md) for the high-level agent orientation.
+A per-channel content-distribution toolkit for growing the operator's audience in the AI community. CLI binary: **`publish`**. X, LinkedIn, Reddit, and WeChat provide draft-only transports; Xiaohongshu is executed by an agent-owned browser and 1point3acres by a human handoff, both guided by the CLI's offline `info` oracle. Every PUBLISH path is **draft-only and never posts.** WeChat is the **first API-driven channel** (X / LinkedIn / Reddit are browser-driven; WeChat talks to the Official Account API directly). See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for the full vision and roadmap, and [AGENTS.md](./AGENTS.md) for the high-level agent orientation.
+
+## Discover channel capabilities
+
+Run `publish <channel> info` (or `--json`) before channel work. It returns every
+configured format at once as three human-editable Markdown sections: the CLI
+boundary, authentication method, and platform specification/gotchas. Static
+`info` is kept separate from side-effect-bounded `readiness` in the versioned
+JSON envelope. Browser probes are passive;
+WeChat may perform its normal token exchange and report `token_refreshed`.
+Missing auth and probe failures remain exit 0
+so static limits and recovery steps are always available. The Markdown files in
+[`capabilities/`](./capabilities/) are the runtime source and can be coedited
+without changing TypeScript. There is no `--format`.
+
+```bash
+publish x info --json
+publish linkedin info
+publish reddit info --json
+publish wechat info --json
+publish xhs info --json
+publish 1point3acres info --json
+```
 
 ## What it does (X channel)
 
@@ -11,7 +33,7 @@ A per-channel content-distribution toolkit for growing the operator's audience i
 
 ## What it does (LinkedIn channel)
 
-- **`publish linkedin draft`** — owned-content publisher. Turns inline text (`--text`, the primary path) or a markdown file (`--from`) into a single LinkedIn **post** (3000-char cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) and stages it as a **native draft on LinkedIn** via "Save as draft". Same boundary as X — it **never posts**. Surfaces an above-the-fold hook advisory and a first-comment-link advisory; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility caveat). Selectors are best-effort — calibrate live with `--inspect`.
+- **`publish linkedin draft`** — owned-content publisher. Turns inline text (`--text`, the primary path) or a markdown file (`--from`) into a single LinkedIn **post** (3,000 UTF-16-code-unit cap, deterministic markdown→plain-text, emoji passthrough, optional `--media`) and stages it as a **native draft on LinkedIn** via "Save as draft". Same boundary as X — it **never posts**. Surfaces an above-the-fold hook advisory and a first-comment-link advisory; opt-in `--bold` maps `**emphasis**` to Unicode bold (accessibility caveat). Selectors are best-effort — calibrate live with `--inspect`.
 
 ## What it does (Reddit channel)
 
@@ -25,7 +47,7 @@ Reddit self-posts are **contract-gated**: each subreddit imposes its own rules (
 WeChat Official Account (微信公众号) is the **first API-driven channel** — no browser profile, no Playwright. Auth is an `app_id`/`app_secret` → cached-stable-token loop, and every API call is **gated by source IP**, so the toolkit routes through one fixed egress IP (allowlisted once) to stay zero-touch on a traveling / VPN laptop.
 
 - **`publish wechat check`** — read-only preflight. Verifies the configured credentials, mints an access token, and confirms the egress IP the API actually sees is on the account's allowlist (travel-aware — it reports the IP the WeChat servers observe, not the laptop's local one). Stages nothing; `--json` for machine output.
-- **`publish wechat draft`** — owned-content publisher. Turns a canonical base markdown (`--from`, the primary path) or inline text (`--text`) into a single **article** (文章 / `article_type=news`) and stages it as a **native draft in the account's 草稿箱 (draft box)** via the `draft/add` endpoint. Same boundary as every other channel — it **never publishes**. Title ≤64 code points and digest ≤120 are enforced as **errors** (no silent truncation), and a **cover image is required** (`--cover` or `--from` frontmatter). The body renders to **inline-styled HTML** — WeChat strips `<style>` blocks and classes, so every rule is emitted as an inline `style=`. External links default to **bottom citations** (WeChat drops inline hyperlinks); `--keep-links` keeps them inline. Local body images are uploaded to WeChat's CDN and their `<img src>` rewritten. `--dry-run` renders + validates with no network calls; `--out <file.html>` writes the rendered HTML for inspection.
+- **`publish wechat draft`** — owned-content publisher. Turns a canonical base markdown (`--from`, the primary path) or inline text (`--text`) into a single **article** (文章 / `article_type=news`) and stages it as a **native draft in the account's 草稿箱 (draft box)** via the `draft/add` endpoint. Same boundary as every other channel — it **never publishes**. A permanent-material **cover image is required**. WeChat documents title/author/digest limits as 32/16/120 字 but does not define the Unicode measurement, so those boundaries remain server-authoritative; when digest is omitted, WeChat derives the first 54 字. The body renders to **inline-styled HTML**. External links default to bottom citations; local body images are uploaded to WeChat's CDN. `--dry-run` renders + validates with no network calls.
 
 The never-publishes boundary here is **structural, not a guard-rail**: saving a draft (`draft/add`) and publishing (`freepublish/*`) are different API endpoints. Only `draft/add` is ever called; `freepublish/*` and `message/mass/*` (mass-send) are never invoked.
 
@@ -100,14 +122,14 @@ publish x draft --format tweet|thread|article (--text <content> | --from <base.m
 publish x reply --to <id|url> (--text <content> | --from <base.md>) [--long] [--dry-run] [--force] [--inspect]
 publish x history [--handle <h>] [--limit <n>] [--include posts|replies|all] [--since <iso>] [--format text|json|markdown] [--json] [--out <file>] [--inspect]
 
-publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]
+publish linkedin draft (--text <content> | --from <base.md>) [--media <path>...] [--bold] [--dry-run] [--inspect]  # 3,000 UTF-16 code-unit cap
 
 publish reddit inspect <subreddit>... [--json] [--inspect]
 publish reddit search "<query>" [--limit <n>] [--include-nsfw] [--json] [--inspect]
 publish reddit draft --subreddit <name> --title <title> (--text <content> | --from <base.md>) [--flair <id|text>] [--nsfw] [--spoiler] [--dry-run] [--inspect]
 
 publish wechat check [--json]
-publish wechat draft (--text <content> | --from <base.md>) [--title <t>] [--author <name>] [--digest <s>] --cover <image.(png|jpg)> [--source-url <url>] [--keep-links] [--out <file.html>] [--dry-run]
+publish wechat draft (--text <content> | --from <base.md>) [--title <t>] [--author <name>] [--digest <s>] --cover <image.(bmp|png|jpg|jpeg|gif)> [--source-url <url>] [--keep-links] [--out <file.html>] [--dry-run]
 ```
 
 Run any subcommand with `--help` for the authoritative flag list.

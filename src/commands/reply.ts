@@ -40,7 +40,7 @@ export function registerReplyCommand(x: Command): void {
     .requiredOption("--to <id|url>", "Target tweet: a status URL or a raw numeric id")
     .option("--text <content>", "Reply content inline (exactly one of --text / --from)")
     .option("--from <base.md>", "Path to the canonical base markdown ('-' = stdin)")
-    .option("--long", "Raise the reply limit to the Premium long-post cap (default up to 25000)")
+    .option("--long", "Use the local 25,000-code-point guard for Premium long replies; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .option("--force", "Re-stage even if a reply to this tweet was already recorded in the ledger")
