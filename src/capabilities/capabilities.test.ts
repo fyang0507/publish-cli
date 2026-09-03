@@ -157,6 +157,10 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Duplicate-ledger preflight is deliberately skipped/);
   assert.match(x, /later real run still checks the ledger and may refuse a recorded target unless `--force`/);
   assert.match(x, /Real-run reply deduplication is checked before staging and recorded only after successful staging/);
+  assert.match(x, /native reply staging returns but the reply-ledger record or close fails/);
+  assert.match(x, /draft may already exist while durable deduplication is missing or uncertain/);
+  assert.match(x, /Never retry automatically.*compare X Unsent\/Drafts manually in the same CLI-owned profile/s);
+  assert.match(x, /Selector calibration and `--inspect` do not repair a ledger failure/);
   assert.match(x, /intended authenticated action with `--inspect`/);
   assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
   assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
@@ -591,6 +595,9 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /--dry-run skips the duplicate ledger and all browser\/profile\/database state/,
     /Target ID\/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X/,
     /real run still checks the ledger and may refuse a recorded target unless --force/,
+    /If native staging returns but reply-ledger record\/close fails, exit 1; the draft may exist/,
+    /Before any retry, compare X Unsent\/Drafts manually in the same CLI-owned profile/,
+    /--inspect and selector calibration cannot repair a reply-ledger failure/,
   ]) assert.match(xReplyHelp.stdout, evidence);
 
   const redditDraftHelp = spawnSync(process.execPath, [CLI_PATH, "reddit", "draft", "--help"], { encoding: "utf8" });
