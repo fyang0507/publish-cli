@@ -1,7 +1,11 @@
 import { Command } from "commander";
 import { writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { resolveContentInput, type ContentInputOptions } from "./contentInput.js";
+import {
+  resolveContentInputDetails,
+  splitLeadingFrontmatter,
+  type ContentInputOptions,
+} from "./contentInput.js";
 import { generateArticle, renderArticleForInspection, type GeneratedArticle } from "../wechat/content.js";
 import {
   createServerValidationReceipt,
@@ -17,9 +21,10 @@ import {
  * mp.weixin.qq.com (the send-gate is future scope, PRODUCT_SPEC §5).
  *
  * Flow (mirrors reddit draft):
- *   1. Resolve the body — inline --text, or canonical markdown via --from
- *      ('-' = stdin). Exactly one (shared resolveContentInput; exit 2 on misuse).
- *      WeChat is long-form, so --from is the primary path.
+ *   1. Resolve the body — literal inline --text, or canonical markdown via
+ *      --from ('-' = stdin). Exactly one (shared resolveContentInput; exit 2 on
+ *      misuse). File/stdin mapping frontmatter is classified and removed by the
+ *      shared seam before rendering. WeChat is long-form, so --from is primary.
  *   2. DETERMINISTIC generation (src/wechat/content.ts; plain code, no LLM, no
  *      network): title + inline-styled HTML body + optional digest + cover, with
  *      metadata resolved flag → frontmatter → fallback. WeChat documents
@@ -50,20 +55,47 @@ export function registerWechatDraftCommand(parent: Command): void {
   parent
     .command("draft")
     .description("Stage a NATIVE WeChat article draft from inline text or a markdown file — never publishes")
-    .option("--from <base.md>", "Path to a canonical base markdown ('-' = stdin); the primary path")
-    .option("--text <content>", "Body content inline (exactly one of --text / --from)")
+    .option("--from <base.md>", "Canonical markdown ('-' = stdin); accepts leading WeChat YAML mapping metadata")
+    .option("--text <content>", "Literal inline body; leading --- is content (exactly one of --text / --from)")
     .option("--title <title>", "Article title (documented ≤32 字; exact measurement is server-authoritative)")
-    .option("--author <name>", "Article author (or from frontmatter / WECHAT_AUTHOR)")
+    .option("--author <name>", "Article author (or from file/stdin frontmatter / WECHAT_AUTHOR)")
     .option("--digest <summary>", "Digest 摘要 (documented ≤120 字; omit to let WeChat derive the first 54 字)")
-    .option("--cover <image>", "Cover image path — required (or from frontmatter coverImage/cover/image)")
-    .option("--source-url <url>", "阅读原文 link (content_source_url; or from frontmatter sourceUrl/contentSourceUrl)")
+    .option("--cover <image>", "Cover image path — required (or from file/stdin frontmatter coverImage/cover/image)")
+    .option("--source-url <url>", "阅读原文 link (or from file/stdin frontmatter sourceUrl/contentSourceUrl/source_url)")
     .option("--keep-links", "Keep inline external links (default: rewrite to bottom citations)")
     .option("--out <file.html>", "Write the rendered inline-styled HTML to a file for inspection")
     .option("--dry-run", "Render + validate only; NO network, NO token, NO upload, NO draft/add")
+    .addHelpText(
+      "after",
+      "\nFile/stdin frontmatter:\n" +
+        "  A leading empty or YAML mapping block between --- delimiters is metadata only and is removed.\n" +
+        "  String keys: title; author; description/summary/digest; coverImage/cover/image;\n" +
+        "  sourceUrl/contentSourceUrl/source_url. Flags override metadata. Other keys are ignored.\n" +
+        "  Relative metadata cover and body-image paths resolve beside a --from file (CWD for stdin).\n" +
+        "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or\n" +
+        "  unterminated metadata exits 2 before --out, token, upload, or API access.\n" +
+        "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart\n" +
+        "  from a leading transport BOM. Inline --text is always literal.\n",
+    )
     .action(async (opts: WechatDraftOptions) => {
       let md: string;
+      let frontmatter: Record<string, unknown> = {};
+      let baseDir = process.cwd();
       try {
-        md = resolveContentInput(opts);
+        const input = resolveContentInputDetails(opts);
+        md = input.markdown;
+        baseDir = input.sourcePath ? dirname(input.sourcePath) : process.cwd();
+        if (input.kind !== "text") {
+          const sourceName = input.kind === "stdin"
+            ? "stdin (--from -)"
+            : (input.sourcePath ?? "--from input");
+          const split = splitLeadingFrontmatter(md, sourceName, {
+            policy: "mapping-only",
+            preserveBodyLineEndings: true,
+          });
+          md = split.body;
+          frontmatter = split.data;
+        }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);
@@ -72,9 +104,6 @@ export function registerWechatDraftCommand(parent: Command): void {
 
       // Relative cover / body-image paths resolve against the --from file's directory
       // (so `./imgs/x.png` loads next to the article), or the CWD for inline --text / stdin.
-      const baseDir =
-        opts.from && opts.from !== "-" ? dirname(resolve(opts.from)) : process.cwd();
-
       // DETERMINISTIC generation (no LLM, no network). Throws on a missing title
       // or cover — a usage error (exit 2), same tier as resolveContentInput.
       let article: GeneratedArticle;
@@ -87,6 +116,7 @@ export function registerWechatDraftCommand(parent: Command): void {
           // frontmatter coverImage is relative to the markdown dir (baseDir, below).
           cover: opts.cover ? resolve(opts.cover) : undefined,
           sourceUrl: opts.sourceUrl,
+          frontmatter,
           keepLinks: opts.keepLinks,
           baseDir,
         });

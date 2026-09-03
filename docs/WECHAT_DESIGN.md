@@ -295,10 +295,11 @@ share the same `client.ts` code path.
 `src/wechat/content.ts` reuses the shared deterministic parser and adds the one
 genuinely new piece — a markdown → inline-styled-HTML renderer:
 
-- **Reused by import:** `parseBaseMarkdown` + `countChars` from `src/x/content.ts`
-  (frontmatter extraction, leading-H1 title derivation, link flags, code-point
-  counting) and `resolveContentInput` from `src/commands/contentInput.ts`. Same
-  reuse posture as LinkedIn/Reddit.
+- **Reused by import:** the command uses `resolveContentInputDetails` and
+  `splitLeadingFrontmatter` from `src/commands/contentInput.ts` for file/stdin
+  metadata classification, then `content.ts` uses `parseBaseMarkdown` from
+  `src/x/content.ts` for leading-H1 title derivation. Same reuse posture as
+  LinkedIn/Reddit.
 - **New:** a `marked`-based renderer with an **overridden renderer** that emits an
   inline `style="…"` on every block/inline element (headings, paragraphs,
   blockquotes, lists, code, `<img>`, `<a>`). No `<style>`/class output — everything
@@ -311,8 +312,9 @@ genuinely new piece — a markdown → inline-styled-HTML renderer:
 `generateArticle(md, opts)` in `src/wechat/content.ts` produces everything the
 draft assembler needs, with **no network and no LLM**:
 
-1. **Parse** via `parseBaseMarkdown` → frontmatter, leading H1, body markdown, link
-   flags.
+1. **Parse** file/stdin frontmatter through the shared command seam, then pass the
+   normalized body plus parsed mapping to `generateArticle`; `parseBaseMarkdown`
+   derives a leading H1 from that body.
 2. **Resolve metadata** (flag → frontmatter → fallback):
    - **title:** `--title` → frontmatter `title` → leading H1. **Required.** The
      official contract says **≤32 `字`**, but does not define code-point, UTF-16,
@@ -448,10 +450,10 @@ among the consumers (no code change — the resolver is already channel-agnostic
 |---|---|
 | `src/wechat/client.ts` | WeChat API backbone (auth analog of `session.ts`, no browser): stable-token fetch + machine-local cache, `uploadBodyImage` (`media/uploadimg`), `uploadCover` (`material/add_material`), `addDraft` (`draft/add`), `40164` egress-IP parsing, and the **single egress seam** — all requests go through one wrapper that honors `WECHAT_PROXY_URL` / `WECHAT_SSH_TUNNEL` (fixed-egress-IP mode, §3.3). Documents the FORBIDDEN `freepublish/*` + `message/mass/*` endpoints it must never call. |
 | `src/wechat/egress.ts` | The proxy/tunnel helper feeding `client.ts`'s seam: build a `fetch` dispatcher for an `http(s)`/`socks5` proxy, or spawn+manage the `ssh -N -D` SOCKS5 tunnel for `WECHAT_SSH_TUNNEL` (start, wait-until-ready, tear down). Kept separate so `client.ts` stays a thin API layer and the tunnel lifecycle is testable in isolation. Needs `socks-proxy-agent` (or `undici` `ProxyAgent`) — see deps. |
-| `src/wechat/content.ts` | `generateArticle` — canonical markdown → `{title, author, digest, html, coverPath, sourceUrl, bodyImages[], linkFlags, warnings[]}`. Reuses `parseBaseMarkdown`/`countChars` from `src/x/content.ts`; adds the `marked`-based inline-style renderer + link→citation transform. Deterministic, no LLM. |
+| `src/wechat/content.ts` | `generateArticle` — normalized markdown plus parsed metadata → `{title, author, digest, html, coverPath, sourceUrl, bodyImages[], linkFlags, warnings[]}`. Reuses `parseBaseMarkdown` from `src/x/content.ts`; adds the `marked`-based inline-style renderer + link→citation transform. Deterministic, no LLM. |
 | `src/wechat/draft.ts` | Orchestration ("poster" analog, no browser): upload cover + body images via `client.ts`, rewrite `<img>` srcs, assemble + send the `draft/add` payload. |
 | `src/commands/wechat-check.ts` | `publish wechat check` — credential + token + IP-allowlist preflight through the configured egress (reports the IP the API actually sees; travel-aware `40164`). |
-| `src/commands/wechat-draft.ts` | `publish wechat draft` command body. |
+| `src/commands/wechat-draft.ts` | `publish wechat draft` command body; resolves content and classifies file/stdin frontmatter through the shared seam before generation. |
 
 **Edits:** `src/cli.ts` (register the `wechat` group), `src/config.ts` (env +
 `wechatTokenCache`), `src/commands/contentInput.ts` (docstring), `.env.example`,

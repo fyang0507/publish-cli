@@ -201,6 +201,12 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(wechat, /40164/);
   assert.match(wechat, /Header-invalid, dimension-unreadable, and extension-mismatch inputs/);
   assert.match(wechat, /covers then allow BMP\/GIF\/JPEG\/PNG.*body images allow only JPEG\/PNG/s);
+  assert.match(wechat, /file\/stdin input.*empty or YAML mapping frontmatter block.*removed before rendering/s);
+  assert.match(wechat, /description.*summary.*digest.*coverImage.*cover.*image.*sourceUrl.*contentSourceUrl.*source_url/s);
+  assert.match(wechat, /BOM and LF, CRLF, or lone-CR delimiters are recognized/);
+  assert.match(wechat, /Mapping-intent malformed or unterminated frontmatter exits 2 before `--out`, token exchange, uploads, or API access/);
+  assert.match(wechat, /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown/);
+  assert.match(wechat, /Inline `--text` is always literal/);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
   assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
@@ -581,6 +587,16 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   assert.equal(wechatHelp.status, 0);
   assert.match(wechatHelp.stdout, /32 字/);
   assert.doesNotMatch(wechatHelp.stdout, /64 code points/);
+  for (const evidence of [
+    /leading empty or YAML mapping block.*metadata only and is removed/s,
+    /description\/summary\/digest.*coverImage\/cover\/image/s,
+    /sourceUrl\/contentSourceUrl\/source_url.*Flags override metadata/s,
+    /Relative metadata cover and body-image paths resolve beside a --from file \(CWD for stdin\)/,
+    /BOM and LF\/CRLF\/lone-CR delimiters are recognized/,
+    /mapping-intent malformed or\s+unterminated metadata exits 2 before --out, token, upload, or API access/s,
+    /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown/,
+    /Inline --text is always literal/,
+  ]) assert.match(wechatHelp.stdout, evidence);
 
   const xhs = spawnSync(process.execPath, [CLI_PATH, "xhs", "info", "--json"], { encoding: "utf8" });
   assert.equal(xhs.status, 0, xhs.stderr);

@@ -16,7 +16,9 @@
  * default look; themes/color presets are deferred (WECHAT_DESIGN §8).
  *
  * REUSE: parseBaseMarkdown() is imported from ../x/content.js for deterministic
- * frontmatter/body parsing and leading-H1 title derivation. Same reuse posture as
+ * body parsing and leading-H1 title derivation. File/stdin frontmatter is
+ * classified by the shared content-input seam before this generator is called,
+ * then supplied as an already-parsed mapping. Same reuse posture as
  * LinkedIn/Reddit (by import, never by editing X).
  *
  * WeChat rules (WECHAT_DESIGN §4):
@@ -41,7 +43,6 @@
 
 import { parseBaseMarkdown, type LinkFlag } from "../x/content.js";
 import { resolve as resolvePath } from "node:path";
-import { parse as parseYaml } from "yaml";
 import { marked, Renderer } from "marked";
 import {
   LocalValidationError,
@@ -68,6 +69,8 @@ export interface GenerateArticleOptions {
   cover?: string;
   /** --source-url → frontmatter `sourceUrl`/`contentSourceUrl`. Optional. */
   sourceUrl?: string;
+  /** Parsed file/stdin metadata from the shared frontmatter seam. Inline text omits this. */
+  frontmatter?: Record<string, unknown>;
   /** false (default) => external links → bottom citations; true => leave inline. */
   keepLinks?: boolean;
   /**
@@ -119,15 +122,12 @@ export interface GeneratedArticle {
 }
 
 // ---------------------------------------------------------------------------
-// Frontmatter + markdown helpers (deterministic, dependency-light)
+// Frontmatter metadata + markdown helpers (deterministic, dependency-light)
 // ---------------------------------------------------------------------------
 
 const MD_LINK_RE = /\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
 // Bare URL not already inside a markdown-link's () or a ("...) attribute.
 const BARE_URL_RE = /(?<![("])\bhttps?:\/\/[^\s)]+/g;
-// A leading YAML frontmatter block: `---` ... `---` at the very start of the doc.
-const FRONTMATTER_RE = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
-
 /** Frontmatter fields WeChat reads (each overridable by a flag). */
 interface Frontmatter {
   title?: string;
@@ -146,41 +146,25 @@ function pickString(rec: Record<string, unknown>, keys: string[]): string | unde
   return undefined;
 }
 
-/**
- * Split an optional leading `---` YAML frontmatter block off the top of the
- * markdown. Returns the WeChat metadata fields and the remaining body. Malformed
- * YAML is ignored (treated as no fields, block stripped) — mirrors reddit/content.
- */
-function splitFrontmatter(md: string): { data: Frontmatter; body: string } {
-  const m = md.match(FRONTMATTER_RE);
-  if (!m) return { data: {}, body: md };
-  let data: Frontmatter = {};
-  try {
-    const parsed = parseYaml(m[1]);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      const rec = parsed as Record<string, unknown>;
-      data = {
-        title: pickString(rec, ["title"]),
-        author: pickString(rec, ["author"]),
-        digest: pickString(rec, ["description", "summary", "digest"]),
-        cover: pickString(rec, ["coverImage", "cover", "image"]),
-        sourceUrl: pickString(rec, ["sourceUrl", "contentSourceUrl", "source_url"]),
-      };
-    }
-  } catch {
-    // Malformed frontmatter — strip the block, keep no fields.
-  }
-  return { data, body: md.slice(m[0].length) };
+/** Preserve the existing WeChat aliases while ignoring unrelated/non-string metadata. */
+function normalizeFrontmatter(rec: Record<string, unknown>): Frontmatter {
+  return {
+    title: pickString(rec, ["title"]),
+    author: pickString(rec, ["author"]),
+    digest: pickString(rec, ["description", "summary", "digest"]),
+    cover: pickString(rec, ["coverImage", "cover", "image"]),
+    sourceUrl: pickString(rec, ["sourceUrl", "contentSourceUrl", "source_url"]),
+  };
 }
 
 /** Return the first non-blank line of the body, if any. */
 function firstNonBlankLine(body: string): string | undefined {
-  return body.replace(/\r\n/g, "\n").split("\n").find((l) => l.trim());
+  return body.replace(/\r\n?/g, "\n").split("\n").find((l) => l.trim());
 }
 
 /** Strip the first leading H1 line (`# ...`), skipping any leading blank lines. */
 function stripLeadingH1(body: string): string {
-  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
   let i = 0;
   while (i < lines.length && !lines[i].trim()) i++;
   if (i < lines.length && /^\s*#\s+.+$/.test(lines[i])) lines.splice(i, 1);
@@ -425,9 +409,11 @@ function renderCitations(citations: Citation[]): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a WeChat article draft from canonical markdown. Deterministic (no LLM,
- * no network). Parses a leading `---` YAML frontmatter block, applies opts
- * overrides, renders the body to inline-styled HTML, and resolves all metadata.
+ * Generate a WeChat article draft from normalized canonical markdown.
+ * Deterministic (no LLM, no network). Applies opts overrides over parsed
+ * file/stdin frontmatter, renders the body to inline-styled HTML, and resolves
+ * all metadata. The command owns frontmatter classification so inline --text
+ * remains literal and malformed input fails before this renderer reads assets.
  *
  * THROWS (usage error; the command maps this to exit 2) on:
  *   - a missing/unresolved title,
@@ -438,7 +424,8 @@ function renderCitations(citations: Citation[]): string {
  */
 export function generateArticle(md: string, opts: GenerateArticleOptions = {}): GeneratedArticle {
   const warnings: string[] = [];
-  const { data, body: afterFm } = splitFrontmatter(md);
+  const data = normalizeFrontmatter(opts.frontmatter ?? {});
+  const afterFm = md;
 
   // Reuse the shared parser for the leading-H1 title derivation (like reddit).
   const parsed = parseBaseMarkdown(afterFm);

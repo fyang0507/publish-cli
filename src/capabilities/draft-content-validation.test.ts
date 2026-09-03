@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -16,6 +16,15 @@ import {
 } from "../reddit/content.js";
 import { generateContent, renderForInspection } from "../x/content.js";
 import { LocalValidationError, extractTweetId } from "./validation.js";
+
+function png(width: number, height: number): Buffer {
+  const value = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(value);
+  value.write("IHDR", 12, "ascii");
+  value.writeUInt32BE(width, 16);
+  value.writeUInt32BE(height, 20);
+  return value;
+}
 
 function expectLocalProblem(
   action: () => unknown,
@@ -678,4 +687,138 @@ test("WeChat required title and cover failures use structured local validation",
     actual: null,
     unit: null,
   });
+});
+
+test("WeChat consumes shared mapping frontmatter without leaking metadata into HTML", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-wechat-frontmatter-"));
+  try {
+    const coverImage = join(dir, "cover.png");
+    const fallbackCover = join(dir, "fallback.png");
+    const flagCover = join(dir, "flag-cover.png");
+    const bodyImage = join(dir, "body.png");
+    writeFileSync(coverImage, png(900, 900));
+    writeFileSync(fallbackCover, png(940, 400));
+    writeFileSync(flagCover, png(800, 800));
+    writeFileSync(bodyImage, png(640, 480));
+
+    for (const newline of ["\n", "\r\n", "\r"]) {
+      const source =
+        `\ufeff---${newline}` +
+        `title: Metadata title${newline}` +
+        `author: Metadata author${newline}` +
+        `description: Metadata digest${newline}` +
+        `coverImage: ./cover.png${newline}` +
+        `sourceUrl: https://example.com/source${newline}` +
+        `private: workflow-only${newline}` +
+        `---${newline}` +
+        `Visible body${newline}${newline}![body](./body.png)${newline}`;
+      const split = splitLeadingFrontmatter(source, "article.md", {
+        policy: "mapping-only",
+        preserveBodyLineEndings: true,
+      });
+      const article = generateArticle(split.body, {
+        frontmatter: split.data,
+        baseDir: dir,
+      });
+      assert.equal(article.title, "Metadata title");
+      assert.equal(article.author, "Metadata author");
+      assert.equal(article.digest, "Metadata digest");
+      assert.equal(article.coverPath, coverImage);
+      assert.equal(article.sourceUrl, "https://example.com/source");
+      assert.equal(article.bodyImages[0]?.path, bodyImage);
+      assert.match(article.html, /Visible body/);
+      assert.doesNotMatch(
+        article.html,
+        /Metadata title|Metadata author|Metadata digest|coverImage|sourceUrl|workflow-only|private:/,
+      );
+    }
+
+    const emptyLoneCr = splitLeadingFrontmatter(
+      "\ufeff---\r# comment-only metadata\r---\r# Lone CR title\r\rLone CR body",
+      "empty.md",
+      { policy: "mapping-only", preserveBodyLineEndings: true },
+    );
+    const titleFromH1 = generateArticle(emptyLoneCr.body, {
+      frontmatter: emptyLoneCr.data,
+      cover: coverImage,
+    });
+    assert.equal(titleFromH1.title, "Lone CR title");
+    assert.match(titleFromH1.html, /Lone CR body/);
+    assert.doesNotMatch(titleFromH1.html, /Lone CR title|comment-only metadata/);
+
+    const primaryAliases = generateArticle("Body", {
+      frontmatter: {
+        title: "Primary aliases",
+        author: "Author",
+        description: "Description wins",
+        summary: "Summary loses",
+        digest: "Digest loses",
+        coverImage: "./cover.png",
+        cover: "./fallback.png",
+        image: "./flag-cover.png",
+        sourceUrl: "https://example.com/primary",
+        contentSourceUrl: "https://example.com/secondary",
+        source_url: "https://example.com/tertiary",
+        ignored: "stripped",
+      },
+      baseDir: dir,
+    });
+    assert.equal(primaryAliases.digest, "Description wins");
+    assert.equal(primaryAliases.coverPath, coverImage);
+    assert.equal(primaryAliases.sourceUrl, "https://example.com/primary");
+    assert.doesNotMatch(primaryAliases.html, /Description wins|Summary loses|ignored|stripped/);
+
+    const secondaryAliases = generateArticle("Body", {
+      frontmatter: {
+        title: "Secondary aliases",
+        summary: "Summary",
+        cover: "./fallback.png",
+        contentSourceUrl: "https://example.com/secondary",
+      },
+      baseDir: dir,
+    });
+    assert.equal(secondaryAliases.digest, "Summary");
+    assert.equal(secondaryAliases.coverPath, fallbackCover);
+    assert.equal(secondaryAliases.sourceUrl, "https://example.com/secondary");
+
+    const tertiaryAliases = generateArticle("Body", {
+      frontmatter: {
+        title: "Tertiary aliases",
+        author: 42,
+        digest: "Digest",
+        image: "./fallback.png",
+        source_url: "https://example.com/tertiary",
+        ignored: ["not", "transport"],
+      },
+      baseDir: dir,
+    });
+    assert.equal(tertiaryAliases.author, "");
+    assert.equal(tertiaryAliases.digest, "Digest");
+    assert.equal(tertiaryAliases.coverPath, fallbackCover);
+    assert.equal(tertiaryAliases.sourceUrl, "https://example.com/tertiary");
+    assert.doesNotMatch(tertiaryAliases.html, /Digest|ignored|transport/);
+
+    const flagPrecedence = generateArticle("Body", {
+      title: "Flag title",
+      author: "",
+      digest: "Flag digest",
+      cover: flagCover,
+      sourceUrl: "",
+      frontmatter: {
+        title: "Metadata title",
+        author: "Metadata author",
+        digest: "Metadata digest",
+        image: "./fallback.png",
+        source_url: "https://example.com/metadata",
+      },
+      baseDir: dir,
+    });
+    assert.equal(flagPrecedence.title, "Flag title");
+    assert.equal(flagPrecedence.author, "");
+    assert.equal(flagPrecedence.digest, "Flag digest");
+    assert.equal(flagPrecedence.coverPath, flagCover);
+    assert.equal(flagPrecedence.sourceUrl, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
