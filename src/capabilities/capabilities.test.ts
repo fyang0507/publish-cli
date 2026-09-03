@@ -177,10 +177,20 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /ensure the prior process stopped and check X Unsent\/Drafts in the exact CLI-owned profile used by that run/);
   assert.match(x, /If a matching draft exists or the comparison is uncertain, leave the reservation in place/);
   assert.match(x, /`--recover-stale-reservation-after-confirming-no-draft` clears the stale claim and exits without staging/);
-  assert.match(x, /staging-runtime initialization failure proves that the browser staging function was never invoked/);
-  assert.match(x, /Once `stageReplyDraft` is invoked, a thrown or unusable result retains the claim/);
-  assert.match(x, /native reply staging returns but reply-ledger finalization or close fails/);
-  assert.match(x, /draft may already exist while durable deduplication is missing or uncertain/);
+  assert.match(x, /one closed save phase: `save_not_attempted`, `save_delivery_unknown`, `save_delivered_unverified`, or `verified`/);
+  assert.match(x, /Tweet\/thread\/reply staging treats the close→Save click as the persistence action/);
+  assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
+  assert.match(x, /Article verification reopens the captured canonical edit URL and matches the intended title plus, when present, a body prefix/);
+  assert.match(x, /text observation does not verify the saved draft's reply-target binding; confirm the target manually before posting/);
+  assert.doesNotMatch(x, /reply target preserved|target preserved|Already staged a reply to/i);
+  assert.match(x, /Only `verified` exits successfully/);
+  assert.match(x, /Save-progress errors and failure receipts are bounded and do not expose raw selectors, page text, credentials, private paths/);
+  assert.match(x, /typed `save_not_attempted` error releases only that run's owner-matched reservation/);
+  assert.match(x, /`save_delivery_unknown`, an untyped error, or a malformed result retains the reservation/);
+  assert.match(x, /returned result or typed error with `save_delivered_unverified` evidence atomically finalizes durable `staged-unverified` history/);
+  assert.match(x, /Only after confidently finding no matching draft.*separate explicit `--force`/s);
+  assert.match(x, /finalization throws after Save-phase evidence, the finalized-history and reservation outcome is unknown/);
+  assert.match(x, /finalization returns but close fails, the finalized status is known/);
   assert.match(x, /Never retry automatically.*compare X Unsent\/Drafts manually in the exact CLI-owned profile used by that run/s);
   assert.match(x, /Selector calibration and `--inspect` do not repair a ledger failure/);
   assert.match(x, /intended authenticated action with `--inspect`/);
@@ -603,6 +613,12 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /mapping-intent malformed or unterminated metadata exits 2/,
     /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
     /Inline --text is always literal/,
+    /Tweet\/thread staging invokes the close→Save action; Article staging invokes Create\/autosave/,
+    /observing a normalized prefix of the intended tweet or first thread post on the exact X Unsent\/Drafts route, or matching the Article title and, when present, body prefix/,
+    /rejected Save\/Create action has unknown delivery.*returned action without a positive reopen match is unverified/s,
+    /Both exit 1 because a draft may exist/,
+    /compare X Unsent\/Drafts or X Articles → Drafts manually in the exact CLI-owned profile/,
+    /Never retry automatically.*--inspect and selector calibration do not prove persistence/s,
   ]) assert.match(xDraftHelp.stdout, evidence);
 
   const xReplyHelp = spawnSync(process.execPath, [CLI_PATH, "x", "reply", "--help"], { encoding: "utf8" });
@@ -634,10 +650,19 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /--recover-stale-reservation-after-confirming-no-draft attests the prior process stopped, X Unsent\/Drafts was checked in the exact CLI-owned profile used by that run, and no matching reply draft was found/,
     /If a matching draft exists or the comparison is uncertain, leave the reservation in place/,
     /Recovery clears only the stale claim and exits/,
-    /If native staging returns but reply-ledger finalization\/close fails, exit 1; the draft may exist/,
+    /poster reports one closed phase: Save not attempted, Save delivery unknown, Save returned but persistence unverified, or verified in X Unsent\/Drafts/,
+    /Verification observes the intended text prefix on the exact Unsent\/Drafts route; it does not verify the saved draft's reply-target binding/,
+    /Confirm the target manually before posting/,
+    /Typed proof that Save was not attempted releases only this run's owner-matched reservation/,
+    /delivery-unknown or malformed outcome retains it/,
+    /Save returned but persistence is unverified, the CLI finalizes staged-unverified history and exits 1/,
+    /only verified persistence exits 0/,
+    /Only after confidently finding no matching draft may a separate --force run intentionally bypass staged-unverified finalized history/,
+    /If reply-ledger finalization\/close fails after Save-phase evidence, exit 1; the draft may exist/,
     /Before any retry, compare X Unsent\/Drafts manually in the exact CLI-owned profile used by the failed run/,
     /--inspect and selector calibration cannot repair a reply-ledger failure/,
   ]) assert.match(xReplyHelp.stdout, evidence);
+  assert.doesNotMatch(xReplyHelp.stdout, /reply target preserved|target preserved|Already staged a reply to/i);
 
   const redditDraftHelp = spawnSync(process.execPath, [CLI_PATH, "reddit", "draft", "--help"], { encoding: "utf8" });
   assert.equal(redditDraftHelp.status, 0);

@@ -29,6 +29,13 @@ import {
   extractTweetId,
   isLivePositiveXArticleCoverPath,
 } from "../capabilities/validation.js";
+import {
+  runXDraftSaveFlow,
+  xDraftStageError,
+  type XDraftReturnedSavePhase,
+  type XDraftSaveMechanism,
+  type XDraftSaveFlowResult,
+} from "./saveProgress.js";
 
 // Preserve the existing public import while keeping parsing in a browser-free module.
 export { extractTweetId } from "../capabilities/validation.js";
@@ -225,15 +232,20 @@ export interface StageDraftOptions extends EnsureSessionOptions {
   basePath?: string;
 }
 
-export interface StageDraftResult {
+interface StageDraftResultBase {
   format: GeneratedContent["format"];
   /** Number of composer rows typed (1 for tweet/article, N for a thread). */
   posts: number;
-  /** Whether the post-save verification step confirmed an Unsent/draft entry. */
-  verified: boolean;
   /** Human-readable note about how the draft was saved / what to check. */
   note: string;
+  /** Native action whose delivery/persistence phase the result describes. */
+  saveMechanism: XDraftSaveMechanism;
 }
+
+/** A returned result always proves Save returned; only savePhase `verified` is success. */
+export type StageDraftResult = StageDraftResultBase & {
+  savePhase: XDraftReturnedSavePhase;
+};
 
 /**
  * Stage `content` as a NATIVE DRAFT on X using the persistent logged-in profile.
@@ -244,17 +256,24 @@ export async function stageDraft(
   content: GeneratedContent,
   opts: StageDraftOptions = {},
 ): Promise<StageDraftResult> {
-  const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
-  const page = await ctx.newPage();
+  const mechanism = content.format === "article"
+    ? "article_create_autosave"
+    : "composer_close_save";
   try {
-    if (content.format === "article") {
-      return await stageArticleDraft(ctx, page, content, opts.basePath);
+    const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
+    const page = await ctx.newPage();
+    try {
+      if (content.format === "article") {
+        return await stageArticleDraft(ctx, page, content, opts.basePath);
+      }
+      return await stageTweetOrThreadDraft(page, content);
+    } finally {
+      // Close only the page we opened; leave the persistent context alive so the
+      // session stays warm for subsequent commands.
+      await page.close().catch(() => {});
     }
-    return await stageTweetOrThreadDraft(page, content);
-  } finally {
-    // Close only the page we opened; leave the persistent context alive so the
-    // session stays warm for subsequent commands.
-    await page.close().catch(() => {});
+  } catch (error) {
+    throw xDraftStageError(error, "save_not_attempted", mechanism);
   }
 }
 
@@ -282,18 +301,16 @@ async function stageTweetOrThreadDraft(
 
   await typePosts(page, posts);
 
-  const saved = await saveAsDraft(page);
-  // Verify the ACTUAL draft landed by matching the first post's leading text
-  // (issue #4) — not just "a row exists".
-  const verified = await verifyDraftSaved(page, posts[0]);
+  const saved = await saveAsDraft(page, () => verifyDraftSaved(page, posts[0]));
 
   return {
     format: content.format,
     posts: posts.length,
-    verified,
-    note: saved
-      ? `Saved via ${saved}. Draft is under X "Unsent" — open the composer's Drafts to review and post manually.`
-      : `Attempted to save as draft (path uncertain — NEEDS CALIBRATION). Check X "Unsent"/Drafts manually.`,
+    saveMechanism: "composer_close_save",
+    savePhase: saved.savePhase,
+    note: saved.savePhase === "verified"
+      ? `Saved via ${saved.value}. Draft was matched under X "Unsent"; review and post manually.`
+      : `Save returned via ${saved.value}, but persistence was not verified in X "Unsent"/Drafts.`,
   };
 }
 
@@ -326,10 +343,10 @@ async function typePosts(page: Page, posts: string[]): Promise<void> {
 }
 
 /** Result of staging a reply draft (issue #8). */
-export interface StageReplyResult extends StageDraftResult {
+export type StageReplyResult = StageDraftResult & {
   /** The tweet id we targeted the reply at. */
   replyToId: string;
-}
+};
 
 export interface StageReplyOptions extends StageDraftOptions {}
 
@@ -337,10 +354,11 @@ export interface StageReplyOptions extends StageDraftOptions {}
  * Stage a REPLY to `toIdOrUrl` as a NATIVE DRAFT (issue #8). NEVER posts.
  *
  * CALIBRATED (issue #8): navigating to https://x.com/compose/post?in_reply_to=<id>
- * opens a reply-TARGETED composer ("Replying to @handle") whose text box is the
+ * opens a reply-requested composer ("Replying to @handle") whose text box is the
  * same [data-testid="tweetTextarea_0"], and the SAME close→Save confirmationSheet
- * saves it as a native draft (with the reply target preserved). This avoids the
- * permalink [data-testid="mask"] click-interception path.
+ * saves its text as a native draft. Reopening Unsent/Drafts currently observes
+ * text persistence only; it does not verify the saved draft's reply-target
+ * binding. This avoids the permalink [data-testid="mask"] click-interception path.
  *
  * Uses the shared typePosts + saveAsDraft + verifyDraftSaved helpers so the reply
  * path is a thin addition over the tweet/thread path (default single reply;
@@ -351,51 +369,47 @@ export async function stageReplyDraft(
   toIdOrUrl: string,
   opts: StageReplyOptions = {},
 ): Promise<StageReplyResult> {
-  const replyToId = extractTweetId(toIdOrUrl);
-
-  const posts =
-    content.format === "thread"
-      ? (content.thread ?? []).map((p) => p.text)
-      : content.tweet
-        ? [content.tweet.text]
-        : [];
-  if (posts.length === 0) throw new Error("No reply content to stage (empty tweet/thread).");
-
-  const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
-  const page = await ctx.newPage();
   try {
-    await page.goto(X_COMPOSER_SELECTORS.replyComposeUrl(replyToId), { waitUntil: "domcontentloaded" });
+    const replyToId = extractTweetId(toIdOrUrl);
 
-    // Sanity: confirm the reply-targeted composer opened. Best-effort — the
-    // "Replying to" banner selector is not centralized because the textbox is
-    // the real gate; if it's present, we can type.
-    const box = await optionalLocator(page, X_COMPOSER_SELECTORS.tweetTextbox, 10_000);
-    if (!box) {
-      throw new Error(
-        "Reply composer text box never appeared for in_reply_to=" +
-          `${replyToId} (selector drift, deleted/protected tweet, or not logged in; ` +
-          "re-run with --inspect). NEEDS LIVE CALIBRATION if the DOM changed.",
-      );
+    const posts =
+      content.format === "thread"
+        ? (content.thread ?? []).map((p) => p.text)
+        : content.tweet
+          ? [content.tweet.text]
+          : [];
+    if (posts.length === 0) throw new Error("No reply content to stage (empty tweet/thread).");
+
+    const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
+    const page = await ctx.newPage();
+    try {
+      await page.goto(X_COMPOSER_SELECTORS.replyComposeUrl(replyToId), { waitUntil: "domcontentloaded" });
+
+      // Sanity: confirm a composer text box opened for the requested URL. This
+      // does not prove its reply-target binding; it is only the pre-Save gate.
+      const box = await optionalLocator(page, X_COMPOSER_SELECTORS.tweetTextbox, 10_000);
+      if (!box) throw new Error("Reply composer unavailable before Save.");
+
+      await typePosts(page, posts);
+
+      const saved = await saveAsDraft(page, () => verifyDraftSaved(page, posts[0]));
+
+      return {
+        format: content.format,
+        posts: posts.length,
+        saveMechanism: "composer_close_save",
+        savePhase: saved.savePhase,
+        replyToId,
+        note: saved.savePhase === "verified"
+          ? `The intended reply text prefix was observed on the exact X "Unsent"/Drafts surface after ${saved.value}; ` +
+            `requested target ${replyToId} was supplied to the composer, but the saved draft's reply-target binding was not verified. Review both manually before posting.`
+          : `Save returned after staging was requested for target ${replyToId}, but text persistence and the saved draft's reply-target binding were not verified in X "Unsent"/Drafts.`,
+      };
+    } finally {
+      await page.close().catch(() => {});
     }
-
-    await typePosts(page, posts);
-
-    const saved = await saveAsDraft(page);
-    const verified = await verifyDraftSaved(page, posts[0]);
-
-    return {
-      format: content.format,
-      posts: posts.length,
-      verified,
-      replyToId,
-      note: saved
-        ? `Reply to ${replyToId} saved via ${saved}. It's a NATIVE draft under X "Unsent" ` +
-          "(reply target preserved) — review and post manually."
-        : `Attempted to save the reply to ${replyToId} as a draft (path uncertain — NEEDS ` +
-          'CALIBRATION). Check X "Unsent"/Drafts manually.',
-    };
-  } finally {
-    await page.close().catch(() => {});
+  } catch (error) {
+    throw xDraftStageError(error, "save_not_attempted", "composer_close_save");
   }
 }
 
@@ -420,134 +434,280 @@ export async function stageReplyDraft(
  * BROWSER-INTERACTION part still needing live calibration: the 5:2 HERO IMAGE
  * upload (articleCover* selectors + crop/apply dialog) — degrades gracefully.
  */
-async function stageArticleDraft(
+type GeneratedArticle = NonNullable<GeneratedContent["article"]>;
+
+export interface ArticleDraftStageDependencies {
+  openHub(page: Page): Promise<void>;
+  locateCreate(page: Page): Promise<Locator | null>;
+  currentEditUrl(page: Page): string | null;
+  locateTitle(page: Page): Promise<Locator | null>;
+  writeTitle(page: Page, title: Locator, value: string): Promise<void>;
+  locateBody(page: Page): Promise<Locator | null>;
+  writeBody(
+    ctx: BrowserContext,
+    page: Page,
+    body: Locator,
+    html: string,
+    plain: string,
+  ): Promise<void>;
+  stageCover(page: Page, basePath: string | undefined, notes: string[]): Promise<boolean>;
+  settle(page: Page): Promise<void>;
+  verify(
+    page: Page,
+    editUrl: string,
+    expectedTitle: string,
+    expectedBody: string,
+  ): Promise<boolean>;
+}
+
+export async function stageArticleDraft(
   ctx: BrowserContext,
   page: Page,
   content: GeneratedContent,
   basePath?: string,
+  deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
 ): Promise<StageDraftResult> {
-  if (!content.article) throw new Error("No article content to stage.");
+  const article = content.article;
+  if (!article) throw new Error("No article content to stage.");
   const notes: string[] = [];
+  let createBtn: Locator | undefined;
 
-  // articleComposeUrl is the Articles HUB, not the editor. Open it, then click a
-  // create/"Write" control to enter the editor (/compose/articles/edit/<id>).
-  await page.goto(X_COMPOSER_SELECTORS.articleComposeUrl, { waitUntil: "domcontentloaded" });
-
-  const createBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCreateButton, 8_000);
-  if (!createBtn) {
-    throw new Error(
-      "Could not find the 'create article' control on the X Articles hub. This " +
-        "account may not have Articles (Premium+) access, or the selector drifted " +
-        "(re-run with --inspect to recalibrate articleCreateButton). " +
-        `URL: ${X_COMPOSER_SELECTORS.articleComposeUrl}`,
-    );
-  }
-  await createBtn.click();
-
-  // Wait for the editor's Title input to surface (also confirms the editor opened).
-  const titleBox = await optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 12_000);
-  if (!titleBox) {
-    throw new Error(
-      "Clicked the Articles create control but the editor's Title input never " +
-        "appeared (selector drift or Articles unavailable; re-run with --inspect). " +
-        `URL now: ${page.url()}`,
-    );
-  }
-
-  await titleBox.click();
-  await typeText(page, titleBox, content.article.title);
-
-  const bodyBox = await tolerantLocator(
-    page,
-    X_COMPOSER_SELECTORS.articleBodyInput,
-    "Article body input",
-  );
-
-  // Build the body as an HTML fragment the editor converts natively on paste
-  // (issue #5). Code blocks are excluded and counted for a human-facing note.
-  const { html, codeBlockCount } = htmlFromArticleBlocks(content.article.blocks);
-  const plainFallback = plainTextFromArticleBlocks(content.article.blocks);
-
-  // Grant clipboard perms so the in-page navigator.clipboard.write() succeeds.
-  await ctx
-    .grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://x.com" })
-    .catch(() => {});
-
-  await bodyBox.click();
-  await bodyBox.focus();
-
-  // Write rich HTML (+ plain-text fallback) to the clipboard from within the page,
-  // then paste it into the focused composer. The editor converts the HTML to its
-  // native blocks (VERIFIED). We keep plain text as a fallback for surfaces that
-  // ignore text/html.
-  await page.evaluate(
-    async ({ html, plain }) => {
-      await navigator.clipboard.write([
-        new ClipboardItem({
-          "text/html": new Blob([html], { type: "text/html" }),
-          "text/plain": new Blob([plain], { type: "text/plain" }),
-        }),
-      ]);
+  const saved = await runXDraftSaveFlow("article_create_autosave", {
+    async beforeSave() {
+      // articleComposeUrl is the Articles HUB, not the editor. Opening it and
+      // locating Create cannot allocate a native draft.
+      await deps.openHub(page);
+      const candidate = await deps.locateCreate(page);
+      if (!candidate) throw new Error("Article create control unavailable.");
+      createBtn = candidate;
     },
-    { html, plain: plainFallback },
-  );
-  await page.keyboard.press(`${modifier()}+KeyV`);
-  // Let the editor process the paste + convert blocks.
-  await page.waitForTimeout(1_000);
+    async deliverSave() {
+      // Create is the first Article action that may allocate an autosaved draft.
+      if (!createBtn) throw new Error("Article create control was not prepared.");
+      await createBtn.click();
+    },
+    async afterSave() {
+      // Every failure after Create returned is conservatively classified as a
+      // delivered-but-unverified autosave outcome by runXDraftSaveFlow.
+      const titleBox = await deps.locateTitle(page);
+      if (!titleBox) throw new Error("Article editor unavailable after Create.");
+      const editUrl = deps.currentEditUrl(page);
 
-  if (codeBlockCount > 0) {
-    notes.push(
-      `${codeBlockCount} code block${codeBlockCount === 1 ? "" : "s"} NOT auto-formatted ` +
-        "(paste does not convert code to a code block on X). Add each via the editor's " +
-        "Insert → Code, or paste a screenshot. The code text was intentionally excluded " +
-        "from the pasted HTML so it doesn't land as broken plain text.",
-    );
-  }
+      await deps.writeTitle(page, titleBox, article.title);
 
-  // Attach an optional auto-discovered cover. The live-positive set includes
-  // exact 5:2 and 1500x620; every tested image opened crop/edit and required
-  // Apply, so ratio is advisory and never a local rejection.
-  const hero = resolveHeroImage(basePath);
-  let heroAttached = false;
-  if (!hero.path) {
-    notes.push(
-      "HERO IMAGE MISSING: X requires a 5:2 cover image to publish. " +
-        (hero.reason ?? "No suitable image found near the base markdown.") +
-        " Add a 5:2 image (e.g. hero.jpg / cover.png) in the article's publish/<slug>/ folder.",
-    );
-  } else {
-    if (!hero.ratioOk) {
-      notes.push(
-        `HERO IMAGE RATIO: found ${hero.path} at ${hero.width}x${hero.height} ` +
-          `(ratio ${hero.ratio?.toFixed(3)}). Uploading without local rejection; ` +
-          "review X's mandatory crop/edit step before leaving the draft.",
+      const bodyBox = await deps.locateBody(page);
+      if (!bodyBox) throw new Error("Article body input unavailable after Create.");
+
+      // Build the body as an HTML fragment the editor converts natively on paste
+      // (issue #5). Code blocks are excluded and counted for a human-facing note.
+      const { html, codeBlockCount } = htmlFromArticleBlocks(article.blocks);
+      const plainFallback = plainTextFromArticleBlocks(article.blocks);
+
+      await deps.writeBody(ctx, page, bodyBox, html, plainFallback);
+
+      if (codeBlockCount > 0) {
+        notes.push(
+          `${codeBlockCount} code block${codeBlockCount === 1 ? "" : "s"} NOT auto-formatted ` +
+            "(paste does not convert code to a code block on X). Add each via the editor's " +
+            "Insert → Code, or paste a screenshot. The code text was intentionally excluded " +
+            "from the pasted HTML so it doesn't land as broken plain text.",
+        );
+      }
+
+      // Attach an optional auto-discovered cover. The live-positive set includes
+      // exact 5:2 and 1500x620; every tested image opened crop/edit and required
+      // Apply, so ratio is advisory and never a local rejection.
+      const heroAttached = await deps.stageCover(page, basePath, notes);
+
+      // Let autosave settle, then independently reload the captured edit URL and
+      // match the intended title/body. Merely remaining on /edit/<id> is not
+      // persistence evidence.
+      await deps.settle(page);
+      const verified = editUrl !== null && await deps.verify(
+        page,
+        editUrl,
+        article.title,
+        plainFallback,
       );
-    }
-    const uploaded = await uploadHeroImage(page, hero.path, notes);
-    if (uploaded) {
-      heroAttached = true;
-      notes.push(`Hero image uploaded from ${hero.path} (${hero.width}x${hero.height}); verify the applied crop.`);
-    }
-  }
-
-  // Articles autosave as drafts; give autosave a moment. Being in the editor with
-  // an article id in the URL is our verification that a draft now exists.
-  await page.waitForTimeout(2_500);
-  const verified = /\/compose\/articles\/edit\/\d+/.test(page.url());
+      return {
+        verified,
+        value: { heroAttached, codeBlockCount },
+      };
+    },
+  });
 
   return {
     format: "article",
     posts: 1,
-    verified,
+    saveMechanism: "article_create_autosave",
+    savePhase: saved.savePhase,
     note:
       "format=article. Body pasted as rich HTML and converted natively by the X " +
       "Articles editor (headings/subheadings/paragraphs/lists/quotes/links/bold/italic). " +
-      `hero=${heroAttached ? "attached (BEST-EFFORT — verify the crop)" : "not attached"}. ` +
-      `codeBlockCount=${codeBlockCount}. ` +
-      "X autosaves Article drafts under Articles → Drafts; review + publish manually. " +
+      `hero=${saved.value.heroAttached ? "attached (BEST-EFFORT — verify the crop)" : "not attached"}. ` +
+      `codeBlockCount=${saved.value.codeBlockCount}. ` +
+      (saved.savePhase === "verified"
+        ? "The intended title and, when present, body prefix were matched after independently reopening the Article edit URL. "
+        : "Create returned, but the intended title/body were not verified after reopening the Article edit URL. ") +
+      "X autosaves Article drafts under Articles → Drafts; review and publish manually. " +
       "NEVER auto-published." +
       (notes.length ? `\n  - ${notes.join("\n  - ")}` : ""),
   };
+}
+
+export async function stageArticleCover(
+  page: Page,
+  basePath: string | undefined,
+  notes: string[],
+): Promise<boolean> {
+  const hero = resolveHeroImage(basePath);
+  if (!hero.path) {
+    notes.push(
+      "HERO IMAGE MISSING: X requires a 5:2 cover image to publish. " +
+        "No suitable supported image was selected from the article asset folder. " +
+        "Add a 5:2 JPG, PNG, or WebP cover and verify it manually.",
+    );
+    return false;
+  }
+  if (!hero.ratioOk) {
+    notes.push(
+      `HERO IMAGE RATIO: selected image is ${hero.width}x${hero.height} ` +
+        `(ratio ${hero.ratio?.toFixed(3)}). Uploading without local rejection; ` +
+        "review X's mandatory crop/edit step before leaving the draft.",
+    );
+  }
+  const uploaded = await uploadHeroImage(page, hero.path, notes);
+  if (uploaded) {
+    notes.push(`Hero image uploaded (${hero.width}x${hero.height}); verify the applied crop.`);
+  }
+  return uploaded;
+}
+
+const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
+  async openHub(page) {
+    await page.goto(X_COMPOSER_SELECTORS.articleComposeUrl, { waitUntil: "domcontentloaded" });
+  },
+  locateCreate(page) {
+    return optionalLocator(page, X_COMPOSER_SELECTORS.articleCreateButton, 8_000);
+  },
+  currentEditUrl(page) {
+    return validatedArticleEditUrl(page.url());
+  },
+  locateTitle(page) {
+    return optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 12_000);
+  },
+  async writeTitle(page, title, value) {
+    await title.click();
+    await typeText(page, title, value);
+  },
+  locateBody(page) {
+    return optionalLocator(page, X_COMPOSER_SELECTORS.articleBodyInput, 12_000);
+  },
+  async writeBody(ctx, page, body, html, plain) {
+    await ctx
+      .grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://x.com" })
+      .catch(() => {});
+    await body.click();
+    await body.focus();
+    await page.evaluate(
+      async ({ html: renderedHtml, plain: renderedPlain }) => {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([renderedHtml], { type: "text/html" }),
+            "text/plain": new Blob([renderedPlain], { type: "text/plain" }),
+          }),
+        ]);
+      },
+      { html, plain },
+    );
+    await page.keyboard.press(`${modifier()}+KeyV`);
+    await page.waitForTimeout(1_000);
+  },
+  stageCover: stageArticleCover,
+  async settle(page) {
+    await page.waitForTimeout(2_500);
+  },
+  verify: verifyArticleDraftSaved,
+};
+
+function validatedArticleEditUrl(raw: string): string | null {
+  try {
+    const parsed = new URL(raw);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== "x.com" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.port !== "" ||
+      !/^\/compose\/articles\/edit\/\d+$/.test(parsed.pathname)
+    ) return null;
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return null;
+  }
+}
+
+function isExactArticleEditRoute(page: Page, editUrl: string): boolean {
+  if (validatedArticleEditUrl(editUrl) !== editUrl) return false;
+  try {
+    return new URL(page.url()).href === editUrl;
+  } catch {
+    return false;
+  }
+}
+
+type ArticleTextObservation =
+  | { routeExact: true; text: string }
+  | { routeExact: false };
+
+async function locatorTextAtExactArticleRoute(
+  page: Page,
+  locator: Locator,
+  editUrl: string,
+): Promise<ArticleTextObservation> {
+  if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
+  try {
+    const text = await locator.inputValue();
+    if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
+    return { routeExact: true, text };
+  } catch {
+    if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
+    const text = await locator.innerText();
+    if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
+    return { routeExact: true, text };
+  }
+}
+
+export async function verifyArticleDraftSaved(
+  page: Page,
+  editUrl: string,
+  expectedTitle: string,
+  expectedBody: string,
+): Promise<boolean> {
+  await page.goto(editUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(1_500);
+  if (!isExactArticleEditRoute(page, editUrl)) return false;
+  const title = await optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 8_000);
+  if (!isExactArticleEditRoute(page, editUrl) || !title) return false;
+
+  if (!isExactArticleEditRoute(page, editUrl)) return false;
+  const body = await optionalLocator(page, X_COMPOSER_SELECTORS.articleBodyInput, 8_000);
+  if (!isExactArticleEditRoute(page, editUrl) || !body) return false;
+
+  const expectedTitleText = normalizeForMatch(expectedTitle);
+  const expectedBodyPrefix = normalizeForMatch(expectedBody).slice(0, 40);
+  if (!expectedTitleText) return false;
+
+  const titleObservation = await locatorTextAtExactArticleRoute(page, title, editUrl);
+  if (!titleObservation.routeExact) return false;
+  const actualTitle = normalizeForMatch(titleObservation.text);
+
+  const bodyObservation = await locatorTextAtExactArticleRoute(page, body, editUrl);
+  if (!bodyObservation.routeExact) return false;
+  const actualBody = normalizeForMatch(bodyObservation.text);
+  if (!isExactArticleEditRoute(page, editUrl)) return false;
+  return actualTitle === expectedTitleText &&
+    (expectedBodyPrefix === "" || actualBody.includes(expectedBodyPrefix));
 }
 
 // ---------------------------------------------------------------------------
@@ -834,8 +994,8 @@ async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): 
   if (fileInput) {
     try {
       await fileInput.setInputFiles(imagePath);
-    } catch (err) {
-      notes.push(`HERO UPLOAD (NEEDS LIVE CALIBRATION): setInputFiles failed: ${(err as Error).message}`);
+    } catch {
+      notes.push("HERO UPLOAD INCOMPLETE: the selected cover could not be attached.");
       return false;
     }
   } else {
@@ -843,9 +1003,8 @@ async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): 
     const coverBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCoverButton, 2_500);
     if (!coverBtn) {
       notes.push(
-        "HERO UPLOAD (NEEDS LIVE CALIBRATION): could not find the cover-image control " +
-          "(articleCoverButton / articleCoverFileInput). Recalibrate headfully (--inspect) " +
-          "and attach the 5:2 image manually for now.",
+        "HERO UPLOAD INCOMPLETE: the cover-image control was unavailable. " +
+          "Attach the intended 5:2 image manually.",
       );
       return false;
     }
@@ -855,8 +1014,8 @@ async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): 
         coverBtn.click(),
       ]);
       await chooser.setFiles(imagePath);
-    } catch (err) {
-      notes.push(`HERO UPLOAD (NEEDS LIVE CALIBRATION): file chooser flow failed: ${(err as Error).message}`);
+    } catch {
+      notes.push("HERO UPLOAD INCOMPLETE: the selected cover could not be attached.");
       return false;
     }
   }
@@ -869,8 +1028,8 @@ async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): 
     await page.waitForTimeout(750);
   } else {
     notes.push(
-      "HERO CROP (NEEDS LIVE CALIBRATION): no crop/apply dialog matched articleCoverApply — " +
-        "if X shows a cropper, confirm the 5:2 crop manually.",
+      "HERO CROP UNVERIFIED: a crop/apply confirmation was not observed. " +
+        "If X shows a cropper, confirm the intended 5:2 crop manually.",
     );
   }
   return true;
@@ -896,22 +1055,59 @@ export async function typeText(page: Page, box: Locator, text: string): Promise<
  *
  * IMPORTANT: we do NOT use the composer's own "Drafts" (unsentButton) control —
  * it OPENS the drafts list, it does not save the current post (verified live).
- * Returns a short label of the path used, or null if the flow didn't resolve.
+ * The injected verifier runs only after Save returns. Missing controls are
+ * `save_not_attempted`; a rejected Save click is `save_delivery_unknown`; any
+ * later error/negative observation is `save_delivered_unverified`.
  */
-export async function saveAsDraft(page: Page): Promise<string | null> {
-  const close = await optionalLocator(page, X_COMPOSER_SELECTORS.closeComposerButton, 5_000);
-  if (!close) return null;
-  await close.click();
+export interface SaveAsDraftDependencies {
+  locateClose(page: Page): Promise<Locator | null>;
+  locateSave(page: Page): Promise<Locator | null>;
+  settle(page: Page): Promise<void>;
+}
 
-  const save = await optionalLocator(page, X_COMPOSER_SELECTORS.saveDraftButton, 5_000);
-  if (!save) {
-    // The Save/Discard confirmation didn't appear as expected — do NOT guess at
-    // another button (a wrong click could discard or post). Leave it to a human.
-    return null;
-  }
-  await save.click();
-  await page.waitForTimeout(750);
-  return "the close→Save dialog";
+const productionSaveAsDraftDependencies: SaveAsDraftDependencies = {
+  locateClose(page) {
+    return optionalLocator(page, X_COMPOSER_SELECTORS.closeComposerButton, 5_000);
+  },
+  locateSave(page) {
+    return optionalLocator(page, X_COMPOSER_SELECTORS.saveDraftButton, 5_000);
+  },
+  async settle(page) {
+    await page.waitForTimeout(750);
+  },
+};
+
+export async function saveAsDraft(
+  page: Page,
+  verify: () => Promise<boolean>,
+  deps: SaveAsDraftDependencies = productionSaveAsDraftDependencies,
+): Promise<XDraftSaveFlowResult<string>> {
+  let save: Locator | undefined;
+  return runXDraftSaveFlow("composer_close_save", {
+    async beforeSave() {
+      const close = await deps.locateClose(page);
+      if (!close) throw new Error("Close control unavailable.");
+      await close.click();
+
+      const candidate = await deps.locateSave(page);
+      if (!candidate) {
+        // Do not guess at another button: a wrong click could discard or post.
+        throw new Error("Save control unavailable.");
+      }
+      save = candidate;
+    },
+    async deliverSave() {
+      if (!save) throw new Error("Save control was not prepared.");
+      await save.click();
+    },
+    async afterSave() {
+      await deps.settle(page);
+      return {
+        verified: await verify(),
+        value: "the close→Save dialog",
+      };
+    },
+  });
 }
 
 /**
@@ -924,38 +1120,49 @@ export async function saveAsDraft(page: Page): Promise<string | null> {
  * Hardened path (CALIBRATED, issue #4):
  *   - Navigate to the REAL drafts view https://x.com/compose/post/unsent/drafts
  *     (the bare /compose/post/unsent route errors; the /drafts route works).
- *   - Prove OUR draft exists by matching the STAGED CONTENT's leading text
- *     inside a drafts row — not merely "some row exists".
+ *   - Observe the STAGED CONTENT's leading text on that exact drafts surface,
+ *     rather than treating the presence of an arbitrary row as persistence.
  *
  * `expectedText` should be the leading text of what we just staged (e.g. the
- * first post / reply body). When provided, verification requires that text to
- * appear. When omitted, we fall back to "at least one drafts row exists" but
- * scoped to the drafts URL (still stronger than the old any-cellInnerDiv check).
- * Non-fatal — returns false (never throws) if inconclusive.
+ * first post / reply body). Verification requires that text to appear. An
+ * empty or omitted value cannot identify the intended draft and returns false.
+ * A clean negative observation returns false. Navigation/probe errors throw so
+ * the save-progress boundary can distinguish a failed reopen from not finding
+ * the intended draft.
  */
-async function verifyDraftSaved(page: Page, expectedText?: string): Promise<boolean> {
+export async function verifyDraftSaved(page: Page, expectedText?: string): Promise<boolean> {
+  await page.goto(X_COMPOSER_SELECTORS.draftsUrl, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(1_500);
+
+  // CALIBRATED (issue #4): on /compose/post/unsent/drafts the drafts render
+  // inside a dialog OVER the home feed, so div[data-testid="cellInnerDiv"] here
+  // still matches the BACKGROUND TIMELINE — iterating those rows both
+  // false-negatives (misses the real draft) and, on empty content, false-
+  // positives (any timeline row counts). Instead match a short, stable prefix
+  // of the STAGED TEXT against the whole drafts-page text. This does not prove
+  // which row supplied the match; row-scoped identity/collision hardening is
+  // tracked separately. Without staged text we CANNOT verify, so return false
+  // (unconfirmed) rather than trusting an arbitrary row.
+  const needle = normalizeForMatch(expectedText ?? "").slice(0, 40);
+  if (!needle) return false;
+
+  const deadline = Date.now() + 6_000;
+  while (Date.now() < deadline) {
+    // X is an SPA: navigation can drift after the initial route load or while
+    // text is being read. A matching prefix is usable evidence only when the
+    // exact canonical surface holds immediately before and after the await.
+    if (!isExactDraftsRoute(page)) return false;
+    const body = normalizeForMatch((await page.locator("body").innerText()) || "");
+    if (!isExactDraftsRoute(page)) return false;
+    if (body.includes(needle)) return true;
+    await page.waitForTimeout(500);
+  }
+  return false;
+}
+
+function isExactDraftsRoute(page: Page): boolean {
   try {
-    await page.goto(X_COMPOSER_SELECTORS.draftsUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1_500);
-
-    // CALIBRATED (issue #4): on /compose/post/unsent/drafts the drafts render
-    // inside a dialog OVER the home feed, so div[data-testid="cellInnerDiv"] here
-    // still matches the BACKGROUND TIMELINE — iterating those rows both
-    // false-negatives (misses the real draft) and, on empty content, false-
-    // positives (any timeline row counts). Instead match a short, stable prefix
-    // of the STAGED TEXT against the whole drafts-page text: our prefix is unique
-    // enough that the feed won't collide. Without staged text we CANNOT verify,
-    // so return false (unconfirmed) rather than trusting a background row.
-    const needle = normalizeForMatch(expectedText ?? "").slice(0, 40);
-    if (!needle) return false;
-
-    const deadline = Date.now() + 6_000;
-    while (Date.now() < deadline) {
-      const body = normalizeForMatch((await page.locator("body").innerText().catch(() => "")) || "");
-      if (body.includes(needle)) return true;
-      await page.waitForTimeout(500);
-    }
-    return false;
+    return new URL(page.url()).href === X_COMPOSER_SELECTORS.draftsUrl;
   } catch {
     return false;
   }

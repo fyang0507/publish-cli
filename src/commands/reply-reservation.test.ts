@@ -13,6 +13,7 @@ import {
 } from "../db.js";
 import {
   executeReplyRealRun,
+  type ReplyLedgerPort,
   type ReplyRealRunDependencies,
   type ReplyRealRunInput,
 } from "./reply.js";
@@ -79,7 +80,8 @@ function stageResult(targetTweetId: string, verified = true): StageReplyResult {
   return {
     format: "tweet",
     posts: 1,
-    verified,
+    saveMechanism: "composer_close_save",
+    savePhase: verified ? "verified" : "save_delivered_unverified",
     note: "Offline barrier stage result.",
     replyToId: targetTweetId,
   };
@@ -244,7 +246,7 @@ test("different targets both reach staging while no SQLite transaction is held",
 
     releaseBoth.resolve();
     const outcomes = await within(Promise.all([first, second]), "different-target completion");
-    assert.deepEqual(outcomes.map((value) => value.kind), ["staged", "staged"]);
+    assert.deepEqual(outcomes.map((value) => value.kind), ["staged", "staged_unverified"]);
     assert.equal(ledgerStatus(dbFile, TARGET_A), "staged");
     assert.equal(ledgerStatus(dbFile, TARGET_B), "staged-unverified");
     assert.equal(reservationRow(dbFile, TARGET_A), undefined);
@@ -341,6 +343,42 @@ test("atomic finalization failure leaves both ledger and reservation conservativ
   }
 });
 
+test("finalize commit followed by a thrown port error stays truthfully uncertain", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-reply-reservation-after-commit-"));
+  const dbFile = join(dir, "publish.db");
+  try {
+    const deps: ReplyRealRunDependencies = {
+      async openLedger() {
+        const ledger = new ReplyLedger(dbFile);
+        const port: ReplyLedgerPort = {
+          claimReservation: ledger.claimReservation.bind(ledger),
+          releaseReservation: ledger.releaseReservation.bind(ledger),
+          finalizeReservation(reservation, options) {
+            ledger.finalizeReservation(reservation, options);
+            throw new Error("RAW_AFTER_COMMIT_PRIVATE_PATH");
+          },
+          recoverStaleReservation: ledger.recoverStaleReservation.bind(ledger),
+          close: ledger.close.bind(ledger),
+        };
+        return port;
+      },
+      async loadStageReplyDraft() {
+        return async () => stageResult(TARGET_A, false);
+      },
+    };
+    const outcome = await executeReplyRealRun(input(TARGET_A), deps);
+    assert.equal(outcome.kind, "ledger_persistence_failed");
+    assert.equal(outcome.savePhase, "save_delivered_unverified");
+    assert.match(outcome.message, /finalization outcome could not be confirmed/);
+    assert.match(outcome.message, /reservation and finalized-history state are unknown/);
+    assert.doesNotMatch(outcome.message, /RAW_AFTER_COMMIT|reservation .* remains/i);
+    assert.equal(ledgerStatus(dbFile, TARGET_A), "staged-unverified");
+    assert.equal(reservationRow(dbFile, TARGET_A), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("actual stage rejection and unusable result both leave the reservation row", async () => {
   for (const mode of ["throw", "undefined"] as const) {
     const dir = mkdtempSync(join(tmpdir(), "publish-reply-reservation-retain-"));
@@ -355,7 +393,7 @@ test("actual stage rejection and unusable result both leave the reservation row"
       );
       assert.equal(
         outcome.kind,
-        mode === "throw" ? "native_stage_failed" : "stage_result_inconclusive",
+        mode === "throw" ? "native_stage_uncertain" : "stage_result_inconclusive",
       );
       assert.ok(reservationRow(dbFile, TARGET_A));
       assert.equal(ledgerStatus(dbFile, TARGET_A), undefined);

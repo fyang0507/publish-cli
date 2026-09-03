@@ -15,6 +15,7 @@ import type {
 } from "../db.js";
 import type { GeneratedContent } from "../x/content.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
+import { XDraftStageError, type XDraftSaveFailurePhase } from "../x/saveProgress.js";
 
 const TARGET_ID = "1234567890123456789";
 const OTHER_TARGET_ID = "9876543210987654321";
@@ -56,8 +57,13 @@ interface HarnessOptions {
   loadStageFails?: boolean;
   loadStageNonFunction?: boolean;
   stageFails?: boolean;
+  stageFailurePhase?: XDraftSaveFailurePhase;
+  stageFailureMechanism?: "composer_close_save" | "article_create_autosave";
   stageReturnsUndefined?: boolean;
   stageReplyToId?: string;
+  stageResultMechanism?: "composer_close_save" | "article_create_autosave";
+  stageResultPosts?: number;
+  stageResultGetter?: "throwing" | "stateful";
   finalizeFails?: boolean;
   releaseFails?: boolean;
   releaseReturnsFalse?: boolean;
@@ -125,14 +131,36 @@ function createHarness(options: HarnessOptions = {}): Harness {
         assert.deepEqual(stageOptions, { inspect: true });
         assert.equal("force" in stageOptions, false, "dedupe --force must not become session force");
         if (options.stageFails) throw new Error("NATIVE_STAGE_ERROR");
+        if (options.stageFailurePhase) {
+          throw new XDraftStageError(
+            options.stageFailurePhase,
+            options.stageFailureMechanism ?? "composer_close_save",
+          );
+        }
         if (options.stageReturnsUndefined) return undefined as unknown as StageReplyResult;
-        return {
+        const result = {
           format: content.format,
-          posts: content.format === "thread" ? (content.thread?.length ?? 0) : 1,
-          verified: options.verified ?? false,
+          posts: options.stageResultPosts ?? (content.format === "thread" ? (content.thread?.length ?? 0) : 1),
+          saveMechanism: options.stageResultMechanism ?? "composer_close_save",
+          savePhase: options.verified ? "verified" : "save_delivered_unverified",
           note: "Offline injected stage result.",
           replyToId: options.stageReplyToId ?? TARGET_ID,
-        };
+        } as StageReplyResult;
+        if (options.stageResultGetter === "throwing") {
+          Object.defineProperty(result, "savePhase", {
+            get() { throw new Error("RAW_STAGE_RESULT_GETTER_PRIVATE_PATH"); },
+          });
+        } else if (options.stageResultGetter === "stateful") {
+          let reads = 0;
+          Object.defineProperty(result, "savePhase", {
+            get() {
+              reads += 1;
+              events.push(`stage:phase-read:${reads}`);
+              return reads === 1 ? "save_delivered_unverified" : "verified";
+            },
+          });
+        }
+        return result;
       };
     },
   };
@@ -149,10 +177,10 @@ function input(overrides: Partial<ReplyRealRunInput> = {}): ReplyRealRunInput {
   };
 }
 
-test("post-stage finalization failure retains the claim and preserves verified evidence", async () => {
+test("post-save finalization failure preserves phase evidence without claiming durable state", async () => {
   for (const [verified, status, draftEvidence] of [
     [false, "staged-unverified", /native draft may exist/i],
-    [true, "staged", /native draft was verified in X Unsent\/Drafts/i],
+    [true, "staged", /intended reply text prefix was observed.*reply-target binding was not verified/i],
   ] as const) {
     const harness = createHarness({ finalizeFails: true, verified });
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -168,10 +196,11 @@ test("post-stage finalization failure retains the claim and preserves verified e
     assert.equal(outcome.kind, "ledger_persistence_failed");
     assert.equal(outcome.exitCode, 1);
     assert.equal(outcome.stream, "stderr");
-    assert.match(outcome.message, new RegExp(`native staging flow returned for target ${TARGET_ID}`));
+    assert.match(outcome.message, new RegExp(`Save-phase evidence was produced for target ${TARGET_ID}`));
     assert.match(outcome.message, draftEvidence);
-    assert.match(outcome.message, /record and reservation finalization could not be confirmed/);
-    assert.match(outcome.message, /reservation .* remains/i);
+    assert.match(outcome.message, /record and reservation finalization outcome could not be confirmed/);
+    assert.match(outcome.message, /reservation and finalized-history state are unknown/);
+    assert.equal(outcome.savePhase, verified ? "verified" : "save_delivered_unverified");
     assert.match(outcome.message, /exact CLI-owned profile used by this run/);
     assert.doesNotMatch(
       outcome.message,
@@ -191,12 +220,13 @@ test("arbitrary native-stage failure retains the reservation and never finalizes
     `stage:run:${TARGET_URL}:tweet`,
     "ledger:close",
   ]);
-  assert.equal(outcome.kind, "native_stage_failed");
+  assert.equal(outcome.kind, "native_stage_uncertain");
   assert.equal(outcome.exitCode, 1);
-  assert.match(outcome.message, /Failed to stage the X reply draft: NATIVE_STAGE_ERROR/);
+  assert.equal(outcome.savePhase, "save_delivery_unknown");
+  assert.match(outcome.message, /Save action was invoked, but delivery is unknown/);
   assert.match(outcome.message, /reservation .* remains/i);
   assert.match(outcome.message, /exact CLI-owned profile used by this run/);
-  assert.match(outcome.message, /--inspect cannot bypass or clear/);
+  assert.doesNotMatch(outcome.message, /NATIVE_STAGE_ERROR|--inspect|selector/i);
   assert.doesNotMatch(outcome.message, /ledger finalization/);
 });
 
@@ -204,6 +234,8 @@ test("undefined or wrong-target stage results remain inconclusive and retain the
   for (const options of [
     { stageReturnsUndefined: true },
     { stageReplyToId: OTHER_TARGET_ID },
+    { stageResultMechanism: "article_create_autosave" as const },
+    { stageResultPosts: 2 },
   ]) {
     const harness = createHarness(options);
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -223,10 +255,27 @@ test("undefined or wrong-target stage results remain inconclusive and retain the
   }
 });
 
-test("verified and unverified returns finalize the normalized target before one close", async () => {
-  for (const [verified, status, evidence] of [
-    [true, "staged", /verified in Unsent\/Drafts: yes/],
-    [false, "staged-unverified", /verified in Unsent\/Drafts: unconfirmed/],
+test("reply result getters cannot leak or change phase after validation", async () => {
+  const throwing = createHarness({ stageResultGetter: "throwing" });
+  const thrownOutcome = await executeReplyRealRun(input(), throwing.deps);
+  assert.equal(thrownOutcome.kind, "native_stage_uncertain");
+  assert.equal(thrownOutcome.savePhase, "save_delivery_unknown");
+  assert.equal(throwing.events.some((event) => event.startsWith("ledger:finalize")), false);
+  assert.doesNotMatch(thrownOutcome.message, /RAW_STAGE_RESULT_GETTER/);
+
+  const stateful = createHarness({ stageResultGetter: "stateful" });
+  const statefulOutcome = await executeReplyRealRun(input(), stateful.deps);
+  assert.equal(stateful.events.filter((event) => event.startsWith("stage:phase-read")).length, 1);
+  assert.match(stateful.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+  assert.equal(statefulOutcome.kind, "staged_unverified");
+  assert.equal(statefulOutcome.savePhase, "save_delivered_unverified");
+  assert.equal(statefulOutcome.exitCode, 1);
+});
+
+test("verified and unverified returns finalize before close but only verified succeeds", async () => {
+  for (const [verified, status, kind, exitCode, evidence] of [
+    [true, "staged", "staged", 0, /saved draft reply-target binding verified: no/],
+    [false, "staged-unverified", "staged_unverified", 1, /finalized as staged-unverified/],
   ] as const) {
     const harness = createHarness({ verified });
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -239,10 +288,44 @@ test("verified and unverified returns finalize the normalized target before one 
       `ledger:finalize:${TARGET_ID}:${status}`,
       "ledger:close",
     ]);
-    assert.equal(outcome.kind, "staged");
-    assert.equal(outcome.exitCode, 0);
-    assert.match(outcome.message, /Staged a NATIVE X reply draft.*NEVER posted/s);
+    assert.equal(outcome.kind, kind);
+    assert.equal(outcome.exitCode, exitCode);
+    assert.equal(outcome.savePhase, verified ? "verified" : "save_delivered_unverified");
     assert.match(outcome.message, evidence);
+    if (verified) {
+      assert.match(outcome.message, new RegExp(`intended X reply text prefix.*requested target ${TARGET_ID}.*NEVER posted`, "s"));
+      assert.doesNotMatch(outcome.message, /target preserved|reply draft[^\n]*\bto \d+/i);
+    } else {
+      assert.match(outcome.message, /exact CLI-owned profile used by this run/);
+      assert.match(outcome.message, /Only after confidently finding no matching draft.*--force/s);
+      assert.doesNotMatch(outcome.message, /Offline injected stage result/);
+    }
+  }
+});
+
+test("reply receipts never turn requested-target intent into verified target binding", async () => {
+  const stagedUnverifiedPrior: ReplyLedgerEntry = {
+    ...PRIOR,
+    status: "staged-unverified",
+  };
+  for (const fixture of [
+    { verified: true },
+    { verified: true, finalizeFails: true },
+    { verified: true, closeFails: true },
+    { verified: false },
+    { prior: PRIOR },
+    { prior: stagedUnverifiedPrior },
+    { stageFails: true },
+    { stageFailurePhase: "save_not_attempted" as const },
+  ]) {
+    const outcome = await executeReplyRealRun(input(), createHarness(fixture).deps);
+    assert.doesNotMatch(
+      outcome.message,
+      /reply target preserved|target preserved|Already staged a reply to|Staged a NATIVE X reply draft[^\n]*\bto\b/i,
+    );
+    if (outcome.savePhase === "verified") {
+      assert.match(outcome.message, /reply-target binding (?:was )?not verified|reply-target binding verified: no/i);
+    }
   }
 });
 
@@ -255,7 +338,8 @@ test("finalized history blocks non-force while force still acquires a reservatio
     "ledger:close",
   ]);
   assert.equal(refused.kind, "duplicate");
-  assert.match(refused.message, /Refusing to stage a duplicate reply.*--force/s);
+  assert.match(refused.message, /Finalized reply-attempt history exists for requested target.*override finalized history/s);
+  assert.doesNotMatch(refused.message, /Already staged a reply to/);
 
   const forced = createHarness({ prior: PRIOR, verified: true });
   const staged = await executeReplyRealRun(input({ force: true }), forced.deps);
@@ -322,6 +406,123 @@ test("only a proven pre-browser loader failure releases the owner-matched reserv
   }
 });
 
+test("typed Save-not-attempted evidence releases only the matching composer reservation", async () => {
+  const released = createHarness({ stageFailurePhase: "save_not_attempted" });
+  const releasedOutcome = await executeReplyRealRun(input(), released.deps);
+  assert.deepEqual(released.events, [
+    "ledger:open",
+    `ledger:claim:${TARGET_ID}:force=false`,
+    "stage:load",
+    `stage:run:${TARGET_URL}:tweet`,
+    `ledger:release:${RESERVATION.reservationId}`,
+    "ledger:close",
+  ]);
+  assert.equal(releasedOutcome.kind, "native_stage_not_attempted");
+  assert.equal(releasedOutcome.savePhase, "save_not_attempted");
+  assert.equal(releasedOutcome.saveMechanism, "composer_close_save");
+  assert.equal(releasedOutcome.reservationRelease, "released");
+  assert.match(releasedOutcome.message, /typed poster evidence proves.*Save action was not invoked/s);
+
+  for (const releaseFailure of [
+    { releaseFails: true },
+    { releaseReturnsFalse: true },
+  ]) {
+    const failed = createHarness({
+      stageFailurePhase: "save_not_attempted",
+      ...releaseFailure,
+    });
+    const failedOutcome = await executeReplyRealRun(input(), failed.deps);
+    assert.equal(failedOutcome.kind, "native_stage_not_attempted");
+    assert.equal(failedOutcome.reservationRelease, "not_released");
+    assert.match(failedOutcome.message, /reservation could not be released/);
+    assert.doesNotMatch(failedOutcome.message, /RAW_RELEASE_ERROR/);
+  }
+
+  const wrongMechanism = createHarness({
+    stageFailurePhase: "save_not_attempted",
+    stageFailureMechanism: "article_create_autosave",
+  });
+  const conservative = await executeReplyRealRun(input(), wrongMechanism.deps);
+  assert.equal(conservative.kind, "native_stage_uncertain");
+  assert.equal(conservative.savePhase, "save_delivery_unknown");
+  assert.equal(conservative.reservationRelease, undefined);
+  assert.equal(wrongMechanism.events.some((event) => event.startsWith("ledger:release")), false);
+});
+
+test("typed delivery unknown retains; typed delivered-unverified finalizes protection", async () => {
+  const unknown = createHarness({ stageFailurePhase: "save_delivery_unknown" });
+  const unknownOutcome = await executeReplyRealRun(input(), unknown.deps);
+  assert.deepEqual(unknown.events, [
+    "ledger:open",
+    `ledger:claim:${TARGET_ID}:force=false`,
+    "stage:load",
+    `stage:run:${TARGET_URL}:tweet`,
+    "ledger:close",
+  ]);
+  assert.equal(unknownOutcome.kind, "native_stage_uncertain");
+  assert.equal(unknownOutcome.savePhase, "save_delivery_unknown");
+  assert.match(unknownOutcome.message, /reservation .* remains/i);
+
+  const delivered = createHarness({ stageFailurePhase: "save_delivered_unverified" });
+  const deliveredOutcome = await executeReplyRealRun(input(), delivered.deps);
+  assert.deepEqual(delivered.events, [
+    "ledger:open",
+    `ledger:claim:${TARGET_ID}:force=false`,
+    "stage:load",
+    `stage:run:${TARGET_URL}:tweet`,
+    `ledger:finalize:${TARGET_ID}:staged-unverified`,
+    "ledger:close",
+  ]);
+  assert.equal(deliveredOutcome.kind, "staged_unverified");
+  assert.equal(deliveredOutcome.exitCode, 1);
+  assert.equal(deliveredOutcome.savePhase, "save_delivered_unverified");
+  assert.match(deliveredOutcome.message, /finalized as staged-unverified/);
+  assert.match(deliveredOutcome.message, /Only after confidently finding no matching draft.*--force/s);
+});
+
+test("staged-unverified history blocks with manual-check guidance before force", async () => {
+  const prior: ReplyLedgerEntry = { ...PRIOR, status: "staged-unverified" };
+  const harness = createHarness({ prior });
+  const outcome = await executeReplyRealRun(input(), harness.deps);
+  assert.equal(outcome.kind, "duplicate");
+  assert.equal(outcome.savePhase, null, "historical ledger evidence is not this run's Save phase");
+  assert.equal(outcome.priorStatus, "staged-unverified");
+  assert.match(outcome.message, /exact CLI-owned profile used by that run/);
+  assert.match(outcome.message, /If a matching draft exists or the comparison is uncertain, do not retry or use --force/);
+  assert.match(outcome.message, /Only after confidently finding no matching draft.*--force/s);
+  assert.doesNotMatch(outcome.message, /Re-run with --force to override/);
+
+  const closeHarness = createHarness({ prior, closeFails: true });
+  const closeOutcome = await executeReplyRealRun(input(), closeHarness.deps);
+  assert.equal(closeOutcome.exitCode, 1);
+  assert.equal(closeOutcome.savePhase, null);
+  assert.equal(closeOutcome.priorStatus, "staged-unverified");
+  assert.match(closeOutcome.message, /exact CLI-owned profile used by that run/);
+  assert.match(closeOutcome.message, /Only after confidently finding no matching draft.*--force/s);
+  assert.match(closeOutcome.message, /ledger failed to close/);
+  assert.doesNotMatch(closeOutcome.message, /Re-run with --force|RAW_CLOSE_ERROR/);
+});
+
+test("release and close failures preserve both structured facts", async () => {
+  for (const fixture of [
+    { stageFailurePhase: "save_not_attempted" as const, closeFails: true },
+    { stageFailurePhase: "save_not_attempted" as const, releaseFails: true, closeFails: true },
+    { loadStageFails: true, closeFails: true },
+    { loadStageFails: true, releaseReturnsFalse: true, closeFails: true },
+  ]) {
+    const harness = createHarness(fixture);
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    const expectedReleased = !fixture.releaseFails && !fixture.releaseReturnsFalse;
+    assert.equal(outcome.reservationRelease, expectedReleased ? "released" : "not_released");
+    assert.match(
+      outcome.message,
+      expectedReleased ? /reservation release returned/ : /reservation was not confirmed released/,
+    );
+    assert.match(outcome.message, /ledger .*failed to close/i);
+    assert.doesNotMatch(outcome.message, /RAW_RELEASE|RAW_CLOSE/);
+  }
+});
+
 test("open and atomic-claim failures stop before X and close only acquired ledgers", async () => {
   const open = createHarness({ openFails: true });
   const openOutcome = await executeReplyRealRun(input(), open.deps);
@@ -346,13 +547,29 @@ test("close failures preserve the primary reservation and persistence facts", as
   const successOutcome = await executeReplyRealRun(input(), success.deps);
   assert.equal(successOutcome.kind, "ledger_persistence_failed");
   assert.equal(successOutcome.exitCode, 1);
-  assert.match(successOutcome.message, /record and reservation finalization completed/);
+  assert.match(successOutcome.message, /finalization completed as staged/);
+  assert.match(successOutcome.message, /text-persistence observation was verified, but reply-target binding was not/i);
+  assert.match(successOutcome.message, /Do not retry or use --force/);
   assert.doesNotMatch(successOutcome.message, /✓ Staged|RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
+
+  const unverified = createHarness({
+    stageFailurePhase: "save_delivered_unverified",
+    closeFails: true,
+  });
+  const unverifiedOutcome = await executeReplyRealRun(input(), unverified.deps);
+  assert.equal(unverifiedOutcome.kind, "ledger_persistence_failed");
+  assert.equal(unverifiedOutcome.exitCode, 1);
+  assert.equal(unverifiedOutcome.savePhase, "save_delivered_unverified");
+  assert.match(unverifiedOutcome.message, /finalization completed as staged-unverified/);
+  assert.match(unverifiedOutcome.message, /exact CLI-owned profile used by this run/);
+  assert.match(unverifiedOutcome.message, /If a matching draft exists or the comparison is uncertain, do not retry or use --force/);
+  assert.match(unverifiedOutcome.message, /Only after confidently finding no matching draft.*--force/s);
+  assert.doesNotMatch(unverifiedOutcome.message, /✓ Staged|RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
 
   const finalize = createHarness({ finalizeFails: true, closeFails: true });
   const finalizeOutcome = await executeReplyRealRun(input(), finalize.deps);
   assert.equal(finalizeOutcome.kind, "ledger_persistence_failed");
-  assert.match(finalizeOutcome.message, /record and reservation finalization could not be confirmed/);
+  assert.match(finalizeOutcome.message, /record and reservation finalization outcome could not be confirmed/);
   assert.match(finalizeOutcome.message, /Closing the reply ledger also failed/);
   assert.doesNotMatch(
     finalizeOutcome.message,
@@ -361,7 +578,7 @@ test("close failures preserve the primary reservation and persistence facts", as
 
   const stage = createHarness({ stageFails: true, closeFails: true });
   const stageOutcome = await executeReplyRealRun(input(), stage.deps);
-  assert.equal(stageOutcome.kind, "native_stage_failed");
+  assert.equal(stageOutcome.kind, "native_stage_uncertain");
   assert.match(stageOutcome.message, /reservation remains.*ledger also failed to close/s);
   assert.doesNotMatch(stageOutcome.message, /RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
 
@@ -382,7 +599,7 @@ test("close failures preserve the primary reservation and persistence facts", as
   const duplicateOutcome = await executeReplyRealRun(input(), duplicate.deps);
   assert.equal(duplicateOutcome.kind, "duplicate");
   assert.equal(duplicateOutcome.exitCode, 1);
-  assert.match(duplicateOutcome.message, /Already staged a reply/);
+  assert.match(duplicateOutcome.message, /Finalized reply-attempt history exists for requested target/);
   assert.match(duplicateOutcome.message, /No new native staging was attempted/);
   assert.match(duplicateOutcome.message, /do not bypass an unhealthy ledger with --force/);
   assert.doesNotMatch(duplicateOutcome.message, /Re-run with --force|RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
