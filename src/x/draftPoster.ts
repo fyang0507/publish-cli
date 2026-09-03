@@ -25,7 +25,16 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { getBrowserContext, type EnsureSessionOptions } from "../session.js";
-import type { ArticleBlock, GeneratedContent, InlineRun } from "./content.js";
+import type { GeneratedContent } from "./content.js";
+import {
+  normalizeXArticleStageSnapshotFailure,
+  snapshotXArticleStageInput,
+  snapshotXContentFormat,
+  snapshotXNonArticleStageContent,
+  XArticleStageSnapshotError,
+  type XArticleStageSnapshot,
+} from "./articleStageSnapshot.js";
+export { htmlFromArticleBlocks } from "./articleStageSnapshot.js";
 import {
   extractTweetId,
   isLivePositiveXArticleCoverPath,
@@ -39,7 +48,6 @@ import {
   snapshotXArticleDraftHandoff,
   snapshotXDraftRowEvidence,
   xReplyTargetEvidenceProbeFailed,
-  X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
   X_ARTICLE_IMAGE_DIMENSION_LIMIT,
   X_DRAFT_ROW_OBSERVATION_LIMIT,
   XDraftStageError,
@@ -292,17 +300,44 @@ export async function stageDraft(
   content: GeneratedContent,
   opts: StageDraftOptions = {},
 ): Promise<StageDraftResult> {
-  const mechanism = content.format === "article"
+  let format: GeneratedContent["format"];
+  try {
+    format = snapshotXContentFormat(content);
+  } catch (error) {
+    // The discriminant is untrusted, so no specific native mechanism can be
+    // claimed before classification. Keep the bounded snapshot error generic.
+    throw new XArticleStageSnapshotError(normalizeXArticleStageSnapshotFailure(error));
+  }
+  const mechanism = format === "article"
     ? "article_create_autosave"
     : "composer_close_save";
   try {
-    const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
+    // Close and pre-render every caller-owned Article value before profile or
+    // browser access. The snapshot contains only copied frozen primitives.
+    const articleSnapshot = format === "article"
+      ? snapshotXArticleStageInput(content, format)
+      : null;
+    const stageContent = articleSnapshot
+      ? articleSnapshot.content
+      : snapshotXNonArticleStageContent(content, format);
+    const inspect = opts.inspect;
+    const force = opts.force;
+    const basePath = opts.basePath;
+    if (
+      articleSnapshot &&
+      ((inspect !== undefined && typeof inspect !== "boolean") ||
+        (force !== undefined && typeof force !== "boolean") ||
+        (basePath !== undefined && (typeof basePath !== "string" || basePath.length > 1_000_000)))
+    ) {
+      throw new XDraftStageError("save_not_attempted", mechanism);
+    }
+    const ctx = (await getBrowserContext({ inspect, force })) as BrowserContext;
     const page = await ctx.newPage();
     try {
-      if (content.format === "article") {
-        return await stageArticleDraft(ctx, page, content, opts.basePath);
+      if (articleSnapshot) {
+        return await stageArticleSnapshot(ctx, page, articleSnapshot, basePath);
       }
-      return await stageTweetOrThreadDraft(page, content);
+      return await stageTweetOrThreadDraft(page, stageContent);
     } finally {
       // Close only the page we opened; leave the persistent context alive so the
       // session stays warm for subsequent commands.
@@ -545,8 +580,6 @@ export async function stageReplyDraft(
  * BROWSER-INTERACTION part still needing live calibration: the 5:2 HERO IMAGE
  * upload (articleCover* selectors + crop/apply dialog) — degrades gracefully.
  */
-type GeneratedArticle = NonNullable<GeneratedContent["article"]>;
-
 export interface ArticleDraftStageDependencies {
   openHub(page: Page): Promise<void>;
   locateCreate(page: Page): Promise<Locator | null>;
@@ -578,8 +611,35 @@ export async function stageArticleDraft(
   basePath?: string,
   deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
 ): Promise<StageDraftResult> {
-  const article = content.article;
-  if (!article) throw new Error("No article content to stage.");
+  let format: GeneratedContent["format"];
+  try {
+    format = snapshotXContentFormat(content);
+    const snapshot = snapshotXArticleStageInput(content, format);
+    if (
+      basePath !== undefined &&
+      (typeof basePath !== "string" || basePath.length > 1_000_000)
+    ) {
+      throw new XDraftStageError("save_not_attempted", "article_create_autosave");
+    }
+    const copiedBasePath = basePath;
+    return await stageArticleSnapshot(ctx, page, snapshot, copiedBasePath, deps);
+  } catch (error) {
+    throw xDraftStageError(error, "save_not_attempted", "article_create_autosave");
+  }
+}
+
+/** Use only copy-owned primitives from the pre-platform Article snapshot. */
+async function stageArticleSnapshot(
+  ctx: BrowserContext,
+  page: Page,
+  snapshot: XArticleStageSnapshot,
+  basePath?: string,
+  deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
+): Promise<StageDraftResult> {
+  const title = snapshot.title;
+  const html = snapshot.html;
+  const plainFallback = snapshot.plain;
+  const receiptCodeBlockCount = snapshot.receiptCodeBlockCount;
   let createBtn: Locator | undefined;
 
   const saved = await runXDraftSaveFlow("article_create_autosave", {
@@ -601,17 +661,16 @@ export async function stageArticleDraft(
       // delivered-but-unverified autosave outcome by runXDraftSaveFlow.
       const titleBox = await deps.locateTitle(page);
       if (!titleBox) throw new Error("Article editor unavailable after Create.");
-      const editUrl = deps.currentEditUrl(page);
+      const rawEditUrl = deps.currentEditUrl(page);
+      const editUrl = typeof rawEditUrl === "string" &&
+          validatedArticleEditUrl(rawEditUrl) === rawEditUrl
+        ? rawEditUrl
+        : null;
 
-      await deps.writeTitle(page, titleBox, article.title);
+      await deps.writeTitle(page, titleBox, title);
 
       const bodyBox = await deps.locateBody(page);
       if (!bodyBox) throw new Error("Article body input unavailable after Create.");
-
-      // Build the body as an HTML fragment the editor converts natively on paste
-      // (issue #5). Code blocks are excluded and counted for the closed handoff.
-      const { html, codeBlockCount } = htmlFromArticleBlocks(article.blocks);
-      const plainFallback = plainTextFromArticleBlocks(article.blocks);
 
       await deps.writeBody(ctx, page, bodyBox, html, plainFallback);
 
@@ -627,16 +686,14 @@ export async function stageArticleDraft(
       const verified = editUrl !== null && await deps.verify(
         page,
         editUrl,
-        article.title,
+        title,
         plainFallback,
       );
       return {
         verified,
         value: {
           body: "rich_html" as const,
-          codeBlockCount: codeBlockCount > X_ARTICLE_CODE_BLOCK_COUNT_LIMIT
-            ? "many" as const
-            : codeBlockCount,
+          codeBlockCount: receiptCodeBlockCount,
           cover,
         },
       };
@@ -834,124 +891,6 @@ export async function verifyArticleDraftSaved(
   if (!isExactArticleEditRoute(page, editUrl)) return false;
   return actualTitle === expectedTitleText &&
     (expectedBodyPrefix === "" || actualBody.includes(expectedBodyPrefix));
-}
-
-// ---------------------------------------------------------------------------
-// Article HTML rendering (DETERMINISTIC — the X Articles editor converts this
-// HTML fragment to its native blocks on paste, VERIFIED empirically 2026-06).
-// ---------------------------------------------------------------------------
-
-/** HTML-escape text for safe embedding in an HTML fragment. */
-function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/**
- * Render a sequence of inline runs to escaped HTML with bold/italic/link marks.
- *   - bold  → <strong>, italic → <em> (X converts these to styled spans).
- *   - href  → <a href="...">…</a> (X applies a real hyperlink).
- *   - inline `code` → plain text (X Articles has no inline-code style).
- * All text is HTML-escaped; hrefs are attribute-escaped.
- */
-function inlineRunsToHtml(runs: InlineRun[]): string {
-  let out = "";
-  for (const run of runs) {
-    if (!run.text) continue;
-    let inner = escapeHtml(run.text);
-    // Inline code has no X equivalent — leave as plain (escaped) text.
-    if (run.bold) inner = `<strong>${inner}</strong>`;
-    if (run.italic) inner = `<em>${inner}</em>`;
-    if (run.href) inner = `<a href="${escapeHtml(run.href)}">${inner}</a>`;
-    out += inner;
-  }
-  return out;
-}
-
-/**
- * Render structured article blocks to an HTML fragment the X Articles editor
- * converts natively on paste (issue #5).
- *
- * Mapping:
- *   - heading level 1              → <h1>
- *   - heading level 2 + subheading → <h2>   (X has exactly two heading levels)
- *   - paragraph                    → <p>
- *   - quote                        → <blockquote>
- *   - consecutive bullet blocks    → a single <ul> of <li>
- *   - consecutive ordered blocks   → a single <ol> of <li>
- *   - code                         → EXCLUDED (paste won't convert it); counted
- *
- * Returns the HTML plus the count of excluded code blocks so the caller can flag
- * "N code blocks not auto-formatted" and tell the human to add them via
- * Insert → Code or a screenshot. Deterministic + build-time verifiable.
- */
-export function htmlFromArticleBlocks(blocks: ArticleBlock[]): {
-  html: string;
-  codeBlockCount: number;
-} {
-  const parts: string[] = [];
-  let codeBlockCount = 0;
-  let i = 0;
-
-  while (i < blocks.length) {
-    const block = blocks[i];
-
-    // Group consecutive bullet / ordered blocks into a single list element.
-    if (block.kind === "bullet" || block.kind === "ordered") {
-      const tag = block.kind === "bullet" ? "ul" : "ol";
-      const items: string[] = [];
-      while (i < blocks.length && blocks[i].kind === block.kind) {
-        const li = blocks[i] as Extract<ArticleBlock, { kind: "bullet" | "ordered" }>;
-        items.push(`<li>${inlineRunsToHtml(li.runs)}</li>`);
-        i++;
-      }
-      parts.push(`<${tag}>${items.join("")}</${tag}>`);
-      continue;
-    }
-
-    switch (block.kind) {
-      case "heading":
-        parts.push(`<h${block.level}>${inlineRunsToHtml(block.runs)}</h${block.level}>`);
-        break;
-      case "subheading":
-        // Subheading maps to the second (and last) X heading level, H2.
-        parts.push(`<h2>${inlineRunsToHtml(block.runs)}</h2>`);
-        break;
-      case "paragraph":
-        parts.push(`<p>${inlineRunsToHtml(block.runs)}</p>`);
-        break;
-      case "quote":
-        parts.push(`<blockquote>${inlineRunsToHtml(block.runs)}</blockquote>`);
-        break;
-      case "code":
-        // Paste does NOT convert code to a code block on X — exclude it and count
-        // it so the caller can surface it (add via Insert → Code / screenshot).
-        codeBlockCount++;
-        break;
-    }
-    i++;
-  }
-
-  return { html: parts.join("\n"), codeBlockCount };
-}
-
-/**
- * Plain-text fallback for the clipboard (used when a surface ignores text/html).
- * Code blocks are excluded here too (consistent with the HTML), since they are
- * surfaced separately for manual insertion.
- */
-function plainTextFromArticleBlocks(blocks: ArticleBlock[]): string {
-  const lines: string[] = [];
-  for (const block of blocks) {
-    if (block.kind === "code") continue;
-    const text = block.runs.map((r) => r.text).join("");
-    lines.push(text);
-  }
-  return lines.join("\n\n");
 }
 
 function modifier(): "Meta" | "Control" {

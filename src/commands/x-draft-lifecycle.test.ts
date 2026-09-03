@@ -7,6 +7,7 @@ import {
 import { generateContent, type GeneratedContent, type XFormat } from "../x/content.js";
 import type { StageDraftResult } from "../x/draftPoster.js";
 import {
+  isXDraftStageError,
   XDraftStageError,
   xDraftRowEvidenceNotApplicable,
   type XArticleDraftHandoff,
@@ -208,6 +209,95 @@ test("runtime, untyped, wrong-mechanism, and malformed results default safely", 
     assert.equal(outcome.exitCode, 1);
     assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
   }
+});
+
+test("hostile thrown stage errors are snapshotted without getter reads or raw output", async () => {
+  const generated = await content("tweet");
+  const hostileText = `${RAW_CANARY}\u001b[31m\0${"x".repeat(100_000)}`;
+  let phaseReads = 0;
+  let mechanismReads = 0;
+  const accessorError = Object.create(XDraftStageError.prototype) as object;
+  Object.defineProperties(accessorError, {
+    savePhase: {
+      enumerable: true,
+      get() {
+        phaseReads += 1;
+        return phaseReads === 1 ? "save_not_attempted" : hostileText;
+      },
+    },
+    saveMechanism: {
+      enumerable: true,
+      get() {
+        mechanismReads += 1;
+        throw new Error(hostileText);
+      },
+    },
+  });
+
+  class AccessorStageError extends XDraftStageError {
+    constructor() {
+      super("save_not_attempted", "composer_close_save");
+      Object.defineProperties(this, {
+        savePhase: {
+          enumerable: true,
+          get() {
+            phaseReads += 1;
+            return phaseReads === 1 ? "save_not_attempted" : hostileText;
+          },
+        },
+        saveMechanism: {
+          enumerable: true,
+          get() {
+            mechanismReads += 1;
+            throw new Error(hostileText);
+          },
+        },
+      });
+    }
+  }
+  const subclassError = new AccessorStageError();
+
+  const mutated = new XDraftStageError("save_not_attempted", "composer_close_save");
+  Object.defineProperty(mutated, "savePhase", { value: hostileText });
+
+  const hostileProxy = new Proxy(
+    new XDraftStageError("save_not_attempted", "composer_close_save"),
+    {
+      get() {
+        throw new Error(hostileText);
+      },
+    },
+  );
+  const revoked = Proxy.revocable(
+    new XDraftStageError("save_not_attempted", "composer_close_save"),
+    {},
+  );
+  revoked.revoke();
+
+  for (const error of [accessorError, subclassError, mutated, hostileProxy, revoked.proxy]) {
+    let loaderCalls = 0;
+    let stageCalls = 0;
+    const outcome = await executeXDraftRealRun(
+      { content: generated },
+      dependencies(async () => {
+        loaderCalls += 1;
+        return async () => {
+          stageCalls += 1;
+          throw error;
+        };
+      }),
+    );
+    assert.equal(loaderCalls, 1);
+    assert.equal(stageCalls, 1);
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.savePhase, "save_delivery_unknown");
+    assert.equal(outcome.saveMechanism, "composer_close_save");
+    assert.ok(outcome.message.length < 2_000);
+    assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|\u001b|\0/);
+    assert.equal(isXDraftStageError(error), false);
+  }
+  assert.equal(phaseReads, 0);
+  assert.equal(mechanismReads, 0);
 });
 
 test("resolved unverified results never print poster notes; verified is the only success", async () => {
@@ -478,6 +568,90 @@ test("throwing and stateful draft-result getters cannot leak or manufacture succ
   assert.equal(statefulOutcome.kind, "save_incomplete");
   assert.equal(statefulOutcome.savePhase, "save_delivered_unverified");
   assert.equal(statefulOutcome.exitCode, 1);
+});
+
+test("resolved result getters cannot turn branded errors into pre-Save evidence", async () => {
+  for (const format of ["tweet", "article"] as const) {
+    const generated = await content(format);
+    const expectedMechanism = mechanism(format);
+    for (const phase of [
+      "save_not_attempted",
+      "save_delivery_unknown",
+      "save_delivered_unverified",
+    ] as const) {
+      const mechanism = expectedMechanism;
+      const branded = new XDraftStageError(phase, mechanism);
+      let topLevelReads = 0;
+      const topLevel = Object.defineProperty({}, "format", {
+        enumerable: true,
+        get() {
+          topLevelReads += 1;
+          throw branded;
+        },
+      }) as StageDraftResult;
+      const topLevelOutcome = await executeXDraftRealRun(
+        { content: generated },
+        dependencies(async () => async () => topLevel),
+      );
+      assert.equal(topLevelReads, 1);
+      assert.equal(topLevelOutcome.kind, "save_incomplete");
+      assert.equal(topLevelOutcome.savePhase, "save_delivery_unknown");
+      assert.equal(topLevelOutcome.saveMechanism, expectedMechanism);
+      assert.equal(topLevelOutcome.exitCode, 1);
+
+      let nestedReads = 0;
+      const nested = stageResult(generated, "verified");
+      const nestedTarget = nested.saveMechanism === "article_create_autosave"
+        ? nested.articleHandoff.cover
+        : nested.draftRowEvidence;
+      Object.defineProperty(nestedTarget, "status", {
+        enumerable: true,
+        get() {
+          nestedReads += 1;
+          throw branded;
+        },
+      });
+      const nestedOutcome = await executeXDraftRealRun(
+        { content: generated },
+        dependencies(async () => async () => nested),
+      );
+      assert.equal(nestedReads, 1);
+      assert.equal(nestedOutcome.kind, "save_incomplete");
+      assert.equal(nestedOutcome.savePhase, "save_delivery_unknown");
+      assert.equal(nestedOutcome.saveMechanism, expectedMechanism);
+      assert.equal(nestedOutcome.exitCode, 1);
+    }
+  }
+
+  const generated = await content("tweet");
+  let statefulReads = 0;
+  const stateful = Object.defineProperty({}, "format", {
+    enumerable: true,
+    get() {
+      statefulReads += 1;
+      if (statefulReads === 1) {
+        throw new XDraftStageError("save_not_attempted", "composer_close_save");
+      }
+      return "tweet";
+    },
+  }) as StageDraftResult;
+  const statefulOutcome = await executeXDraftRealRun(
+    { content: generated },
+    dependencies(async () => async () => stateful),
+  );
+  assert.equal(statefulReads, 1);
+  assert.equal(statefulOutcome.savePhase, "save_delivery_unknown");
+  assert.equal(statefulOutcome.exitCode, 1);
+
+  const revoked = Proxy.revocable(stageResult(generated, "verified"), {});
+  revoked.revoke();
+  const revokedOutcome = await executeXDraftRealRun(
+    { content: generated },
+    dependencies(async () => async () => revoked.proxy),
+  );
+  assert.equal(revokedOutcome.savePhase, "save_delivery_unknown");
+  assert.equal(revokedOutcome.saveMechanism, "composer_close_save");
+  assert.equal(revokedOutcome.exitCode, 1);
 });
 
 test("throwing or stateful nested row evidence is read once and cannot manufacture success", async () => {

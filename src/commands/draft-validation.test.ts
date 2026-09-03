@@ -478,6 +478,12 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
     assert.match(draftHelp.stdout, /excluded from the native rich-HTML paste/);
     assert.match(draftHelp.stdout, /verified and unverified handoff receipts/);
     assert.match(draftHelp.stdout, /separate \.x-article\.inspection\.txt receipt/);
+    assert.match(draftHelp.stdout, /Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title\/Markdown\/block\/run\/link\/code-count snapshot/);
+    assert.match(draftHelp.stdout, /unsafe-active-href Article structures exit 2 locally with save_not_attempted/);
+    assert.match(draftHelp.stdout, /runtime and native Save\/autosave failures retain exit 1 semantics/);
+    assert.match(draftHelp.stdout, /format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism/);
+    assert.match(draftHelp.stdout, /supported percent bytes remain exact and are not decoded by safety validation/);
+    assert.match(draftHelp.stdout, /URL-looking advisories from excluded code are bounded but never become active anchors/);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }

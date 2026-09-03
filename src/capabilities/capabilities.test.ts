@@ -203,6 +203,14 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Tweet\/thread\/reply staging treats the close→Save click as the persistence action/);
   assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
   assert.match(x, /Article verification reopens the captured canonical edit URL and matches the intended title plus, when present, a body prefix/);
+  assert.match(x, /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed title, canonical Markdown, block\/run\/mark\/link, excluded-code, advisory, and count snapshot/);
+  assert.match(x, /Malformed, throwing\/accessor\/proxy, cyclic, sparse\/oversized, count-inconsistent, or unsafe-active-href structures fail locally with bounded `save_not_attempted` evidence and exit 2/);
+  assert.match(x, /format cannot be classified safely, that local failure remains a typed generic `save_not_attempted` boundary and names no Article or composer save mechanism/);
+  assert.match(x, /Active hrefs must use exact absolute HTTP\(S\) syntax without credentials, raw whitespace\/control\/format characters, ambiguous backslashes, or unsafe schemes/);
+  assert.match(x, /lone percent characters and percent-encoded path\/query text, are retained exactly and are not decoded during safety validation/);
+  assert.match(x, /URL-looking advisories from excluded code are detached and bounded but are never rendered as anchors/);
+  assert.match(x, /every active href must still have an exact matching advisory string/);
+  assert.match(x, /Staging-runtime failures and native Save\/autosave uncertainty remain exit 1 outcomes/);
   assert.match(x, /read-only baseline in the same CLI-owned browser context/);
   assert.match(x, /exactly one row whose dedicated content field equals the full intended tweet or first thread\/reply row/);
   assert.match(x, /post-Save visible scoped-row multiset equal to the baseline plus exactly that full-text value/);
