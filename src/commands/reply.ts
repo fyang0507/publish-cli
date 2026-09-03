@@ -10,6 +10,10 @@ import {
   isLocalValidationError,
 } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
+import {
+  snapshotXReplyRequest,
+  snapshotXReplyReservationClaim,
+} from "./replyInputSnapshot.js";
 import type {
   ReplyLedgerEntry,
   ReplyReservation,
@@ -110,6 +114,7 @@ export interface ReplyRealRunOutcome {
     | "reservation_missing"
     | "reservation_recovered"
     | "reservation_recovery_uncertain"
+    | "reply_input_invalid"
     | "ledger_preflight_failed"
     | "stage_runtime_failed"
     | "stage_result_inconclusive"
@@ -342,18 +347,18 @@ function stageRuntimeFailure(): ReplyRealRunOutcome {
   };
 }
 
-function stageInvocationPreparationFailure(): ReplyRealRunOutcome {
+function replyInputInvalid(): ReplyRealRunOutcome {
   return {
-    kind: "stage_runtime_failed",
-    exitCode: 1,
+    kind: "reply_input_invalid",
+    exitCode: 2,
     stream: "stderr",
-    savePhase: "save_not_attempted",
-    saveMechanism: "composer_close_save",
+    savePhase: null,
+    saveMechanism: null,
     draftRowEvidence: null,
     replyTargetEvidence: null,
     message:
-      "\n✗ Could not prepare the X reply staging invocation. No native staging was attempted.\n" +
-      "  Validate the local generated reply input before any separate retry.",
+      "\n✗ The generated X reply request failed closed local snapshot validation. No native staging was attempted.\n" +
+      "  No reply ledger, runtime loader, profile, browser, clipboard, or platform action was accessed. Regenerate and validate the reply request before retrying.",
   };
 }
 
@@ -564,7 +569,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
 function withSafeReservationRelease(
   outcome: ReplyRealRunOutcome,
   released: boolean,
-  reason: "runtime_not_loaded" | "invocation_not_prepared" | "save_not_attempted",
+  reason: "runtime_not_loaded" | "save_not_attempted",
 ): ReplyRealRunOutcome {
   if (released) {
     return {
@@ -574,9 +579,7 @@ function withSafeReservationRelease(
         `${outcome.message}\n` +
         (reason === "runtime_not_loaded"
           ? "  The owner-matched reservation was released because the browser staging function was never invoked. Repair the runtime before any separate retry."
-          : reason === "invocation_not_prepared"
-            ? "  The owner-matched reservation was released because the stage port was never invoked. Repair the local input flow before any separate retry."
-            : "  The owner-matched reservation was released because typed poster evidence proves the native Save action was not invoked. Repair the browser flow before any separate retry."),
+          : "  The owner-matched reservation was released because typed poster evidence proves the native Save action was not invoked. Repair the browser flow before any separate retry."),
     };
   }
   return {
@@ -672,39 +675,6 @@ interface ResolvedReplyStageCoreSnapshot {
   readonly draftRowEvidence: unknown;
 }
 
-interface ReplyStageInvocationSnapshot {
-  readonly content: GeneratedContent;
-  readonly targetIdOrUrl: string;
-  readonly inspect: boolean | undefined;
-  readonly replyToId: string;
-  readonly expectedFormat: GeneratedContent["format"];
-  readonly expectedPosts: number;
-}
-
-/** Capture caller-owned argument slots outside the typed stage-rejection catch. */
-function snapshotReplyStageInvocation(
-  input: ReplyRealRunInput,
-): ReplyStageInvocationSnapshot | null {
-  try {
-    const content = input.content;
-    const targetIdOrUrl = input.targetIdOrUrl;
-    const inspect = input.inspect;
-    const replyToId = input.replyToId;
-    const expectedFormat = content.format;
-    const expectedPosts = expectedFormat === "thread" ? (content.thread?.length ?? 0) : 1;
-    return Object.freeze({
-      content,
-      targetIdOrUrl,
-      inspect,
-      replyToId,
-      expectedFormat,
-      expectedPosts,
-    });
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Snapshot only the fields that prove a returned composer Save. Target-only
  * evidence remains a separate #88 observation after this core is closed.
@@ -793,6 +763,11 @@ export async function executeReplyRealRun(
   input: ReplyRealRunInput,
   deps: ReplyRealRunDependencies,
 ): Promise<ReplyRealRunOutcome> {
+  // This is the first executable boundary: no ledger method, dependency
+  // loader, await, profile, or browser may observe caller-owned reply data.
+  const request = snapshotXReplyRequest(input);
+  if (!request) return replyInputInvalid();
+
   let ledger: ReplyLedgerPort;
   try {
     ledger = await deps.openLedger();
@@ -802,25 +777,31 @@ export async function executeReplyRealRun(
 
   let outcome: ReplyRealRunOutcome | undefined;
   let finalizableStage: FinalizableReplyStage | undefined;
-  let capturedStageReplyToId: string | undefined;
   let reservation: ReplyReservation | undefined;
   let closeFailed = false;
   try {
     let claim: ReplyReservationClaim | undefined;
     try {
-      claim = ledger.claimReservation(input.replyToId, { force: input.force });
+      claim = snapshotXReplyReservationClaim(
+        ledger.claimReservation(request.replyToId, request.claimOptions),
+        request.replyToId,
+      ) ?? undefined;
     } catch {
       outcome = ledgerPreflightFailure("claim");
     }
 
     if (!outcome && !claim) outcome = ledgerPreflightFailure("claim");
 
-    if (!outcome && claim?.kind === "already_staged") {
-      outcome = duplicateOutcome(claim.entry);
-    } else if (!outcome && claim?.kind === "reservation_blocked") {
-      outcome = reservationBlockedOutcome(claim);
-    } else if (!outcome && claim?.kind === "acquired") {
-      reservation = claim.reservation;
+    try {
+      if (!outcome && claim?.kind === "already_staged") {
+        outcome = duplicateOutcome(claim.entry);
+      } else if (!outcome && claim?.kind === "reservation_blocked") {
+        outcome = reservationBlockedOutcome(claim);
+      } else if (!outcome && claim?.kind === "acquired") {
+        reservation = claim.reservation;
+      }
+    } catch {
+      outcome = ledgerPreflightFailure("claim");
     }
 
     if (!outcome && reservation) {
@@ -846,173 +827,156 @@ export async function executeReplyRealRun(
         }
         outcome = withSafeReservationRelease(outcome, released, "runtime_not_loaded");
       } else if (stageReplyDraft) {
-        const invocation = snapshotReplyStageInvocation(input);
-        if (!invocation) {
-          outcome = stageInvocationPreparationFailure();
-          let released = false;
-          try {
-            released = ledger.releaseReservation(reservation);
-          } catch {
-            released = false;
-          }
-          outcome = withSafeReservationRelease(
-            outcome,
-            released,
-            "invocation_not_prepared",
+        let returned: unknown;
+        let stageResolved = false;
+        // Catch A owns only rejection of the stage promise. This is the sole
+        // boundary where copied, branded poster evidence may carry Save phase.
+        try {
+          returned = await stageReplyDraft(
+            request.content,
+            request.targetIdOrUrl,
+            request.stageOptions,
           );
-        } else {
-          capturedStageReplyToId = invocation.replyToId;
-          let returned: unknown;
-          let stageResolved = false;
-          // Catch A owns only rejection of the stage promise. This is the sole
-          // boundary where copied, branded poster evidence may carry Save phase.
-          try {
-            returned = await stageReplyDraft(invocation.content, invocation.targetIdOrUrl, {
-              inspect: invocation.inspect,
-            });
-            stageResolved = true;
-          } catch (error) {
-            const stageFailure = snapshotXDraftStageError(error);
-            if (stageFailure?.saveMechanism !== "composer_close_save") {
-              outcome = nativeStageUncertain(invocation.replyToId, "save_delivery_unknown");
-            } else if (stageFailure.savePhase === "save_not_attempted") {
-              outcome = nativeStageNotAttempted(invocation.replyToId);
-              let released = false;
-              try {
-                released = ledger.releaseReservation(reservation);
-              } catch {
-                released = false;
-              }
-              outcome = withSafeReservationRelease(outcome, released, "save_not_attempted");
-            } else if (stageFailure.savePhase === "save_delivery_unknown") {
-              outcome = nativeStageUncertain(invocation.replyToId, "save_delivery_unknown");
-            } else {
-              // Save returned before the verification failure. Persist a durable
-              // staged-unverified row so dedupe protection does not depend on a
-              // stale reservation, while still returning a non-success receipt.
-              finalizableStage = {
-                format: invocation.expectedFormat,
-                posts: invocation.expectedPosts,
-                replyToId: invocation.replyToId,
-                savePhase: "save_delivered_unverified",
-                saveMechanism: "composer_close_save",
-                draftRowEvidence: null,
-                replyTargetEvidence: xReplyTargetEvidenceNotChecked(invocation.replyToId),
-              };
-            }
-          }
-
-          if (stageResolved && !outcome && !finalizableStage) {
-            // Catch B begins only after the stage promise resolved. Nothing
-            // observed here may regress to pre-Save evidence or authorize a
-            // reservation release/finalization. A malformed core result leaves
-            // the owner claim in place as delivery-unknown.
+          stageResolved = true;
+        } catch (error) {
+          const stageFailure = snapshotXDraftStageError(error);
+          if (stageFailure?.saveMechanism !== "composer_close_save") {
+            outcome = nativeStageUncertain(request.replyToId, "save_delivery_unknown");
+          } else if (stageFailure.savePhase === "save_not_attempted") {
+            outcome = nativeStageNotAttempted(request.replyToId);
+            let released = false;
             try {
-              const core = snapshotResolvedReplyStageCore(returned);
-              if (!core) {
-                throw INVALID_REPLY_RESULT_VALUE;
-              }
-              const result = {
-                format: core.format,
-                posts: core.posts,
-                replyToId: core.replyToId,
-                savePhase: core.savePhase,
-                saveMechanism: core.saveMechanism,
-                draftRowEvidence: snapshotXDraftRowEvidence(core.draftRowEvidence),
-              };
-              const coreResultValid =
-                result.replyToId === invocation.replyToId &&
-                result.format === invocation.expectedFormat &&
-                result.posts === invocation.expectedPosts &&
-                result.saveMechanism === "composer_close_save" &&
-                isXDraftReturnedSavePhase(result.savePhase) &&
-                result.draftRowEvidence !== null &&
-                (result.savePhase === "verified"
-                  ? result.draftRowEvidence.status === "verified"
-                  : result.draftRowEvidence.status === "verified" ||
-                    result.draftRowEvidence.status === "unverified");
-              if (coreResultValid && result.draftRowEvidence) {
-                // Once the core returned-Save result is coherent, target-only
-                // getter/probe failures retain #88's separate normalization: a
-                // closed core already proves Save returned, so probe_failed can
-                // finalize staged-unverified dedupe protection without trusting
-                // the hostile target value.
-                let replyTargetEvidence: XReplyTargetEvidence;
-                try {
-                  const targetSnapshot = snapshotResolvedReplyTargetEvidence(returned);
-                  replyTargetEvidence = targetSnapshot === INVALID_REPLY_RESULT_VALUE
-                    ? xReplyTargetEvidenceProbeFailed(invocation.replyToId)
-                    : snapshotXReplyTargetEvidence(targetSnapshot) ??
-                      xReplyTargetEvidenceProbeFailed(invocation.replyToId);
-                } catch {
-                  replyTargetEvidence = xReplyTargetEvidenceProbeFailed(invocation.replyToId);
-                }
-                if (replyTargetEvidence.requestedTargetId !== invocation.replyToId) {
-                  replyTargetEvidence = xReplyTargetEvidenceProbeFailed(invocation.replyToId);
-                }
-                if (result.draftRowEvidence.status === "unverified") {
-                  if (replyTargetEvidence.reason !== "content_unverified") {
-                    replyTargetEvidence = xReplyTargetEvidenceNotChecked(invocation.replyToId);
-                  }
-                } else if (
-                  replyTargetEvidence.reason === "content_unverified" ||
-                  (result.savePhase === "save_delivered_unverified" &&
-                    replyTargetEvidence.status === "verified")
-                ) {
-                  replyTargetEvidence = xReplyTargetEvidenceProbeFailed(invocation.replyToId);
-                }
-
-                const effectivePhase = result.savePhase === "verified" &&
-                    result.draftRowEvidence.status === "verified" &&
-                    replyTargetEvidence.status === "verified"
-                  ? "verified"
-                  : "save_delivered_unverified";
-                if (!isXReplyEvidenceCompatible(
-                  effectivePhase,
-                  result.draftRowEvidence,
-                  replyTargetEvidence,
-                  invocation.replyToId,
-                )) {
-                  outcome = stageResultInconclusive(invocation.replyToId);
-                } else {
-                  finalizableStage = effectivePhase === "verified"
-                  ? {
-                      format: result.format as GeneratedContent["format"],
-                      posts: result.posts as number,
-                      replyToId: result.replyToId as string,
-                      savePhase: "verified",
-                      saveMechanism: "composer_close_save",
-                      draftRowEvidence: result.draftRowEvidence as Extract<
-                        XDraftRowEvidence,
-                        { status: "verified" }
-                      >,
-                      replyTargetEvidence: replyTargetEvidence as Extract<
-                        XReplyTargetEvidence,
-                        { status: "verified" }
-                      >,
-                    }
-                  : {
-                      format: result.format as GeneratedContent["format"],
-                      posts: result.posts as number,
-                      replyToId: result.replyToId as string,
-                      savePhase: "save_delivered_unverified",
-                      saveMechanism: "composer_close_save",
-                      draftRowEvidence: result.draftRowEvidence as Extract<
-                        XDraftRowEvidence,
-                        { status: "verified" | "unverified" }
-                      >,
-                      replyTargetEvidence: replyTargetEvidence as Extract<
-                        XReplyTargetEvidence,
-                        { status: "unverified" }
-                      >,
-                    };
-                }
-              } else {
-                outcome = stageResultInconclusive(invocation.replyToId);
-              }
+              released = ledger.releaseReservation(reservation);
             } catch {
-              outcome = stageResultInconclusive(invocation.replyToId);
+              released = false;
             }
+            outcome = withSafeReservationRelease(outcome, released, "save_not_attempted");
+          } else if (stageFailure.savePhase === "save_delivery_unknown") {
+            outcome = nativeStageUncertain(request.replyToId, "save_delivery_unknown");
+          } else {
+            // Save returned before the verification failure. Persist a durable
+            // staged-unverified row so dedupe protection does not depend on a
+            // stale reservation, while still returning a non-success receipt.
+            finalizableStage = {
+              format: request.expectedFormat,
+              posts: request.expectedPosts,
+              replyToId: request.replyToId,
+              savePhase: "save_delivered_unverified",
+              saveMechanism: "composer_close_save",
+              draftRowEvidence: null,
+              replyTargetEvidence: xReplyTargetEvidenceNotChecked(request.replyToId),
+            };
+          }
+        }
+
+        if (stageResolved && !outcome && !finalizableStage) {
+          // Catch B begins only after the stage promise resolved. Nothing
+          // observed here may regress to pre-Save evidence or authorize a
+          // reservation release/finalization. A malformed core result leaves
+          // the owner claim in place as delivery-unknown.
+          try {
+            const core = snapshotResolvedReplyStageCore(returned);
+            if (!core) throw INVALID_REPLY_RESULT_VALUE;
+            const result = {
+              format: core.format,
+              posts: core.posts,
+              replyToId: core.replyToId,
+              savePhase: core.savePhase,
+              saveMechanism: core.saveMechanism,
+              draftRowEvidence: snapshotXDraftRowEvidence(core.draftRowEvidence),
+            };
+            const coreResultValid =
+              result.replyToId === request.replyToId &&
+              result.format === request.expectedFormat &&
+              result.posts === request.expectedPosts &&
+              result.saveMechanism === "composer_close_save" &&
+              isXDraftReturnedSavePhase(result.savePhase) &&
+              result.draftRowEvidence !== null &&
+              (result.savePhase === "verified"
+                ? result.draftRowEvidence.status === "verified"
+                : result.draftRowEvidence.status === "verified" ||
+                  result.draftRowEvidence.status === "unverified");
+            if (coreResultValid && result.draftRowEvidence) {
+              // Once the core returned-Save result is coherent, target-only
+              // getter/probe failures retain #88's separate normalization: a
+              // closed core already proves Save returned, so probe_failed can
+              // finalize staged-unverified dedupe protection without trusting
+              // the hostile target value.
+              let replyTargetEvidence: XReplyTargetEvidence;
+              try {
+                const targetSnapshot = snapshotResolvedReplyTargetEvidence(returned);
+                replyTargetEvidence = targetSnapshot === INVALID_REPLY_RESULT_VALUE
+                  ? xReplyTargetEvidenceProbeFailed(request.replyToId)
+                  : snapshotXReplyTargetEvidence(targetSnapshot) ??
+                    xReplyTargetEvidenceProbeFailed(request.replyToId);
+              } catch {
+                replyTargetEvidence = xReplyTargetEvidenceProbeFailed(request.replyToId);
+              }
+              if (replyTargetEvidence.requestedTargetId !== request.replyToId) {
+                replyTargetEvidence = xReplyTargetEvidenceProbeFailed(request.replyToId);
+              }
+              if (result.draftRowEvidence.status === "unverified") {
+                if (replyTargetEvidence.reason !== "content_unverified") {
+                  replyTargetEvidence = xReplyTargetEvidenceNotChecked(request.replyToId);
+                }
+              } else if (
+                replyTargetEvidence.reason === "content_unverified" ||
+                (result.savePhase === "save_delivered_unverified" &&
+                  replyTargetEvidence.status === "verified")
+              ) {
+                replyTargetEvidence = xReplyTargetEvidenceProbeFailed(request.replyToId);
+              }
+
+              const effectivePhase = result.savePhase === "verified" &&
+                  result.draftRowEvidence.status === "verified" &&
+                  replyTargetEvidence.status === "verified"
+                ? "verified"
+                : "save_delivered_unverified";
+              if (!isXReplyEvidenceCompatible(
+                effectivePhase,
+                result.draftRowEvidence,
+                replyTargetEvidence,
+                request.replyToId,
+              )) {
+                outcome = stageResultInconclusive(request.replyToId);
+              } else {
+                finalizableStage = effectivePhase === "verified"
+                ? {
+                    format: result.format as GeneratedContent["format"],
+                    posts: result.posts as number,
+                    replyToId: request.replyToId,
+                    savePhase: "verified",
+                    saveMechanism: "composer_close_save",
+                    draftRowEvidence: result.draftRowEvidence as Extract<
+                      XDraftRowEvidence,
+                      { status: "verified" }
+                    >,
+                    replyTargetEvidence: replyTargetEvidence as Extract<
+                      XReplyTargetEvidence,
+                      { status: "verified" }
+                    >,
+                  }
+                : {
+                    format: result.format as GeneratedContent["format"],
+                    posts: result.posts as number,
+                    replyToId: request.replyToId,
+                    savePhase: "save_delivered_unverified",
+                    saveMechanism: "composer_close_save",
+                    draftRowEvidence: result.draftRowEvidence as Extract<
+                      XDraftRowEvidence,
+                      { status: "verified" | "unverified" }
+                    >,
+                    replyTargetEvidence: replyTargetEvidence as Extract<
+                      XReplyTargetEvidence,
+                      { status: "unverified" }
+                    >,
+                  };
+              }
+            } else {
+              outcome = stageResultInconclusive(request.replyToId);
+            }
+          } catch {
+            outcome = stageResultInconclusive(request.replyToId);
           }
         }
       }
@@ -1040,7 +1004,7 @@ export async function executeReplyRealRun(
     }
   }
 
-  if (!outcome) return stageResultInconclusive(capturedStageReplyToId ?? "unknown");
+  if (!outcome) return stageResultInconclusive(request.replyToId);
   if (!closeFailed) return outcome;
   if (
     finalizableStage &&
