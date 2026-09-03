@@ -29,7 +29,8 @@ import type { StageReplyResult } from "../x/draftPoster.js";
  * IT AS A NATIVE DRAFT via the same close->Save flow. A human takes the last click.
  *
  * Flow:
- *   1. Resolve --to (a status URL or a raw tweet id) to a numeric tweet id.
+ *   1. Validate --to as an exact canonical id or allowlisted X/Twitter status
+ *      URL, then resolve it to the normalized numeric tweet id.
  *   2. Resolve the reply content — inline via --text, or from a canonical
  *      markdown file via --from (exactly one) — and DETERMINISTICALLY generate a
  *      tweet (default; --long raises the cap) — reusing src/x/content.ts.
@@ -504,7 +505,10 @@ export function registerReplyCommand(x: Command): void {
   x
     .command("reply")
     .description("Stage a NATIVE X reply draft targeted at a tweet — never posts")
-    .requiredOption("--to <id|url>", "Target tweet: a status URL or a raw numeric id")
+    .requiredOption(
+      "--to <id|url>",
+      "Exact 5–25 digit nonzero-leading ID or supported HTTPS x.com/twitter.com status URL",
+    )
     .option("--text <content>", "Reply content inline (exactly one of --text / --from)")
     .option("--from <base.md>", "Canonical markdown ('-' = stdin); strips leading mapping/empty YAML frontmatter")
     .option("--long", "Use the local 25,000-code-point guard for Premium long replies; X acceptance is server-authoritative")
@@ -523,6 +527,13 @@ export function registerReplyCommand(x: Command): void {
         "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or unterminated metadata exits 2.\n" +
         "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
         "  Inline --text is always literal and is never interpreted as frontmatter.\n" +
+        "\nReply target grammar:\n" +
+        "  --to is exact: whitespace, BOM/control characters, and backslashes are rejected.\n" +
+        "  A raw ID is 5–25 ASCII digits matching [1-9][0-9]{4,24}; leading zeroes are rejected.\n" +
+        "  A URL must use HTTPS with the exact apex host x.com or twitter.com, without credentials, an explicit port (including :443), a trailing-dot host, or subdomain such as www/mobile.\n" +
+        "  Scheme and host are case-insensitive. The exact case-sensitive paths are /<handle>/status/<id>, /<handle>/statuses/<id>, /i/status/<id>, or /i/web/status/<id>; <handle> is 1–15 ASCII letters, digits, or underscores.\n" +
+        "  One trailing slash is allowed. Percent encoding in the status path, dot/extra path segments, or URL-normalized path forms are rejected.\n" +
+        "  A query and fragment are allowed and ignored only after the path validates; the reply ID always comes from the path.\n" +
         "\nDry-run behavior:\n" +
         "  --dry-run skips the reply ledger/reservations and all browser/profile/database state.\n" +
         "  Target ID/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X.\n" +
@@ -579,8 +590,19 @@ export function registerReplyCommand(x: Command): void {
         return;
       }
 
-      // Resolve content (inline --text or --from file/stdin) up front so a usage
-      // error fails fast before we touch the browser or the ledger.
+      // Resolve/validate the target in the dependency-light validation layer
+      // before reading content or touching browser, ledger, or runtime state.
+      let replyToId: string;
+      try {
+        replyToId = extractTweetId(opts.to);
+      } catch (err) {
+        console.error(`Invalid --to: ${(err as Error).message}`);
+        process.exit(2);
+        return;
+      }
+
+      // Resolve content (inline --text or --from file/stdin) only after target
+      // validation, while still before browser or reply-ledger access.
       let md: string;
       let sourceLineOffset = 0;
       try {
@@ -601,16 +623,6 @@ export function registerReplyCommand(x: Command): void {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);
         process.exit(2);
-      }
-
-      // Resolve/validate the target id in the dependency-light validation layer.
-      let replyToId: string;
-      try {
-        replyToId = extractTweetId(opts.to);
-      } catch (err) {
-        console.error(`Invalid --to: ${(err as Error).message}`);
-        process.exit(2);
-        return;
       }
 
       // DETERMINISTIC generation. A reply is a single tweet by default; if the

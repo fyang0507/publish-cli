@@ -327,16 +327,120 @@ test("X rejects a grapheme that cannot fit losslessly in a numbered thread post"
   );
 });
 
-test("X reply target parsing keeps the existing raw/status/statuses grammar", () => {
-  assert.equal(extractTweetId("12345"), "12345");
-  assert.equal(extractTweetId("https://x.com/user/status/1234567890?s=20"), "1234567890");
-  assert.equal(extractTweetId("https://twitter.com/user/statuses/123456789012345"), "123456789012345");
-  assert.equal(extractTweetId("prefix 1234567890 suffix"), "1234567890");
-  expectLocalProblem(() => extractTweetId("1234"), {
-    code: "x_invalid_reply_target",
-    actual: "1234",
-    unit: null,
-  });
+test("X reply target parser accepts only the documented trusted grammar", () => {
+  const accepted = [
+    ["12345", "12345"],
+    ["9".repeat(25), "9".repeat(25)],
+    ["https://x.com/user/status/1234567890", "1234567890"],
+    ["https://twitter.com/a/status/12345", "12345"],
+    ["https://x.com/user/statuses/1234567890", "1234567890"],
+    ["HTTPS://X.COM/User_1/status/1234567890/", "1234567890"],
+    ["https://twitter.com/user/statuses/123456789012345", "123456789012345"],
+    ["https://x.com/i/status/1234567890?s=20", "1234567890"],
+    ["https://x.com/i/statuses/1234567890", "1234567890"],
+    ["https://twitter.com/i/web/status/1234567890#fragment", "1234567890"],
+    [
+      "https://x.com/user/status/1234567890/?next=%2Fother%2Fstatus%2F9999999999#status/8888888888",
+      "1234567890",
+    ],
+    ["https://twitter.com/A_1234567890123/statuses/12345?#", "12345"],
+  ] as const;
+  for (const [input, expected] of accepted) {
+    assert.equal(extractTweetId(input), expected, input);
+  }
+
+  const rejected = [
+    "",
+    " 12345",
+    "12345 ",
+    "\uFEFF12345",
+    "12\n345",
+    "12\u0085345",
+    "prefix 1234567890 suffix",
+    "+12345",
+    "-12345",
+    "１２３４５",
+    "1234",
+    "9".repeat(26),
+    "0000012345",
+    "12345.0",
+    "//x.com/user/status/12345",
+    "http://x.com/user/status/12345",
+    "ftp://x.com/user/status/12345",
+    "https://example.com/user/status/12345",
+    "https://x.com.evil.example/user/status/12345",
+    "https://evilx.com/user/status/12345",
+    "https://xn--x-9bb.com/user/status/12345",
+    "https://www.x.com/user/status/12345",
+    "https://mobile.twitter.com/user/status/12345",
+    "https://x.com./user/status/12345",
+    "https://user@x.com/user/status/12345",
+    "https://x.com@evil.example/user/status/12345",
+    "https://user:secret@x.com/user/status/12345",
+    "https://x.com:443/user/status/12345",
+    "https://twitter.com:8443/user/status/12345",
+    "https://x.com:0443/user/status/12345",
+    "https://%78.com/user/status/12345",
+    "https://x\u3002com/user/status/12345",
+    "https://x\uff0ecom/user/status/12345",
+    "https://\uff58.com/user/status/12345",
+    "https://\ud835\udd69.com/user/status/12345",
+    "https://\u24e7.com/user/status/12345",
+    "https://x.com\\@evil.example/user/status/12345",
+    "https:\\x.com/user/status/12345",
+    "https://x.com/user/sta\ttus/12345",
+    "https://x.com/user/status/12345\n",
+    "https://x.com/user/STATUS/12345",
+    "https://x.com/i/Web/status/12345",
+    "https://x.com/user/status/012345",
+    "https://x.com/user/status/1234",
+    `https://x.com/user/status/${"9".repeat(26)}`,
+    "https://x.com/user/status/+12345",
+    "https://x.com/user/status/１２３４５",
+    "https://x.com/user/status/12345/extra",
+    "https://x.com/user/status/12345//",
+    "https://x.com//user/status/12345",
+    "https://x.com/status/12345",
+    "https://x.com/user/other/12345",
+    "https://x.com/user/statuses/status/12345",
+    "https://x.com/user.name/status/12345",
+    "https://x.com/abcdefghijklmnop/status/12345",
+    "https://x.com/./user/status/12345",
+    "https://x.com/a/../user/status/12345",
+    "https://x.com/a/%2e%2e/user/status/12345",
+    "https://x.com/%75ser/status/12345",
+    "https://x.com/user/%73tatus/12345",
+    "https://x.com/user/status/%31%32%33%34%35",
+    "https://x.com/user/status%2f12345",
+    "https://x.com/user/status%5c12345",
+    "https://x.com/user/status/%2e%2e/12345",
+    "https://x.com/not-a-status?next=/user/status/12345",
+    "https://x.com/not-a-status#user/status/12345",
+    "https://x.com/user/status/1234?next=/user/status/12345",
+    `https://x.com/${"private-value-".repeat(10_000)}`,
+  ];
+  for (const [index, input] of rejected.entries()) {
+    const label = `rejected target ${index + 1} (${input.length} code units)`;
+    assert.throws(
+      () => extractTweetId(input),
+      (error: unknown) => {
+        assert.ok(error instanceof LocalValidationError, label);
+        assert.equal(error.problem.phase, "local", label);
+        assert.equal(error.problem.code, "x_invalid_reply_target", label);
+        assert.equal(error.problem.field, "target", label);
+        assert.equal(error.problem.unit, null, label);
+        assert.ok(error.message.length < 600, label);
+        assert.ok(
+          error.problem.actual === null || String(error.problem.actual).length < 100,
+          label,
+        );
+        assert.doesNotMatch(error.message, /secret|private-value/, label);
+        assert.doesNotMatch(String(error.problem.actual), /secret|private-value/, label);
+        return true;
+      },
+      label,
+    );
+  }
 });
 
 test("LinkedIn rejects empty/overflow conversion and surfaces real Markdown images only", () => {
