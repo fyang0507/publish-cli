@@ -472,7 +472,7 @@ among the consumers (no code change — the resolver is already channel-agnostic
 | Path | Purpose |
 |---|---|
 | `src/wechat/client.ts` | WeChat API backbone (auth analog of `session.ts`, no browser): stable-token fetch + machine-local cache, `uploadBodyImage` (`media/uploadimg`), `uploadCover` (`material/add_material`), `addDraft` (`draft/add`), `40164` egress-IP parsing, and the **single egress seam** — all requests go through one wrapper that honors `WECHAT_PROXY_URL` / `WECHAT_SSH_TUNNEL` (fixed-egress-IP mode, §3.3). Documents the FORBIDDEN `freepublish/*` + `message/mass/*` endpoints it must never call. |
-| `src/wechat/egress.ts` | The proxy/tunnel helper feeding `client.ts`'s seam: build a `fetch` dispatcher for an `http(s)`/`socks5` proxy, or spawn+manage the `ssh -N -D` SOCKS5 tunnel for `WECHAT_SSH_TUNNEL` (start, wait-until-ready, tear down). Kept separate so `client.ts` stays a thin API layer and the tunnel lifecycle is testable in isolation. Needs `socks-proxy-agent` (or `undici` `ProxyAgent`) — see deps. |
+| `src/wechat/egress.ts` | The proxy/tunnel helper feeding `client.ts`'s seam: build a `fetch` dispatcher for an `http(s)`/`socks5` proxy, or spawn+manage the `ssh -N -D` SOCKS5 tunnel for `WECHAT_SSH_TUNNEL` (start, wait-until-ready, tear down). Kept separate so `client.ts` stays a thin API layer and the tunnel lifecycle is testable in isolation. Uses `undici`'s `ProxyAgent` for HTTP(S) proxies and direct `socks` `SocksClient` connections inside the custom SOCKS5 dispatcher. |
 | `src/wechat/content.ts` | `generateArticle` — normalized markdown plus parsed metadata → `{title, author, digest, html, coverPath, sourceUrl, bodyImages[], linkFlags, warnings[]}`. Reuses `parseBaseMarkdown` from `src/x/content.ts`; adds the `marked`-based inline-style renderer + link→citation transform. Deterministic, no LLM. |
 | `src/wechat/draft.ts` | Orchestration ("poster" analog, no browser): upload cover + body images via `client.ts`, rewrite `<img>` srcs, assemble + send the `draft/add` payload. |
 | `src/commands/wechat-check.ts` | `publish wechat check` — credential + token + IP-allowlist preflight through the configured egress (reports the IP the API actually sees; travel-aware `40164`). |
@@ -484,10 +484,10 @@ and — at implementation time — `README.md`, `PRODUCT_SPEC.md`, `AGENTS.md`, 
 `skills/publish/*` capability layer.
 
 **New dependencies:** `marked` (deterministic markdown → HTML; the renderer override
-emits inline styles; no DOM library needed) and `socks-proxy-agent` (SOCKS5
-dispatcher for fixed-egress-IP mode; `http(s)` proxies can use `undici`'s built-in
-`ProxyAgent` instead). Both are inert when `WECHAT_PROXY_URL`/`WECHAT_SSH_TUNNEL`
-are unset (Mode B).
+emits inline styles; no DOM library needed), `undici` (HTTP client plus `ProxyAgent`
+for HTTP(S) fixed-egress proxies), and `socks` (`SocksClient` connections inside the
+custom SOCKS5 dispatcher). The transport dependencies are inert when
+`WECHAT_PROXY_URL`/`WECHAT_SSH_TUNNEL` are unset (Mode B).
 
 ## 8. Out of scope (follow-ups)
 

@@ -31,7 +31,6 @@
     "marked": "^18.0.5",
     "playwright": "^1.48.0",
     "socks": "^2.8.9",
-    "socks-proxy-agent": "^10.1.0",
     "twitter-text": "^3.1.0",
     "undici": "^8.10.1",
     "yaml": "^2.8.3"

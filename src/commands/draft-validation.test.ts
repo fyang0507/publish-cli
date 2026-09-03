@@ -68,7 +68,6 @@ const blocked = ${JSON.stringify([
       "/node_modules/@google/genai/",
       "/node_modules/undici/",
       "/node_modules/socks/",
-      "/node_modules/socks-proxy-agent/",
       "/node_modules/better-sqlite3/",
     ])};
 registerHooks({
