@@ -113,9 +113,11 @@ Machine-local authentication artifacts live under `PUBLISH_DATA_DIR` and must
 stay outside the repository and cloud-synced paths. Durable dedupe state lives
 at `<data_repo>/.publish-cli/publish.db` when a data workspace resolves.
 
-The X seen-store and reply ledger are separate: seen content never resurfaces,
-while reply idempotency records only successfully staged replies and can be
-overridden explicitly with `--force`.
+The X seen-store and reply ledger are separate. Real reply runners sharing the
+same live SQLite file reserve a target before browser staging, then finalize
+history only after staging returns. `--force` can bypass finalized reply history
+for an intentional re-stage, but it never bypasses another process's in-flight
+claim or any retained claim.
 
 The publish agent skill is intentionally a small, self-contained router. It
 contains no copied channel manual or dependency on this source checkout; native
