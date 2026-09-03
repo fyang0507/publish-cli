@@ -17,13 +17,17 @@ import type {
 } from "../db.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
 import {
-  isXDraftRowEvidenceCompatible,
   isXDraftReturnedSavePhase,
   isXDraftStageError,
+  isXReplyEvidenceCompatible,
   snapshotXDraftRowEvidence,
+  snapshotXReplyTargetEvidence,
+  xReplyTargetEvidenceNotChecked,
+  xReplyTargetEvidenceProbeFailed,
   type XDraftRowEvidence,
   type XDraftSaveMechanism,
   type XDraftSavePhase,
+  type XReplyTargetEvidence,
 } from "../x/saveProgress.js";
 
 /**
@@ -35,8 +39,10 @@ import {
  * HARD BOUNDARY (same as `draft`): this NEVER posts. It requests the composer at
  * https://x.com/compose/post?in_reply_to=<id>, types the generated reply (single
  * tweet by default; a thread if the content overflows), and saves its text via
- * the same close->Save flow. Current verification does not prove the saved
- * draft's reply-target binding. A human takes the last click.
+ * the same close->Save flow. Content and target are separate facts: current
+ * production has no exact native target-id signal, so real reply Saves remain
+ * staged-unverified until the operator checks the draft. A human takes the
+ * last click.
  *
  * Flow:
  *   1. Validate --to as an exact canonical id or allowlisted X/Twitter status
@@ -118,6 +124,8 @@ export interface ReplyRealRunOutcome {
   saveMechanism: XDraftSaveMechanism | null;
   /** Current invocation's bounded row fact; historical preflight has none. */
   draftRowEvidence: XDraftRowEvidence | null;
+  /** Current invocation's bounded target fact; historical/pre-Save paths have none. */
+  replyTargetEvidence: XReplyTargetEvidence | null;
   reservationRelease?: "released" | "not_released";
   /** Historical ledger status for duplicate preflight; never this run's Save phase. */
   priorStatus?: string;
@@ -134,10 +142,11 @@ function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
       savePhase: null,
       saveMechanism: null,
       draftRowEvidence: null,
+      replyTargetEvidence: null,
       priorStatus: prior.status,
       message:
         `✗ Durable staged-unverified reply-attempt history exists for requested target ${prior.targetTweetId} from ${prior.stagedAt}.\n` +
-        "  The earlier Save returned, but draft persistence was not verified. Compare X Unsent/Drafts manually in the exact CLI-owned profile used by that run before any retry.\n" +
+        "  The earlier Save returned, but that historical row does not carry complete current content-and-target proof. Compare X Unsent/Drafts manually in the exact CLI-owned profile used by that run before any retry.\n" +
         "  If a matching draft exists or the comparison is uncertain, do not retry or use --force. Only after confidently finding no matching draft may a separate --force run intentionally bypass this finalized history.",
     };
   }
@@ -148,10 +157,11 @@ function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
     savePhase: null,
     saveMechanism: null,
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     priorStatus: prior.status,
     message:
       `✗ Finalized reply-attempt history exists for requested target ${prior.targetTweetId} from ${prior.stagedAt} (status: ${prior.status}).\n` +
-      "  Refusing another staging attempt. Re-run with --force to override finalized history.",
+      "  Historical status is duplicate protection, not proof of native reply-target identity. Refusing another staging attempt. Re-run with --force only to intentionally override finalized history.",
   };
 }
 
@@ -171,6 +181,7 @@ function reservationBlockedOutcome(
       savePhase: null,
       saveMechanism: null,
       draftRowEvidence: null,
+      replyTargetEvidence: null,
       message:
         `\n✗ An active X reply reservation already owns target ${target} since ${heldSince}. No native staging was attempted.\n` +
         "  Another run may still be staging. --force cannot bypass any reservation; wait for the owning run to finish.",
@@ -184,6 +195,7 @@ function reservationBlockedOutcome(
       savePhase: null,
       saveMechanism: null,
       draftRowEvidence: null,
+      replyTargetEvidence: null,
       message:
         `\n✗ A stale X reply reservation blocks target ${target}; it was acquired at ${heldSince}. No native staging was attempted.\n` +
         "  Age makes the claim eligible for operator-reviewed recovery; it does not prove that the prior process stopped or that no draft exists.\n" +
@@ -199,6 +211,7 @@ function reservationBlockedOutcome(
     savePhase: null,
     saveMechanism: null,
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       `\n✗ An X reply reservation with ambiguous timing blocks target ${target}. No native staging was attempted.\n` +
       "  The prior process state and native-draft outcome are unknown. --force cannot bypass the claim.\n" +
@@ -220,6 +233,7 @@ function ledgerPreflightFailure(phase: "open" | "claim" | "recovery"): ReplyReal
     savePhase: null,
     saveMechanism: null,
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       `\n✗ Could not ${action} the X reply duplicate ledger. No native staging was attempted.\n` +
       (recovery
@@ -236,6 +250,7 @@ function reservationRecoveredOutcome(targetTweetId: string): ReplyRealRunOutcome
     savePhase: null,
     saveMechanism: null,
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       `\n✓ Cleared the stale X reply reservation for target ${targetTweetId}. No native staging was attempted.\n` +
       "  This recovery relies on the operator's attestation that the prior process stopped, X Unsent/Drafts was checked in the exact CLI-owned profile used by that run, and no matching reply draft was found.\n" +
@@ -253,6 +268,7 @@ function reservationRecoveryOutcome(result: ReplyReservationRecovery, targetTwee
       savePhase: null,
       saveMechanism: null,
       draftRowEvidence: null,
+      replyTargetEvidence: null,
       message:
         `\n✗ No X reply reservation exists for target ${targetTweetId}. No state was cleared and no native staging was attempted.`,
     };
@@ -281,6 +297,7 @@ function nativeStageNotAttempted(replyToId: string): ReplyRealRunOutcome {
     savePhase: "save_not_attempted",
     saveMechanism: "composer_close_save",
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       `\n✗ X reply staging stopped before the native Save action was invoked for target ${replyToId}. NEVER posted.\n` +
       "  No saved-draft outcome is claimed. Verify the local runtime and browser flow.",
@@ -301,6 +318,7 @@ function nativeStageUncertain(
     savePhase: phase,
     saveMechanism: "composer_close_save",
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       `\n✗ ${fact} while reply staging was requested for target ${replyToId}. NEVER posted.\n` +
       "  A native draft may exist; no staged reply-ledger row was finalized.\n" +
@@ -316,6 +334,7 @@ function stageRuntimeFailure(): ReplyRealRunOutcome {
     savePhase: "save_not_attempted",
     saveMechanism: "composer_close_save",
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       "\n✗ Could not initialize the X reply staging runtime. No native staging was attempted.\n" +
       "  Verify the local installation and runtime dependencies.",
@@ -330,6 +349,7 @@ function stageResultInconclusive(replyToId: string): ReplyRealRunOutcome {
     savePhase: "save_delivery_unknown",
     saveMechanism: "composer_close_save",
     draftRowEvidence: null,
+    replyTargetEvidence: null,
     message:
       `\n✗ X reply staging returned no usable result after staging was requested for target ${replyToId} (NEVER posted).\n` +
       "  The native draft may exist, and no reply-ledger finalization was confirmed.\n" +
@@ -348,12 +368,35 @@ type FinalizableReplyStage = FinalizableReplyStageBase & (
   | {
       savePhase: "verified";
       draftRowEvidence: Extract<XDraftRowEvidence, { status: "verified" }>;
+      replyTargetEvidence: Extract<XReplyTargetEvidence, { status: "verified" }>;
     }
   | {
       savePhase: "save_delivered_unverified";
-      draftRowEvidence: Extract<XDraftRowEvidence, { status: "unverified" }> | null;
+      draftRowEvidence: Extract<
+        XDraftRowEvidence,
+        { status: "verified" | "unverified" }
+      > | null;
+      replyTargetEvidence: Extract<XReplyTargetEvidence, { status: "unverified" }>;
     }
 );
+
+function contentEvidenceReceipt(result: FinalizableReplyStage): string {
+  return result.draftRowEvidence?.status === "verified"
+    ? `full intended X ${result.format === "thread" ? "first reply-thread row" : "reply"} text observed in one calibrated Unsent draft row with the required visible-multiset delta: yes`
+    : "full intended reply text observed with the required scoped-row evidence: no";
+}
+
+function targetEvidenceReceipt(result: FinalizableReplyStage): string {
+  if (result.replyTargetEvidence.status === "verified") {
+    return "exact requested status id bound to the same content-matched native draft: yes";
+  }
+  const detail = result.replyTargetEvidence.reason === "no_exact_target_id_signal"
+    ? "the calibrated Unsent row and reopened composer expose no exact target-id signal"
+    : result.replyTargetEvidence.reason === "content_unverified"
+      ? "target checking was skipped because the content row was not verified"
+      : "the bounded native target observation was not exact and unambiguous";
+  return `exact requested status id bound to the same content-matched native draft: no (${detail})`;
+}
 
 function ledgerPersistenceFailure(
   result: FinalizableReplyStage,
@@ -361,14 +404,14 @@ function ledgerPersistenceFailure(
   replyToId: string,
 ): ReplyRealRunOutcome {
   const draftState = result.savePhase === "verified"
-    ? `The full intended ${result.format === "thread" ? "first reply-thread row" : "reply"} text was observed in one calibrated X Unsent row with the required visible-multiset delta; the saved draft's reply-target binding was not verified`
-    : "A native draft may exist because Save returned, but persistence was not verified";
+    ? `${contentEvidenceReceipt(result)}; ${targetEvidenceReceipt(result)}`
+    : `A native draft may exist because Save returned; ${contentEvidenceReceipt(result)}; ${targetEvidenceReceipt(result)}`;
   const ledgerState = phase === "finalize"
     ? "the reply-ledger record and reservation finalization outcome could not be confirmed"
     : `reply-ledger finalization completed as ${result.savePhase === "verified" ? "staged" : "staged-unverified"}, but the ledger did not close cleanly`;
   const failureKind = phase === "finalize" ? "persistence" : "cleanup";
   const closeGuidance = result.savePhase === "verified"
-    ? "  The text-persistence observation was verified, but reply-target binding was not. Do not retry or use --force; repair the ledger cleanup failure and review the existing draft manually."
+    ? "  The scoped content-row and exact target-id observations were positive. Do not retry or use --force; repair the ledger cleanup failure and review the existing draft manually."
     : "  Compare X Unsent/Drafts manually in the exact CLI-owned profile used by this run. If a matching draft exists or the comparison is uncertain, do not retry or use --force. Only after confidently finding no matching draft may a separate --force run intentionally bypass the staged-unverified history.";
   return {
     kind: "ledger_persistence_failed",
@@ -377,6 +420,7 @@ function ledgerPersistenceFailure(
     savePhase: result.savePhase,
     saveMechanism: result.saveMechanism,
     draftRowEvidence: result.draftRowEvidence,
+    replyTargetEvidence: result.replyTargetEvidence,
     message:
       `\n✗ X reply ledger ${failureKind} failed after native Save-phase evidence was produced for target ${replyToId} (NEVER posted).\n` +
       `  ${draftState}; ${ledgerState}.\n` +
@@ -395,13 +439,14 @@ function stagedOutcome(result: FinalizableReplyStage): ReplyRealRunOutcome {
     savePhase: "verified",
     saveMechanism: "composer_close_save",
     draftRowEvidence: result.draftRowEvidence,
+    replyTargetEvidence: result.replyTargetEvidence,
     message:
       `\n✓ Native X Save action returned (${result.format}, ${count}). NEVER posted.\n` +
-      `  request context: target ${result.replyToId} (intent only; saved draft target binding not verified)\n` +
-      `  full intended X ${result.format === "thread" ? "first reply-thread row" : "reply"} text observed in one calibrated Unsent draft row: yes\n` +
+      `  request context: target ${result.replyToId}\n` +
+      `  ${contentEvidenceReceipt(result)}\n` +
       "  visible scoped row multiset changed by exactly that one full-text value: yes\n" +
       "  stable native row id: unavailable; full-list completeness and causality: unproven (visible scoped rows only)\n" +
-      "  saved draft reply-target binding verified: no\n" +
+      `  ${targetEvidenceReceipt(result)}\n` +
       "  Review every saved row and the reply target manually in the exact CLI-owned profile before posting.",
   };
 }
@@ -414,8 +459,11 @@ function stagedUnverifiedOutcome(result: FinalizableReplyStage): ReplyRealRunOut
     savePhase: "save_delivered_unverified",
     saveMechanism: "composer_close_save",
     draftRowEvidence: result.draftRowEvidence,
+    replyTargetEvidence: result.replyTargetEvidence,
     message:
-      `\n✗ The native Save action returned after reply staging was requested for target ${result.replyToId}, but text persistence was not verified. The saved draft's reply-target binding was also not verified. NEVER posted.\n` +
+      `\n✗ The native Save action returned after reply staging was requested for target ${result.replyToId}, but content persistence and exact target identity did not both verify. NEVER posted.\n` +
+      `  ${contentEvidenceReceipt(result)}\n` +
+      `  ${targetEvidenceReceipt(result)}\n` +
       "  Durable duplicate history was finalized as staged-unverified and the owner reservation was cleared; this is protection, not proof that a draft exists or does not exist.\n" +
       "  Compare X Unsent/Drafts manually in the exact CLI-owned profile used by this run before any retry. If a matching draft exists or the comparison is uncertain, do not retry or use --force.\n" +
       "  Only after confidently finding no matching draft may a separate --force run intentionally bypass the staged-unverified history.\n" +
@@ -441,6 +489,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
       savePhase: null,
       saveMechanism: null,
       draftRowEvidence: null,
+      replyTargetEvidence: null,
       message:
         "\n✗ The stale reservation clear returned, but the reply ledger did not close cleanly. No native staging was attempted.\n" +
         "  Inspect the local durable state before any reply action; do not stage or use --force while recovery state is uncertain.",
@@ -605,20 +654,58 @@ export async function executeReplyRealRun(
               saveMechanism: returned.saveMechanism,
               draftRowEvidence: snapshotXDraftRowEvidence(returned.draftRowEvidence),
             };
-            if (
+            const coreResultValid =
               result.replyToId === input.replyToId &&
               result.format === input.content.format &&
               result.posts === postsInReply(input.content) &&
               result.saveMechanism === "composer_close_save" &&
               isXDraftReturnedSavePhase(result.savePhase) &&
               result.draftRowEvidence !== null &&
-              isXDraftRowEvidenceCompatible(
-                result.saveMechanism,
-                result.savePhase,
+              (result.savePhase === "verified"
+                ? result.draftRowEvidence.status === "verified"
+                : result.draftRowEvidence.status === "verified" ||
+                  result.draftRowEvidence.status === "unverified");
+            if (coreResultValid && result.draftRowEvidence) {
+              // Once the core returned-Save result is coherent, target-only
+              // getter/probe failures are normalized locally. They must not
+              // escape as delivery-unknown and strand the owner reservation.
+              let replyTargetEvidence: XReplyTargetEvidence;
+              try {
+                replyTargetEvidence = snapshotXReplyTargetEvidence(
+                  returned.replyTargetEvidence,
+                ) ?? xReplyTargetEvidenceProbeFailed(input.replyToId);
+              } catch {
+                replyTargetEvidence = xReplyTargetEvidenceProbeFailed(input.replyToId);
+              }
+              if (replyTargetEvidence.requestedTargetId !== input.replyToId) {
+                replyTargetEvidence = xReplyTargetEvidenceProbeFailed(input.replyToId);
+              }
+              if (result.draftRowEvidence.status === "unverified") {
+                if (replyTargetEvidence.reason !== "content_unverified") {
+                  replyTargetEvidence = xReplyTargetEvidenceNotChecked(input.replyToId);
+                }
+              } else if (
+                replyTargetEvidence.reason === "content_unverified" ||
+                (result.savePhase === "save_delivered_unverified" &&
+                  replyTargetEvidence.status === "verified")
+              ) {
+                replyTargetEvidence = xReplyTargetEvidenceProbeFailed(input.replyToId);
+              }
+
+              const effectivePhase = result.savePhase === "verified" &&
+                  result.draftRowEvidence.status === "verified" &&
+                  replyTargetEvidence.status === "verified"
+                ? "verified"
+                : "save_delivered_unverified";
+              if (!isXReplyEvidenceCompatible(
+                effectivePhase,
                 result.draftRowEvidence,
-              )
-            ) {
-              finalizableStage = result.savePhase === "verified"
+                replyTargetEvidence,
+                input.replyToId,
+              )) {
+                outcome = stageResultInconclusive(input.replyToId);
+              } else {
+                finalizableStage = effectivePhase === "verified"
                 ? {
                     format: result.format,
                     posts: result.posts,
@@ -627,6 +714,10 @@ export async function executeReplyRealRun(
                     saveMechanism: "composer_close_save",
                     draftRowEvidence: result.draftRowEvidence as Extract<
                       XDraftRowEvidence,
+                      { status: "verified" }
+                    >,
+                    replyTargetEvidence: replyTargetEvidence as Extract<
+                      XReplyTargetEvidence,
                       { status: "verified" }
                     >,
                   }
@@ -638,9 +729,14 @@ export async function executeReplyRealRun(
                     saveMechanism: "composer_close_save",
                     draftRowEvidence: result.draftRowEvidence as Extract<
                       XDraftRowEvidence,
+                      { status: "verified" | "unverified" }
+                    >,
+                    replyTargetEvidence: replyTargetEvidence as Extract<
+                      XReplyTargetEvidence,
                       { status: "unverified" }
                     >,
                   };
+              }
             } else {
               outcome = stageResultInconclusive(input.replyToId);
             }
@@ -673,6 +769,7 @@ export async function executeReplyRealRun(
               savePhase: "save_delivered_unverified",
               saveMechanism: "composer_close_save",
               draftRowEvidence: null,
+              replyTargetEvidence: xReplyTargetEvidenceNotChecked(input.replyToId),
             };
           }
         }
@@ -755,7 +852,7 @@ const productionReplyRealRunDependencies: ReplyRealRunDependencies = {
 export function registerReplyCommand(x: Command): void {
   x
     .command("reply")
-    .description("Stage a NATIVE X reply draft targeted at a tweet — never posts")
+    .description("Request a NATIVE X reply draft for a tweet — never posts")
     .requiredOption(
       "--to <id|url>",
       "Exact 5–25 digit nonzero-leading ID or supported HTTPS x.com/twitter.com status URL",
@@ -801,9 +898,11 @@ export function registerReplyCommand(x: Command): void {
         "  The poster reports one closed phase: Save not attempted, Save delivery unknown, Save returned but persistence unverified, or verified in X Unsent/Drafts.\n" +
         "  Verification requires one calibrated native Unsent row whose full text exactly matches the intended first reply row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
         "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or any other visible-row change remains unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
-        "  Row verification does not verify the saved draft's reply-target binding. Confirm the target manually before posting.\n" +
-        "  Typed proof that Save was not attempted releases only this run's owner-matched reservation; a delivery-unknown or malformed outcome retains it.\n" +
-        "  When Save returned but persistence is unverified, the CLI finalizes staged-unverified history and exits 1; only verified persistence exits 0.\n" +
+        "  Reply target identity is separate from content-row persistence. The requested compose URL, Replying-to label, content/background links, and caller intent are never target proof.\n" +
+        "  Live calibration found no exact numeric target-id signal in the content-matched Unsent row or its reopened composer. Current production therefore cannot verify a saved reply target.\n" +
+        "  Typed proof that Save was not attempted releases only this run's owner-matched reservation; a delivery-unknown or malformed whole result retains it.\n" +
+        "  A typed Save-delivered-unverified error finalizes staged-unverified protection without inventing missing row or target facts.\n" +
+        "  Every current returned reply Save finalizes staged-unverified history and exits 1, even when the content row verifies. Only content plus an exact target id bound to the same matched draft could exit 0.\n" +
         "  Before any retry after an unknown or unverified outcome, compare X Unsent/Drafts manually in the exact CLI-owned profile used by that run. If a draft exists or the comparison is uncertain, do not retry or use --force.\n" +
         "  Only after confidently finding no matching draft may a separate --force run intentionally bypass staged-unverified finalized history. --inspect is not persistence proof.\n" +
         "\nReal-run ledger recovery:\n" +

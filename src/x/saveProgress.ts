@@ -151,6 +151,123 @@ export type XDraftRowEvidence =
   | XDraftRowEvidenceUnverified
   | XDraftRowEvidenceVerified;
 
+/**
+ * Closed, caller-safe evidence about a saved reply draft's native target.
+ *
+ * The calibrated 2026-09-03 Unsent row and its reopened composer exposed no
+ * exact status id. Production therefore emits `not_calibrated`; the
+ * same-row method remains a future/injected seam and cannot become positive
+ * unless one exact requested id is structurally bound to the content-matched
+ * draft. Observed foreign ids, URLs, handles, labels, selectors, and page text
+ * never cross this boundary.
+ */
+interface XReplyTargetEvidenceBase {
+  scope: "current_save_attempt";
+  requestedTargetId: string;
+}
+
+export interface XReplyTargetEvidenceNotChecked extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "not_checked";
+  rowBinding: "not_observed";
+  targetMatch: "not_observed";
+  targetContextCount: null;
+  distinctStatusIdCount: null;
+  reason: "content_unverified";
+}
+
+export interface XReplyTargetEvidenceNotCalibrated extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "not_calibrated";
+  rowBinding: "not_observed";
+  targetMatch: "not_observed";
+  targetContextCount: null;
+  distinctStatusIdCount: null;
+  reason: "no_exact_target_id_signal";
+}
+
+export interface XReplyTargetEvidenceProbeUnavailable extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "same_content_row_target_id";
+  rowBinding: "not_observed";
+  targetMatch: "not_observed";
+  targetContextCount: null;
+  distinctStatusIdCount: null;
+  reason: "route_not_exact" | "row_missing" | "row_ambiguous" | "probe_failed";
+}
+
+export interface XReplyTargetEvidenceContextMissing extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "same_content_row_target_id";
+  rowBinding: "same_content_matched_draft";
+  targetMatch: "not_observed";
+  targetContextCount: 0;
+  distinctStatusIdCount: 0;
+  reason: "target_context_missing";
+}
+
+export interface XReplyTargetEvidenceContextAmbiguous extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "same_content_row_target_id";
+  rowBinding: "same_content_matched_draft";
+  targetMatch: "ambiguous";
+  targetContextCount: number | "many";
+  distinctStatusIdCount: null;
+  reason: "target_context_ambiguous";
+}
+
+export interface XReplyTargetEvidenceIdMissing extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "same_content_row_target_id";
+  rowBinding: "same_content_matched_draft";
+  targetMatch: "not_observed";
+  targetContextCount: 1;
+  distinctStatusIdCount: 0;
+  reason: "target_id_missing";
+}
+
+export interface XReplyTargetEvidenceIdAmbiguous extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "same_content_row_target_id";
+  rowBinding: "same_content_matched_draft";
+  targetMatch: "ambiguous";
+  targetContextCount: 1;
+  distinctStatusIdCount: number | "many";
+  reason: "target_id_ambiguous";
+}
+
+export interface XReplyTargetEvidenceMismatch extends XReplyTargetEvidenceBase {
+  status: "unverified";
+  method: "same_content_row_target_id";
+  rowBinding: "same_content_matched_draft";
+  targetMatch: "different";
+  targetContextCount: 1;
+  distinctStatusIdCount: 1;
+  reason: "target_id_mismatch";
+}
+
+export interface XReplyTargetEvidenceVerified extends XReplyTargetEvidenceBase {
+  status: "verified";
+  method: "same_content_row_target_id";
+  rowBinding: "same_content_matched_draft";
+  targetMatch: "exact";
+  targetContextCount: 1;
+  distinctStatusIdCount: 1;
+  reason: "exact_requested_target";
+}
+
+/** Closed target-identity fact, independent from content-row persistence. */
+export type XReplyTargetEvidence =
+  | XReplyTargetEvidenceNotChecked
+  | XReplyTargetEvidenceNotCalibrated
+  | XReplyTargetEvidenceProbeUnavailable
+  | XReplyTargetEvidenceContextMissing
+  | XReplyTargetEvidenceContextAmbiguous
+  | XReplyTargetEvidenceIdMissing
+  | XReplyTargetEvidenceIdAmbiguous
+  | XReplyTargetEvidenceMismatch
+  | XReplyTargetEvidenceVerified;
+
 /** Closed, bounded Article-only handoff facts retained outside free-form notes. */
 type XArticleCoverGeometry =
   | {
@@ -452,6 +569,208 @@ export function snapshotXDraftRowEvidence(value: unknown): XDraftRowEvidence | n
   } catch {
     return null;
   }
+}
+
+function isCanonicalReplyTargetId(value: unknown): value is string {
+  return typeof value === "string" && /^[1-9][0-9]{4,24}$/.test(value);
+}
+
+function isAmbiguousBoundedCount(value: unknown): value is number | "many" {
+  return value === "many" || isBoundedInteger(value, 2);
+}
+
+/** Snapshot target evidence exactly once and enforce all semantic correlations. */
+export function snapshotXReplyTargetEvidence(value: unknown): XReplyTargetEvidence | null {
+  if (typeof value !== "object" || value === null) return null;
+  try {
+    const source = value as Record<string, unknown>;
+    const candidate = {
+      status: source.status,
+      method: source.method,
+      scope: source.scope,
+      requestedTargetId: source.requestedTargetId,
+      rowBinding: source.rowBinding,
+      targetMatch: source.targetMatch,
+      targetContextCount: source.targetContextCount,
+      distinctStatusIdCount: source.distinctStatusIdCount,
+      reason: source.reason,
+    };
+    if (
+      candidate.scope !== "current_save_attempt" ||
+      !isCanonicalReplyTargetId(candidate.requestedTargetId)
+    ) return null;
+
+    const commonUnobserved = candidate.status === "unverified" &&
+      candidate.rowBinding === "not_observed" &&
+      candidate.targetMatch === "not_observed" &&
+      candidate.targetContextCount === null &&
+      candidate.distinctStatusIdCount === null;
+    if (
+      candidate.method === "not_checked" &&
+      candidate.reason === "content_unverified" &&
+      commonUnobserved
+    ) return candidate as XReplyTargetEvidenceNotChecked;
+    if (
+      candidate.method === "not_calibrated" &&
+      candidate.reason === "no_exact_target_id_signal" &&
+      commonUnobserved
+    ) return candidate as XReplyTargetEvidenceNotCalibrated;
+
+    if (candidate.method !== "same_content_row_target_id") return null;
+    if (
+      (candidate.reason === "route_not_exact" ||
+        candidate.reason === "row_missing" ||
+        candidate.reason === "row_ambiguous" ||
+        candidate.reason === "probe_failed") &&
+      commonUnobserved
+    ) return candidate as XReplyTargetEvidenceProbeUnavailable;
+    if (
+      candidate.status === "unverified" &&
+      candidate.rowBinding === "same_content_matched_draft"
+    ) {
+      if (
+        candidate.reason === "target_context_missing" &&
+        candidate.targetMatch === "not_observed" &&
+        candidate.targetContextCount === 0 &&
+        candidate.distinctStatusIdCount === 0
+      ) return candidate as XReplyTargetEvidenceContextMissing;
+      if (
+        candidate.reason === "target_context_ambiguous" &&
+        candidate.targetMatch === "ambiguous" &&
+        isAmbiguousBoundedCount(candidate.targetContextCount) &&
+        candidate.distinctStatusIdCount === null
+      ) return candidate as XReplyTargetEvidenceContextAmbiguous;
+      if (
+        candidate.reason === "target_id_missing" &&
+        candidate.targetMatch === "not_observed" &&
+        candidate.targetContextCount === 1 &&
+        candidate.distinctStatusIdCount === 0
+      ) return candidate as XReplyTargetEvidenceIdMissing;
+      if (
+        candidate.reason === "target_id_ambiguous" &&
+        candidate.targetMatch === "ambiguous" &&
+        candidate.targetContextCount === 1 &&
+        isAmbiguousBoundedCount(candidate.distinctStatusIdCount)
+      ) return candidate as XReplyTargetEvidenceIdAmbiguous;
+      if (
+        candidate.reason === "target_id_mismatch" &&
+        candidate.targetMatch === "different" &&
+        candidate.targetContextCount === 1 &&
+        candidate.distinctStatusIdCount === 1
+      ) return candidate as XReplyTargetEvidenceMismatch;
+    }
+    if (
+      candidate.status === "verified" &&
+      candidate.reason === "exact_requested_target" &&
+      candidate.rowBinding === "same_content_matched_draft" &&
+      candidate.targetMatch === "exact" &&
+      candidate.targetContextCount === 1 &&
+      candidate.distinctStatusIdCount === 1
+    ) return candidate as XReplyTargetEvidenceVerified;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function xReplyTargetEvidenceNotChecked(
+  requestedTargetId: string,
+): XReplyTargetEvidenceNotChecked {
+  return {
+    status: "unverified",
+    method: "not_checked",
+    scope: "current_save_attempt",
+    requestedTargetId,
+    rowBinding: "not_observed",
+    targetMatch: "not_observed",
+    targetContextCount: null,
+    distinctStatusIdCount: null,
+    reason: "content_unverified",
+  };
+}
+
+export function xReplyTargetEvidenceNotCalibrated(
+  requestedTargetId: string,
+): XReplyTargetEvidenceNotCalibrated {
+  return {
+    status: "unverified",
+    method: "not_calibrated",
+    scope: "current_save_attempt",
+    requestedTargetId,
+    rowBinding: "not_observed",
+    targetMatch: "not_observed",
+    targetContextCount: null,
+    distinctStatusIdCount: null,
+    reason: "no_exact_target_id_signal",
+  };
+}
+
+export function xReplyTargetEvidenceProbeFailed(
+  requestedTargetId: string,
+): XReplyTargetEvidenceProbeUnavailable {
+  return {
+    status: "unverified",
+    method: "same_content_row_target_id",
+    scope: "current_save_attempt",
+    requestedTargetId,
+    rowBinding: "not_observed",
+    targetMatch: "not_observed",
+    targetContextCount: null,
+    distinctStatusIdCount: null,
+    reason: "probe_failed",
+  };
+}
+
+export type XReplyTargetObserver = () => Promise<unknown>;
+
+/**
+ * Resolve target evidence after Save without allowing a failed target probe to
+ * escape and regress the already-proven Save phase. Production intentionally
+ * omits an observer until an exact-id native signal is calibrated.
+ */
+export async function resolveXReplyTargetEvidence(
+  rowEvidence: XDraftRowEvidence,
+  requestedTargetId: string,
+  observe?: XReplyTargetObserver,
+): Promise<XReplyTargetEvidence> {
+  if (rowEvidence.status !== "verified") {
+    return xReplyTargetEvidenceNotChecked(requestedTargetId);
+  }
+  if (!observe) return xReplyTargetEvidenceNotCalibrated(requestedTargetId);
+  try {
+    const evidence = snapshotXReplyTargetEvidence(await observe());
+    return evidence?.requestedTargetId === requestedTargetId
+      ? evidence
+      : xReplyTargetEvidenceProbeFailed(requestedTargetId);
+  } catch {
+    return xReplyTargetEvidenceProbeFailed(requestedTargetId);
+  }
+}
+
+export function isPositiveXReplyTargetEvidence(
+  evidence: XReplyTargetEvidence,
+): evidence is XReplyTargetEvidenceVerified {
+  return evidence.status === "verified";
+}
+
+/** The reply result is positive only when content and target facts both are. */
+export function isXReplyEvidenceCompatible(
+  phase: XDraftReturnedSavePhase,
+  rowEvidence: XDraftRowEvidence,
+  targetEvidence: XReplyTargetEvidence,
+  requestedTargetId: string,
+): boolean {
+  if (
+    targetEvidence.requestedTargetId !== requestedTargetId ||
+    (rowEvidence.status !== "verified" && rowEvidence.status !== "unverified")
+  ) return false;
+  if (phase === "verified") {
+    return rowEvidence.status === "verified" && targetEvidence.status === "verified";
+  }
+  return targetEvidence.status === "unverified" &&
+    (rowEvidence.status === "verified"
+      ? targetEvidence.reason !== "content_unverified"
+      : targetEvidence.reason === "content_unverified");
 }
 
 function isArticleDimension(value: unknown): value is number {

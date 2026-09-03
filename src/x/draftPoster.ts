@@ -33,9 +33,12 @@ import {
 } from "../capabilities/validation.js";
 import {
   isPositiveXDraftRowEvidence,
+  isPositiveXReplyTargetEvidence,
+  resolveXReplyTargetEvidence,
   runXDraftSaveFlow,
   snapshotXArticleDraftHandoff,
   snapshotXDraftRowEvidence,
+  xReplyTargetEvidenceProbeFailed,
   X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
   X_ARTICLE_IMAGE_DIMENSION_LIMIT,
   X_DRAFT_ROW_OBSERVATION_LIMIT,
@@ -49,6 +52,7 @@ import {
   type XDraftRowObservation,
   type XDraftReturnedSavePhase,
   type XDraftSaveMechanism,
+  type XReplyTargetEvidence,
 } from "./saveProgress.js";
 
 // Preserve the existing public import while keeping parsing in a browser-free module.
@@ -388,11 +392,33 @@ async function typePosts(page: Page, posts: string[]): Promise<void> {
   }
 }
 
-/** Result of staging a reply draft (issue #8). */
-export type StageReplyResult = StageDraftResult & {
-  /** The tweet id we targeted the reply at. */
+interface StageReplyResultBase {
+  format: GeneratedContent["format"];
+  posts: number;
+  /** Compatibility diagnostic only; command receipts never render this prose. */
+  note: string;
+  saveMechanism: "composer_close_save";
+  /** Normalized caller-requested target; this is intent, not native proof. */
   replyToId: string;
-};
+}
+
+/**
+ * Reply results keep content persistence and target identity independent.
+ * Overall success requires both positive facts; a returned Save with either
+ * fact unverified remains a coherent returned-unverified result.
+ */
+export type StageReplyResult = StageReplyResultBase & (
+  | {
+      savePhase: "verified";
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "verified" }>;
+      replyTargetEvidence: Extract<XReplyTargetEvidence, { status: "verified" }>;
+    }
+  | {
+      savePhase: "save_delivered_unverified";
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "verified" | "unverified" }>;
+      replyTargetEvidence: Extract<XReplyTargetEvidence, { status: "unverified" }>;
+    }
+);
 
 export interface StageReplyOptions extends StageDraftOptions {}
 
@@ -409,6 +435,9 @@ export interface StageReplyOptions extends StageDraftOptions {}
  * Uses the shared typePosts + saveAsDraft + verifyDraftSaved helpers so the reply
  * path is a thin addition over the tweet/thread path (default single reply;
  * threads supported if the generated content overflows into multiple posts).
+ * Live calibration on 2026-09-03 found no exact target-id signal in the saved
+ * row or reopened composer, so production target evidence deliberately remains
+ * unverified after content persistence succeeds.
  */
 export async function stageReplyDraft(
   content: GeneratedContent,
@@ -444,26 +473,48 @@ export async function stageReplyDraft(
         () => verifyDraftSaved(page, posts[0], baseline),
       );
 
-      return saved.savePhase === "verified"
-        ? {
-            format: content.format,
-            posts: posts.length,
-            saveMechanism: "composer_close_save",
-            savePhase: "verified",
-            draftRowEvidence: saved.draftRowEvidence,
-            replyToId,
-            note: `The full intended ${content.format === "thread" ? "first reply-thread row" : "reply"} text was observed in one calibrated X Unsent row after ${saved.value}; ` +
-              `requested target ${replyToId} was supplied to the composer, but the saved draft's reply-target binding was not verified. Review both manually before posting.`,
-          }
-        : {
-            format: content.format,
-            posts: posts.length,
-            saveMechanism: "composer_close_save",
-            savePhase: "save_delivered_unverified",
-            draftRowEvidence: saved.draftRowEvidence,
-            replyToId,
-            note: `Save returned after staging was requested for target ${replyToId}, but scoped row persistence evidence and the saved draft's reply-target binding were not verified in X "Unsent"/Drafts.`,
-          };
+      // Do not infer native target identity from the requested compose URL,
+      // composer banner, row text, or reopen intent. Production has no target
+      // observer until X exposes a live-calibrated exact-id signal.
+      let replyTargetEvidence: XReplyTargetEvidence;
+      try {
+        replyTargetEvidence = await resolveXReplyTargetEvidence(
+          saved.draftRowEvidence,
+          replyToId,
+        );
+      } catch {
+        // Defensive outer guard: no target-only failure after Save may escape
+        // to stageReplyDraft's pre-Save fallback classification.
+        replyTargetEvidence = xReplyTargetEvidenceProbeFailed(replyToId);
+      }
+
+      if (
+        saved.savePhase === "verified" &&
+        isPositiveXReplyTargetEvidence(replyTargetEvidence)
+      ) {
+        return {
+          format: content.format,
+          posts: posts.length,
+          saveMechanism: "composer_close_save",
+          savePhase: "verified",
+          draftRowEvidence: saved.draftRowEvidence,
+          replyTargetEvidence,
+          replyToId,
+          note: `The full intended ${content.format === "thread" ? "first reply-thread row" : "reply"} text and an exact native target-id binding were observed after ${saved.value}. Review manually before posting.`,
+        };
+      }
+      return {
+        format: content.format,
+        posts: posts.length,
+        saveMechanism: "composer_close_save",
+        savePhase: "save_delivered_unverified",
+        draftRowEvidence: saved.draftRowEvidence,
+        replyTargetEvidence: replyTargetEvidence.status === "unverified"
+          ? replyTargetEvidence
+          : xReplyTargetEvidenceProbeFailed(replyToId),
+        replyToId,
+        note: `Save returned after staging was requested for target ${replyToId}, but the closed content and target evidence did not both verify in X Unsent/Drafts.`,
+      };
     } finally {
       await page.close().catch(() => {});
     }

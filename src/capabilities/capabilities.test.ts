@@ -188,13 +188,16 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /pre-existing identical visible rows, duplicate post-Save matches/);
   assert.match(x, /no stable native row ID.*does not prove the rendered rows are the complete drafts list or that this run caused the added value/s);
   assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code count, and cover selection\/upload\/ratio\/crop action facts in both verified and unverified receipts; those facts do not prove cover attachment or persistence/);
-  assert.match(x, /For replies, it also does not verify the saved draft's reply-target binding/);
+  assert.match(x, /Reply target identity is a separate closed fact/);
+  assert.match(x, /Live calibration on 2026-09-03 found no exact numeric target-id signal/);
+  assert.match(x, /returned real reply Save finalizes `staged-unverified` history and exits 1 even when its content row verifies/);
+  assert.match(x, /requested compose URL, `Replying to` label, content\/background links, and caller intent are never target proof/);
   assert.doesNotMatch(x, /reply target preserved|target preserved|Already staged a reply to/i);
-  assert.match(x, /Only `verified` exits successfully/);
+  assert.match(x, /Only positive content and exact-target facts together could finalize `staged` and exit 0/);
   assert.match(x, /Save-progress errors and failure receipts are bounded and do not expose raw selectors, page text, credentials, private paths/);
   assert.match(x, /typed `save_not_attempted` error releases only that run's owner-matched reservation/);
-  assert.match(x, /`save_delivery_unknown`, an untyped error, or a malformed result retains the reservation/);
-  assert.match(x, /returned result or typed error with `save_delivered_unverified` evidence atomically finalizes durable `staged-unverified` history/);
+  assert.match(x, /`save_delivery_unknown`, an untyped error, or a malformed whole result retains the reservation/);
+  assert.match(x, /target-unverified result, or a typed `save_delivered_unverified` error without row details, atomically finalizes durable `staged-unverified` history/);
   assert.match(x, /Only after confidently finding no matching draft.*separate explicit `--force`/s);
   assert.match(x, /finalization throws after Save-phase evidence, the finalized-history and reservation outcome is unknown/);
   assert.match(x, /finalization returns but close fails, the finalized status is known/);
@@ -667,12 +670,14 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value/,
     /Matching background\/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows/,
     /no stable native row id and does not prove full-list completeness or causality/,
-    /Row verification does not verify the saved draft's reply-target binding/,
-    /Confirm the target manually before posting/,
+    /Reply target identity is separate from content-row persistence/,
+    /requested compose URL, Replying-to label, content\/background links, and caller intent are never target proof/,
+    /Live calibration found no exact numeric target-id signal in the content-matched Unsent row or its reopened composer/,
+    /Every current returned reply Save finalizes staged-unverified history and exits 1, even when the content row verifies/,
+    /Only content plus an exact target id bound to the same matched draft could exit 0/,
     /Typed proof that Save was not attempted releases only this run's owner-matched reservation/,
-    /delivery-unknown or malformed outcome retains it/,
-    /Save returned but persistence is unverified, the CLI finalizes staged-unverified history and exits 1/,
-    /only verified persistence exits 0/,
+    /delivery-unknown or malformed whole result retains it/,
+    /typed Save-delivered-unverified error finalizes staged-unverified protection without inventing missing row or target facts/,
     /Only after confidently finding no matching draft may a separate --force run intentionally bypass staged-unverified finalized history/,
     /If reply-ledger finalization\/close fails after Save-phase evidence, exit 1; the draft may exist/,
     /Before any retry, compare X Unsent\/Drafts manually in the exact CLI-owned profile used by the failed run/,
