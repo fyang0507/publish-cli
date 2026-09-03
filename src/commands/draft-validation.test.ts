@@ -13,7 +13,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { generateContent } from "../x/content.js";
+import { generateContent, parseArticleBlocks } from "../x/content.js";
 
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 
@@ -471,6 +471,99 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
       assert.match(help.stdout, /Parser exceptions, unmappable source-token boundaries, and parser-confirmed quote\/list-nested fences exit 2 locally with bounded evidence/);
       assert.match(help.stdout, /does not attach the required screenshot\/image/);
     }
+    assert.match(draftHelp.stdout, /Article code-block handoff/);
+    assert.match(draftHelp.stdout, /fence with 0–3 leading spaces may close explicitly or at end of input/);
+    assert.match(draftHelp.stdout, /including trailing spaces and blank\/whitespace-only lines/);
+    assert.match(draftHelp.stdout, /Every recognized top-level Article fenced block has one advisory/);
+    assert.match(draftHelp.stdout, /excluded from the native rich-HTML paste/);
+    assert.match(draftHelp.stdout, /verified and unverified handoff receipts/);
+    assert.match(draftHelp.stdout, /separate \.x-article\.inspection\.txt receipt/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("X Article EOF fences stay exact in clean file artifacts and mapped stdin inspection", () => {
+  const fixture = createFixture();
+  try {
+    for (const [index, newline] of ["\n", "\r\n", "\r"].entries()) {
+      const sourcePath = join(fixture.dir, `article-eof-${index}.md`);
+      const markdownPath = join(fixture.dir, `article-eof-${index}.x-article.md`);
+      const inspectionPath = join(
+        fixture.dir,
+        `article-eof-${index}.x-article.inspection.txt`,
+      );
+      const cleanLines = [
+        `# EOF artifact ${index}`,
+        "",
+        "Visible body.",
+        "",
+        `${" ".repeat(index)}${index % 2 === 0 ? "```txt" : "~~~ txt"}`,
+        "payload with trailing spaces  ",
+        "  ",
+      ];
+      const cleanSource = cleanLines.join(newline);
+      writeFileSync(
+        sourcePath,
+        `\ufeff---${newline}private: artifact-secret-${index}${newline}---${newline}${cleanSource}`,
+      );
+
+      const result = runCli(fixture, [
+        "x", "draft", "--format", "article", "--from", sourcePath, "--dry-run",
+      ]);
+      assert.equal(result.status, 0, output(result));
+      assert.match(result.stdout, /native rich-HTML excluded code blocks: 1/);
+      assert.match(result.stdout, /CODE BLOCKS.*#1.*line 8/s);
+      assert.match(result.stdout, /Clean content written to/);
+      assert.match(result.stdout, /Inspection receipt written to/);
+      assert.doesNotMatch(output(result), /artifact-secret|PLATFORM_IMPORT_BLOCKED/);
+
+      const cleanArtifact = readFileSync(markdownPath, "utf8");
+      assert.equal(cleanArtifact, cleanSource.replace(/\r\n?/g, "\n"));
+      assert.doesNotMatch(cleanArtifact, /ARTICLE NATIVE|CODE BLOCK #|<!--|-->/);
+      const reparsedCode = parseArticleBlocks(cleanArtifact)
+        .filter((block) => block.kind === "code");
+      assert.deepEqual(reparsedCode, [{
+        kind: "code",
+        index: 1,
+        lang: "txt",
+        text: "payload with trailing spaces  \n  ",
+      }]);
+
+      const inspection = readFileSync(inspectionPath, "utf8");
+      assert.match(inspection, /^ARTICLE NATIVE RICH-HTML EXCLUDED CODE BLOCK COUNT: 1$/m);
+      assert.match(inspection, /CODE BLOCK #1 \[txt\] \(line 8\) → screenshot on X/);
+      assert.doesNotMatch(inspection, /artifact-secret|PLATFORM_IMPORT_BLOCKED/);
+      assert.deepEqual(
+        readdirSync(fixture.dir).filter((name) =>
+          name.startsWith(`article-eof-${index}.x-article`)
+        ).sort(),
+        [
+          `article-eof-${index}.x-article.inspection.txt`,
+          `article-eof-${index}.x-article.md`,
+        ],
+      );
+    }
+
+    const stdinData = join(fixture.dir, "article-eof-stdin-data");
+    const stdinRepo = join(fixture.dir, "article-eof-stdin-repo");
+    const articleTildeFence = String.fromCharCode(126).repeat(3);
+    const stdin = runCli(
+      fixture,
+      ["x", "draft", "--format", "article", "--from", "-", "--dry-run"],
+      `---\rprivate: stdin-artifact-secret\r---\r# Stdin EOF\r\r${articleTildeFence}js\rline()  \r  `,
+      { dataDir: stdinData, repoDir: stdinRepo },
+    );
+    assert.equal(stdin.status, 0, output(stdin));
+    assert.match(stdin.stdout, /native rich-HTML excluded code blocks: 1/);
+    assert.match(stdin.stdout, /CODE BLOCKS.*#1 \[js\] line 6/s);
+    assert.match(stdin.stdout, /line\(\)  \n  /);
+    assert.match(stdin.stdout, /No base file — content printed above, no artifact written/);
+    assert.doesNotMatch(output(stdin), /stdin-artifact-secret|PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(existsSync(stdinData), false);
+    assert.equal(existsSync(stdinRepo), false);
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }
@@ -757,6 +850,7 @@ test("malformed X mapping frontmatter exits 2 before artifacts, state, profiles,
       "x-malformed.x-tweet.txt",
       "x-malformed.x-thread.txt",
       "x-malformed.x-article.md",
+      "x-malformed.x-article.inspection.txt",
       "x-unterminated.x-tweet.txt",
     ]) {
       assert.equal(existsSync(join(fixture.dir, artifact)), false, artifact);

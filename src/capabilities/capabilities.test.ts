@@ -128,6 +128,10 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /5:2/);
   assert.match(x, /280/);
   assert.match(x, /publish x draft --format article --from/);
+  assert.match(x, /top-level backtick or tilde fenced block with zero through three leading spaces may close explicitly or at end of input/);
+  assert.match(x, /EOF-closed block preserves its LF-normalized code payload, including trailing spaces and blank or whitespace-only lines/);
+  assert.match(x, /recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in both verified and unverified Article handoff receipts/);
+  assert.match(x, /separate `\.x-article\.inspection\.txt` receipt/);
   assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
   assert.match(x, /directory containing the `--from` Markdown/);
   assert.match(

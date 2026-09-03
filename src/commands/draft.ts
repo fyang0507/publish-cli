@@ -214,10 +214,43 @@ function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
 }
 
 /** Stateful X draft boundary; dry-run returns before this seam is called. */
+function snapshotExpectedArticleCodeBlockCount(
+  content: GeneratedContent,
+): number | "many" | null {
+  if (content.format !== "article") return null;
+  try {
+    const article = content.article;
+    if (!article) return null;
+    const blocks = article.blocks;
+    const codeFlags = content.codeFlags;
+    if (!Array.isArray(blocks) || !Array.isArray(codeFlags)) {
+      return null;
+    }
+    const declared = article.codeBlockCount;
+    if (!Number.isSafeInteger(declared) || declared < 0) return null;
+    let structured = 0;
+    for (const block of blocks) {
+      if (typeof block !== "object" || block === null) return null;
+      if (block.kind === "code") structured += 1;
+    }
+    if (structured !== declared || codeFlags.length !== structured) return null;
+    return structured > X_ARTICLE_CODE_BLOCK_COUNT_LIMIT ? "many" : structured;
+  } catch {
+    return null;
+  }
+}
+
 export async function executeXDraftRealRun(
   input: XDraftRealRunInput,
   deps: XDraftRealRunDependencies,
 ): Promise<XDraftRealRunOutcome> {
+  const expectedArticleCodeBlockCount = input.content.format === "article"
+    ? snapshotExpectedArticleCodeBlockCount(input.content)
+    : null;
+  if (input.content.format === "article" && expectedArticleCodeBlockCount === null) {
+    return beforeSaveFailure(input.content.format);
+  }
+
   let stageDraft: Awaited<ReturnType<XDraftRealRunDependencies["loadStageDraft"]>>;
   try {
     stageDraft = await deps.loadStageDraft();
@@ -288,6 +321,8 @@ export async function executeXDraftRealRun(
       candidate.draftRowEvidence === null ||
       (candidate.saveMechanism === "article_create_autosave" &&
         candidate.articleHandoff === null) ||
+      (candidate.saveMechanism === "article_create_autosave" &&
+        candidate.articleHandoff?.codeBlockCount !== expectedArticleCodeBlockCount) ||
       !isXDraftRowEvidenceCompatible(
         candidate.saveMechanism,
         candidate.savePhase,
@@ -342,10 +377,10 @@ function artifactPath(fromPath: string, format: XFormat): string {
 /** The bytes we write to disk for --dry-run inspection. */
 function artifactBody(content: GeneratedContent): string {
   if (content.format === "article" && content.article) {
-    // Article artifact = the publishable markdown, with flags appended as an
-    // HTML comment so the markdown itself stays clean.
-    const flags = renderFlagsBlock(content);
-    return flags ? `${content.article.markdown}\n\n<!--\n${flags}\n-->\n` : `${content.article.markdown}\n`;
+    // Keep the Article Markdown byte-clean. In particular, appending an HTML
+    // comment after an EOF-closed fence would make that comment part of the code
+    // payload. Inspection facts are written to a separate text receipt.
+    return content.article.markdown;
   }
   // tweet/thread artifact = the full inspection render (text + flags + warnings).
   return `${renderForInspection(content)}\n`;
@@ -353,6 +388,11 @@ function artifactBody(content: GeneratedContent): string {
 
 function renderFlagsBlock(content: GeneratedContent): string {
   const out: string[] = [];
+  if (content.format === "article" && content.article) {
+    out.push(
+      `ARTICLE NATIVE RICH-HTML EXCLUDED CODE BLOCK COUNT: ${content.article.codeBlockCount}`,
+    );
+  }
   for (const f of content.codeFlags) {
     out.push(`CODE BLOCK #${f.index}${f.lang ? ` [${f.lang}]` : ""} (line ${f.sourceLine}) → screenshot on X: ${f.preview}`);
   }
@@ -361,6 +401,12 @@ function renderFlagsBlock(content: GeneratedContent): string {
   }
   for (const w of content.warnings) out.push(`WARNING: ${w}`);
   return out.join("\n");
+}
+
+function articleInspectionArtifactPath(fromPath: string): string {
+  const dir = dirname(fromPath);
+  const stem = basename(fromPath, extname(fromPath));
+  return join(dir, `${stem}.x-article.inspection.txt`);
 }
 
 export function registerDraftCommand(x: Command): void {
@@ -389,6 +435,10 @@ export function registerDraftCommand(x: Command): void {
         "  Mixed-marker pseudo-closers remain payload, and a valid unclosed top-level fence is transformed through end of input.\n" +
         "  Indented/ordinary fence-like prose stays literal. Parser exceptions, unmappable source-token boundaries, and parser-confirmed quote/list-nested fences exit 2 locally with bounded evidence before platform/state access.\n" +
         "  URLs inside transformed code are not link flags, and the optional voice pass is skipped when code is transformed. The CLI does not attach the required screenshot/image; add and verify it during human review.\n" +
+        "\nArticle code-block handoff:\n" +
+        "  A valid top-level backtick/tilde fence with 0–3 leading spaces may close explicitly or at end of input. EOF-closed Article code preserves its LF-normalized payload, including trailing spaces and blank/whitespace-only lines, in article.blocks and the clean Markdown dry-run artifact.\n" +
+        "  Every recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in verified and unverified handoff receipts for manual Insert → Code or screenshot review.\n" +
+        "  File-backed Article dry-runs put the excluded-code count and advisories in a separate .x-article.inspection.txt receipt so inspection metadata cannot become EOF-fenced code payload.\n" +
         "\nNative-save outcome:\n" +
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
@@ -458,7 +508,16 @@ export function registerDraftCommand(x: Command): void {
         if (basePath) {
           const outPath = artifactPath(basePath, format);
           writeFileSync(outPath, artifactBody(content), "utf-8");
-          console.log(`\n[dry-run] No browser touched. Content written to:\n  ${outPath}`);
+          if (format === "article") {
+            const inspectionPath = articleInspectionArtifactPath(basePath);
+            writeFileSync(inspectionPath, `${renderFlagsBlock(content)}\n`, "utf-8");
+            console.log(
+              `\n[dry-run] No browser touched. Clean content written to:\n  ${outPath}\n` +
+              `Inspection receipt written to:\n  ${inspectionPath}`,
+            );
+          } else {
+            console.log(`\n[dry-run] No browser touched. Content written to:\n  ${outPath}`);
+          }
         } else {
           console.log("\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)");
         }
