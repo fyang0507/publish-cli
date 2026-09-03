@@ -308,6 +308,12 @@ genuinely new piece — a markdown → inline-styled-HTML renderer:
   survives WeChat's sanitizer. A single **default look** (one readable typographic
   scale); themes/color presets are deferred (§8). Deterministic — same markdown in,
   same HTML out, **no LLM** (consistent with every other content generator).
+- **Safety preflight:** lex once for each exact source/body form, recursively walk
+  Marked's rendered token tree, reject every raw-HTML token and every non-allowlisted
+  link/image destination, then render the already-validated body tokens. Escaped
+  HTML and HTML-looking code remain inert text. This runs before image reads,
+  inspection output, API imports, or network access; the renderer's raw-HTML
+  override also escapes defensively if a future caller bypasses the preflight.
 
 ## 4. Content generation + validation (deterministic, no LLM)
 
@@ -331,18 +337,31 @@ draft assembler needs, with **no network and no LLM**:
      for `article_type=news`; if unresolved → **ERROR** with guidance (mirrors the
      reference's "no cover" stop).
    - **content_source_url (阅读原文):** `--source-url` → frontmatter
-     `sourceUrl`/`contentSourceUrl`. Optional.
-3. **Render body** → inline-styled HTML (§3.4). Collect referenced **local image
-   paths** for upload (§4.1).
-4. **Link handling (default → citations):** WeChat strips/deactivates most external
+     `sourceUrl`/`contentSourceUrl`. Optional; when present it must be an explicit,
+     absolute `http://` or `https://` URL.
+3. **Preflight output safety:** reject raw block/inline HTML anywhere in the
+   rendered token tree, including nested list/quote/table content. Allow only
+   explicit HTTP(S), `mailto:`, relative, or fragment Markdown links; allow only
+   explicit HTTP(S) or local-path Markdown images. Reject active/unknown schemes,
+   leading/trailing Unicode whitespace, controls, entity/percent-obfuscated
+   schemes, HTTP(S) userinfo, malformed absolute/backslash URLs, and
+   scheme-relative destinations with
+   structured local evidence. Ordinary internal spaces in an angle-bracket local
+   path and drive-absolute Windows body-image paths remain supported; UNC/network
+   image paths are rejected. This step happens
+   before any cover or body-image read.
+4. **Render body** → inline-styled HTML (§3.4). Escape every dynamic attribute and
+   collect referenced **local image paths** for upload (§4.1).
+5. **Link handling (default → citations):** WeChat strips/deactivates most external
    `<a href>` in article bodies (non-whitelisted domains are not clickable). By
    default, ordinary external links are rewritten to **bottom citations** (a
    numbered footnote list showing the URL as text) — the reference's default and the
    WeChat-friendly choice. `--keep-links` opts out and leaves inline links as-is.
    Links to `mp.weixin.qq.com` are always kept inline.
-5. **Return** `{ title, author, digest, html, coverPath, coverValidation,
+6. **Return** `{ title, author, digest, html, coverPath, coverValidation,
    sourceUrl, bodyImages[], linkFlags, warnings[] }`. `bodyImages[]` carry the
-   local path plus measured validation result the assembler must upload + rewrite.
+   exact parser source, escaped HTML source, resolved local path, and measured
+   validation result the assembler must upload + rewrite.
    `warnings[]` carries advisories (omitted digest delegated to
    WeChat, links converted to citations, remote image found) — printed for the
    operator, never silent.
@@ -384,7 +403,9 @@ On a real run it:
 1. Ensures a token (§3.2).
 2. Uploads the **cover** → `thumb_media_id`. (Cover first: it is required, so a
    `40164`/quota failure aborts before any body work.)
-3. Uploads each **body image** → rewrites `<img src>` in the HTML.
+3. Uploads each **body image** → matches its separately stored escaped HTML
+   identity, attribute-escapes the returned CDN URL, and rewrites every matching
+   `<img src>` without losing caller path identity, duplicate occurrences, or order.
 4. Assembles the `draft/add` payload and calls
    `POST /cgi-bin/draft/add?access_token=…`:
 
