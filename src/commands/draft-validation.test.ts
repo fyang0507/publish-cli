@@ -13,6 +13,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { generateContent } from "../x/content.js";
 
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 
@@ -322,6 +323,153 @@ test("valid X reply dry-runs render tweet and lossless thread previews without r
 
       assert.equal(existsSync(dataDir), false, `${testCase.name}: data dir was created`);
       assert.equal(existsSync(repoDir), false, `${testCase.name}: data repo was created`);
+    }
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("X code-block fidelity is public for draft/reply input and invalid mappings stay zero-state", async () => {
+  const fixture = createFixture();
+  try {
+    const inlineData = join(fixture.dir, "inline-code-absent-data");
+    const inlineRepo = join(fixture.dir, "inline-code-absent-repo");
+    const inlineRun = runCli(
+      fixture,
+      [
+        "x", "draft", "--format", "tweet", "--text",
+        "Visible\n```js\ninlineRun()\n```", "--dry-run",
+      ],
+      undefined,
+      { dataDir: inlineData, repoDir: inlineRepo },
+    );
+    assert.equal(inlineRun.status, 0, output(inlineRun));
+    assert.match(inlineRun.stdout, /Source lines 2-4 \(code_block\) were replaced/);
+    assert.equal(existsSync(inlineData), false);
+    assert.equal(existsSync(inlineRepo), false);
+
+    const fileSource = join(fixture.dir, "code-fidelity.md");
+    const fileArtifact = join(fixture.dir, "code-fidelity.x-tweet.txt");
+    writeFileSync(
+      fileSource,
+      "\ufeff---\r\nprivate: ignored\r\n---\r\nVisible\r\n```ts label=demo\r\nrun()\r\n```\r\n",
+    );
+    const fileRun = runCli(
+      fixture,
+      ["x", "draft", "--format", "tweet", "--from", fileSource, "--dry-run"],
+    );
+    assert.equal(fileRun.status, 0, output(fileRun));
+    assert.match(fileRun.stdout, /\[code block #1 → screenshot\]/);
+    assert.match(fileRun.stdout, /Source lines 5-7 \(code_block\) were replaced/);
+    assert.match(fileRun.stdout, /LF-normalized source sha256=[a-f0-9]{64}/);
+    assert.doesNotMatch(fileRun.stdout, /private: ignored|PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(existsSync(fileArtifact), true);
+    assert.match(readFileSync(fileArtifact, "utf8"), /Source lines 5-7 \(code_block\)/);
+
+    const tildeFence = String.fromCharCode(126).repeat(3);
+    const replySource =
+      `${"reply-prefix ".repeat(30)}\r\n${tildeFence}python\r\nprint('reply')\r\n${tildeFence}\r\n` +
+      "reply suffix ".repeat(15);
+    const stdinData = join(fixture.dir, "reply-stdin-absent-data");
+    const stdinRepo = join(fixture.dir, "reply-stdin-absent-repo");
+    const stdinRun = runCli(
+      fixture,
+      ["x", "reply", "--to", "9999999999999999999", "--from", "-", "--dry-run"],
+      `\ufeff---\r\nprivate: ignored\r\n---\r\n${replySource}`,
+      { dataDir: stdinData, repoDir: stdinRepo },
+    );
+    assert.equal(stdinRun.status, 0, output(stdinRun));
+    assert.match(stdinRun.stdout, /generated a \d+-post reply thread/);
+    assert.match(stdinRun.stdout, /\[code block #1 → screenshot\]/);
+    assert.match(stdinRun.stdout, /Source lines 5-7 \(code_block\) were replaced/);
+    assert.match(stdinRun.stdout, /fence=tilde, closure=explicit/);
+    assert.doesNotMatch(stdinRun.stdout, /private: ignored|PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(existsSync(stdinData), false);
+    assert.equal(existsSync(stdinRepo), false);
+    const expectedReplyThread = await generateContent(replySource, { format: "thread" });
+    assert.equal(
+      (expectedReplyThread.thread ?? [])
+        .map((post) => post.text.replace(/ \d+\/\d+$/, ""))
+        .join(""),
+      `${"reply-prefix ".repeat(30)}\n[code block #1 → screenshot]\n${"reply suffix ".repeat(15).trimEnd()}`,
+    );
+    for (const post of expectedReplyThread.thread ?? []) {
+      assert.ok(stdinRun.stdout.includes(post.text), `reply dry-run omitted exact row ${post.index}`);
+    }
+
+    const invalidCases = [
+      {
+        name: "nested",
+        content: "> quoted\n> ```js\n> hidden()\n> ```",
+        evidence: /nested inside Markdown quote\/list structure/,
+      },
+      {
+        name: "reserved-placeholder",
+        content: "Caller literal [code block #9 → screenshot]",
+        evidence: /reserved X code-block placeholder syntax/,
+      },
+    ];
+
+    for (const testCase of invalidCases) {
+      const invalidFile = join(fixture.dir, `${testCase.name}.md`);
+      const invalidArtifact = join(fixture.dir, `${testCase.name}.x-thread.txt`);
+      writeFileSync(invalidFile, testCase.content);
+      for (const dryRun of [false, true]) {
+        const suffix = `${testCase.name}-${dryRun ? "dry" : "real"}`;
+        const dataDir = join(fixture.dir, `${suffix}-data`);
+        const repoDir = join(fixture.dir, `${suffix}-repo`);
+        const draft = runCli(
+          fixture,
+          [
+            "x", "draft", "--format", "thread", "--from", invalidFile,
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          undefined,
+          { dataDir, repoDir },
+        );
+        assert.equal(draft.status, 2, output(draft));
+        assert.match(output(draft), testCase.evidence);
+        assert.doesNotMatch(output(draft), /PLATFORM_IMPORT_BLOCKED|hidden\(\)/);
+        assert.equal(existsSync(dataDir), false);
+        assert.equal(existsSync(repoDir), false);
+        assert.equal(existsSync(invalidArtifact), false);
+
+        const replyData = join(fixture.dir, `${suffix}-reply-data`);
+        const replyRepo = join(fixture.dir, `${suffix}-reply-repo`);
+        const reply = runCli(
+          fixture,
+          [
+            "x", "reply", "--to", "9999999999999999999", "--text", testCase.content,
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          undefined,
+          { dataDir: replyData, repoDir: replyRepo },
+        );
+        assert.equal(reply.status, 2, output(reply));
+        assert.match(output(reply), testCase.evidence);
+        assert.doesNotMatch(output(reply), /PLATFORM_IMPORT_BLOCKED|hidden\(\)/);
+        assert.equal(existsSync(replyData), false);
+        assert.equal(existsSync(replyRepo), false);
+      }
+    }
+
+    const draftHelp = runCli(fixture, ["x", "draft", "--help"]);
+    const replyHelp = runCli(fixture, ["x", "reply", "--help"]);
+    for (const help of [draftHelp, replyHelp]) {
+      assert.equal(help.status, 0, output(help));
+      assert.match(help.stdout, /parser-confirmed top-level backtick\/tilde fenced block/);
+      assert.match(help.stdout, /\[code block #N → screenshot\] placeholder/);
+      assert.match(
+        help.stdout,
+        /#1 counts as 29 twitter-text weighted characters normally and 28 Unicode code points with --long/,
+      );
+      assert.match(help.stdout, /caller transport prose matching the reserved \[code block #N → screenshot\] syntax exits 2 locally/);
+      assert.match(help.stdout, /inside transformed code or an omitted heading do not collide/);
+      assert.match(help.stdout, /inclusive original line range.*LF-normalized source SHA-256/s);
+      assert.match(help.stdout, /closer needs the same marker at least as long plus only trailing spaces or tabs/);
+      assert.match(help.stdout, /Mixed-marker pseudo-closers remain payload/);
+      assert.match(help.stdout, /Parser exceptions, unmappable source-token boundaries, and parser-confirmed quote\/list-nested fences exit 2 locally with bounded evidence/);
+      assert.match(help.stdout, /does not attach the required screenshot\/image/);
     }
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });

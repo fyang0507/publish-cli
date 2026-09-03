@@ -148,6 +148,24 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /leading transport BOM/);
   assert.match(x, /actual\/expected evidence before artifacts, state, profiles, browser, or API imports or writes/);
   assert.match(x, /Inline `--text` remains literal/);
+  assert.match(x, /replaces every parser-confirmed top-level fenced code block with an exact numbered placeholder/);
+  assert.match(
+    x,
+    /`\[code block #1 → screenshot\]`.*29 `twitter-text` weighted characters.*28 Unicode code points under `--long`/,
+  );
+  assert.match(x, /caller transport prose matching the reserved `\[code block #N → screenshot\]` syntax exits 2 locally/);
+  assert.match(x, /same literal inside transformed code or an omitted heading is not transported and does not collide/);
+  assert.match(x, /closed `code_block` fidelity warning with the original inclusive source-line range/);
+  assert.match(x, /SHA-256 digest of the complete LF-normalized removed segment/);
+  assert.match(x, /URLs inside removed code are not link advisories/);
+  assert.match(x, /valid unclosed top-level fence consumes through end of input/);
+  assert.match(x, /nested in quote\/list containers exit 2 locally/);
+  assert.match(x, /closer must use the same marker.*only trailing spaces or tabs/);
+  assert.match(x, /Mixed-marker pseudo-closers remain fenced payload/);
+  assert.match(x, /dedicated parser resolves stock-parser closer differences under this documented local grammar/);
+  assert.match(x, /Parser exceptions, source-token boundaries that cannot be mapped exactly.*nested in quote\/list containers exit 2 locally with bounded evidence/s);
+  assert.match(x, /optional voice pass is skipped whenever a code transform exists/);
+  assert.match(x, /Replace every placeholder with a reviewed screenshot\/image during the human draft review/);
   assert.match(x, /reply --to` uses a closed local target allowlist/);
   assert.match(x, /input is exact: whitespace, BOM\/control characters, and backslashes are rejected/);
   assert.match(x, /raw ID is 5–25 ASCII digits matching `\[1-9\]\[0-9\]\{4,24\}`; leading zeroes are rejected/);

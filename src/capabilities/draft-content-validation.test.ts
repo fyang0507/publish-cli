@@ -172,12 +172,18 @@ test("X file-backed mapping frontmatter normalizes before every format without l
     format: "thread",
     sourceLineOffset: offsetInput.bodyLineOffset,
   });
-  assert.equal(offset.fidelityFlags[0]?.sourceLine, 4);
+  const firstOffsetFlag = offset.fidelityFlags[0];
+  assert.ok(firstOffsetFlag && firstOffsetFlag.kind !== "code_block");
+  assert.equal(firstOffsetFlag.sourceLine, 4);
   assert.equal(offset.codeFlags[0]?.sourceLine, 6);
   assert.deepEqual(
-    offset.fidelityFlags.map(({ kind, sourceLine }) => ({ kind, sourceLine })),
+    offset.fidelityFlags.map((flag) => ({
+      kind: flag.kind,
+      sourceLine: flag.kind === "code_block" ? flag.sourceStartLine : flag.sourceLine,
+    })),
     [
       { kind: "title_heading", sourceLine: 4 },
+      { kind: "code_block", sourceLine: 6 },
       { kind: "section_heading", sourceLine: 9 },
       { kind: "metadata_like", sourceLine: 10 },
       { kind: "markdown_image", sourceLine: 11 },
@@ -261,11 +267,11 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
   const generated = await generateContent(source, { format: "thread" });
 
   assert.deepEqual(
-    generated.fidelityFlags.map(({ kind, sourceLine, source: sourceText }) => ({
-      kind,
-      sourceLine,
-      source: sourceText,
-    })),
+    generated.fidelityFlags.map((flag) => {
+      assert.notEqual(flag.kind, "code_block");
+      if (flag.kind === "code_block") throw new Error("unexpected code-block fidelity flag");
+      return { kind: flag.kind, sourceLine: flag.sourceLine, source: flag.source };
+    }),
     [
       { kind: "title_heading", sourceLine: 1, source: "# Launch notes" },
       { kind: "metadata_like", sourceLine: 3, source: "Update: we shipped the parser today." },
@@ -276,6 +282,8 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
   assert.equal(generated.warnings.length, generated.fidelityFlags.length);
   const inspection = renderForInspection(generated);
   for (const flag of generated.fidelityFlags) {
+    assert.notEqual(flag.kind, "code_block");
+    if (flag.kind === "code_block") throw new Error("unexpected code-block fidelity flag");
     assert.match(inspection, new RegExp(`line ${flag.sourceLine}`));
     assert.match(inspection, new RegExp(flag.kind));
     assert.match(inspection, new RegExp(flag.source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));

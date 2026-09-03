@@ -15,13 +15,15 @@
  *   - article: long-form Article markdown for X's Articles composer.
  *
  * Two cross-cutting concerns surfaced as advisory flags (NOT auto-applied):
- *   - X does NOT render fenced code blocks — each one is flagged as "must become
- *     a screenshot/image"; the matching asset usually already lives in the
- *     canonical folder.
+ *   - X does NOT render fenced code blocks — each parser-confirmed top-level
+ *     block becomes an exact screenshot placeholder plus bounded fidelity
+ *     evidence; the human must supply and verify the matching image.
  *   - Links cost reach — every link is surfaced with a placement note (keep it
  *     out of the opening tweet; move to a reply or the end).
  */
 
+import { createHash } from "node:crypto";
+import { Marked } from "marked";
 import type { GeminiClient } from "../gemini.js";
 import type { ThinkingLevel } from "@google/genai";
 import {
@@ -54,8 +56,35 @@ export interface CodeBlockFlag {
   lang?: string;
   /** First line of the block, for human identification. */
   preview: string;
-  /** Approximate source line where the fence opened (1-based). */
+  /** Exact source line where the parser-confirmed fence opened (1-based for X). */
   sourceLine: number;
+}
+
+export const X_CODE_INFO_MAX_CODE_POINTS = 80;
+export const X_CODE_PREVIEW_MAX_CODE_POINTS = 120;
+
+/**
+ * Closed fidelity evidence for one parser-confirmed fenced block replaced in
+ * X tweet/thread/reply transport text. Source snippets are terminal-safe and
+ * bounded; the digest identifies the complete LF-normalized removed segment.
+ */
+export interface CodeBlockFidelityFlag {
+  kind: "code_block";
+  index: number;
+  placeholder: string;
+  sourceStartLine: number;
+  sourceEndLine: number;
+  sourceLineCount: number;
+  fence: "backtick" | "tilde";
+  closure: "explicit" | "end_of_input";
+  infoString: string | null;
+  infoStringTruncated: boolean;
+  preview: string;
+  previewTruncated: boolean;
+  /** Inclusive source lines joined with LF, without a separator after the final line. */
+  digestNormalization: "lf_joined_source_lines";
+  normalizedSourceSha256: string;
+  note: string;
 }
 
 /** A surfaced link with a placement recommendation. */
@@ -81,6 +110,8 @@ export interface ProseOmissionFlag {
   sourceLine: number;
   note: string;
 }
+
+export type XContentFidelityFlag = ProseOmissionFlag | CodeBlockFidelityFlag;
 
 /**
  * An inline text run inside an article block. Rich formatting is expressed as a
@@ -146,8 +177,8 @@ export interface GeneratedContent {
   codeFlags: CodeBlockFlag[];
   /** Links surfaced with placement notes. */
   linkFlags: LinkFlag[];
-  /** Source lines omitted from tweet/thread prose, with exact fidelity evidence. */
-  fidelityFlags: ProseOmissionFlag[];
+  /** Source transformations in tweet/thread prose, with closed fidelity evidence. */
+  fidelityFlags: XContentFidelityFlag[];
   /** Non-fatal advisories; transport text is never silently shortened. */
   warnings: string[];
 }
@@ -187,6 +218,7 @@ interface ParsedDoc {
   codeFlags: CodeBlockFlag[];
   linkFlags: LinkFlag[];
   proseOmissions: ProseOmissionFlag[];
+  codeFidelityFlags: CodeBlockFidelityFlag[];
 }
 
 const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
@@ -322,6 +354,477 @@ export function parseBaseMarkdown(md: string, sourceLineOffset = 0): ParsedDoc {
     codeFlags,
     linkFlags,
     proseOmissions,
+    codeFidelityFlags: [],
+  };
+}
+
+interface XCodeTransformSpan {
+  startLineIndex: number;
+  endLineIndex: number;
+  sourceEndOffsetExclusive: number;
+  sourceLines: string[];
+  codeFlag: CodeBlockFlag;
+  fidelityFlag: CodeBlockFidelityFlag;
+}
+
+interface MarkedTokenShape {
+  type?: unknown;
+  raw?: unknown;
+  text?: unknown;
+  codeBlockStyle?: unknown;
+  xFenceSourceLength?: unknown;
+  xFenceRemainingSourceLength?: unknown;
+  tokens?: unknown;
+  items?: unknown;
+}
+
+function xCodePlaceholderRegex(): RegExp {
+  return /\[code block #[1-9][0-9]* → screenshot\]/g;
+}
+
+function codePlaceholder(index: number): string {
+  return `[code block #${index} → screenshot]`;
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function asMarkedToken(value: unknown): MarkedTokenShape | null {
+  return isObject(value) ? value : null;
+}
+
+function isParserConfirmedFence(token: MarkedTokenShape): boolean {
+  return token.type === "code" && token.codeBlockStyle !== "indented";
+}
+
+function containsNestedParserConfirmedFence(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsNestedParserConfirmedFence);
+  const token = asMarkedToken(value);
+  if (!token) return false;
+  if (isParserConfirmedFence(token)) return true;
+  return containsNestedParserConfirmedFence(token.tokens) ||
+    containsNestedParserConfirmedFence(token.items);
+}
+
+function xCodeMappingError(
+  code: "x_code_block_parse_failed" | "x_code_block_source_mapping_failed" |
+    "x_nested_code_block_mapping_unsupported" | "x_code_block_placeholder_collision",
+  actual: string,
+  message: string,
+): LocalValidationError {
+  return new LocalValidationError(message, {
+    code,
+    field: "text",
+    actual,
+    expected: "parser-confirmed, exactly mapped X code-block placeholder transformation",
+    unit: null,
+  });
+}
+
+function terminalSafeBounded(
+  value: string,
+  maximumCodePoints: number,
+): { value: string; truncated: boolean } {
+  const safe = value.normalize("NFC").replace(
+    /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,
+    (character) => {
+      const point = character.codePointAt(0) ?? 0;
+      return `\\u{${point.toString(16).padStart(2, "0")}}`;
+    },
+  );
+  const codePoints = Array.from(safe);
+  return {
+    value: codePoints.slice(0, maximumCodePoints).join(""),
+    truncated: codePoints.length > maximumCodePoints,
+  };
+}
+
+function closerMatches(line: string, marker: string): boolean {
+  const match = line.match(/^( {0,3})(`+|~+)[ \t]*/u);
+  return !!match && match[0].length === line.length &&
+    match[2][0] === marker[0] && match[2].length >= marker.length;
+}
+
+function supportedFenceOpener(line: string): RegExpMatchArray | null {
+  // Do not use `.` or a `$` anchor here: JS treats U+2028/U+2029 as line
+  // terminators even though Markdown source-line accounting is LF-based.
+  const match = line.match(/^( {0,3})(`{3,}|~{3,})([^\n]*)/u);
+  if (
+    !match || match[0].length !== line.length ||
+    (match[2][0] === "`" && match[3].includes("`"))
+  ) {
+    return null;
+  }
+  return match;
+}
+
+interface StrictFenceToken {
+  raw: string;
+  lang?: string;
+  text: string;
+}
+
+/**
+ * Marked owns block/container classification, while this tokenizer extension
+ * owns the explicitly documented X fence boundary grammar. In particular,
+ * CommonMark permits spaces or tabs after a closing fence, and a mixed marker
+ * suffix is payload rather than a closer. Returning the exact consumed slice
+ * lets the lexer retain its normal list/quote/HTML context without reparsing a
+ * growing prefix for every fence-like source line.
+ */
+function strictFenceToken(src: string): StrictFenceToken | null {
+  const firstBreak = src.indexOf("\n");
+  const openerLine = firstBreak === -1 ? src : src.slice(0, firstBreak);
+  const opener = supportedFenceOpener(openerLine);
+  if (!opener) return null;
+
+  const marker = opener[2];
+  const contentStart = firstBreak === -1 ? src.length : firstBreak + 1;
+  let lineStart = contentStart;
+  while (lineStart < src.length) {
+    const nextBreak = src.indexOf("\n", lineStart);
+    const lineEnd = nextBreak === -1 ? src.length : nextBreak;
+    const line = src.slice(lineStart, lineEnd);
+    if (closerMatches(line, marker)) {
+      const rawEnd = nextBreak === -1 ? lineEnd : nextBreak + 1;
+      const raw = src.slice(0, rawEnd);
+      const contentEnd = lineStart > contentStart && src[lineStart - 1] === "\n"
+        ? lineStart - 1
+        : lineStart;
+      return {
+        raw,
+        ...(opener[3].trim() ? { lang: opener[3].trim() } : {}),
+        text: src.slice(contentStart, contentEnd),
+      };
+    }
+    if (nextBreak === -1) break;
+    lineStart = nextBreak + 1;
+  }
+
+  const content = src.slice(contentStart);
+  return {
+    raw: src,
+    ...(opener[3].trim() ? { lang: opener[3].trim() } : {}),
+    text: content.endsWith("\n") ? content.slice(0, -1) : content,
+  };
+}
+
+const xTransportMarkdownParser = new Marked({
+  tokenizer: {
+    fences(src) {
+      const token = strictFenceToken(src);
+      if (!token) return false;
+      return {
+        type: "code",
+        ...token,
+        // Marked can merge a following one-line whitespace token into `raw`.
+        // Retain the exact fence slice length before that bookkeeping so the
+        // source-boundary cross-check stays about the fence, not its separator.
+        xFenceSourceLength: token.raw.length,
+        // Some valid Markdown constructs (for example a duplicate reference
+        // definition) are consumed without a top-level token. The remaining
+        // root source length therefore provides the exact candidate start;
+        // summing sibling token.raw lengths would drift.
+        xFenceRemainingSourceLength: src.length,
+      };
+    },
+  },
+});
+
+interface XCodeSourceLayout {
+  sourceLines: string[];
+  lineStartOffsets: number[];
+  lineIndexByStartOffset: Map<number, number>;
+  physicalLastLineIndex: number;
+}
+
+function xCodeSourceLayout(normalized: string): XCodeSourceLayout {
+  const sourceLines = normalized.split("\n");
+  const lineStartOffsets: number[] = [];
+  const lineIndexByStartOffset = new Map<number, number>();
+  let offset = 0;
+  for (let index = 0; index < sourceLines.length; index += 1) {
+    lineStartOffsets.push(offset);
+    lineIndexByStartOffset.set(offset, index);
+    offset += (sourceLines[index] ?? "").length;
+    if (index < sourceLines.length - 1) offset += 1;
+  }
+  return {
+    sourceLines,
+    lineStartOffsets,
+    lineIndexByStartOffset,
+    physicalLastLineIndex: normalized.endsWith("\n")
+      ? Math.max(0, sourceLines.length - 2)
+      : sourceLines.length - 1,
+  };
+}
+
+function mapParserConfirmedFence(
+  normalized: string,
+  layout: XCodeSourceLayout,
+  startOffset: number,
+  sourceLineOffset: number,
+  index: number,
+): XCodeTransformSpan {
+  const startLineIndex = layout.lineIndexByStartOffset.get(startOffset);
+  if (startLineIndex === undefined || startLineIndex > layout.physicalLastLineIndex) {
+    throw xCodeMappingError(
+      "x_code_block_source_mapping_failed",
+      "not_at_line_boundary",
+      "A parser-confirmed X code block could not be mapped to an exact source-line boundary. No transport text was generated.",
+    );
+  }
+
+  const openerLine = layout.sourceLines[startLineIndex] ?? "";
+  const opener = supportedFenceOpener(openerLine);
+  if (!opener) {
+    throw xCodeMappingError(
+      "x_code_block_source_mapping_failed",
+      "invalid_fence_boundary",
+      "A parser-confirmed X code block did not match the supported fenced-block boundary grammar. No transport text was generated.",
+    );
+  }
+
+  const marker = opener[2];
+  let endLineIndex = layout.physicalLastLineIndex;
+  let closure: CodeBlockFidelityFlag["closure"] = "end_of_input";
+  for (
+    let lineIndex = startLineIndex + 1;
+    lineIndex <= layout.physicalLastLineIndex;
+    lineIndex += 1
+  ) {
+    if (closerMatches(layout.sourceLines[lineIndex] ?? "", marker)) {
+      endLineIndex = lineIndex;
+      closure = "explicit";
+      break;
+    }
+  }
+
+  const sourceLines = layout.sourceLines.slice(startLineIndex, endLineIndex + 1);
+  const sourceSegment = sourceLines.join("\n");
+  const lastContentIndex = closure === "explicit" ? sourceLines.length - 2 : sourceLines.length - 1;
+  const rawInfo = opener[3].trim();
+  const info = terminalSafeBounded(rawInfo, X_CODE_INFO_MAX_CODE_POINTS);
+  const rawPreview = lastContentIndex >= 1 ? (sourceLines[1] ?? "").trim() : "";
+  const preview = terminalSafeBounded(rawPreview, X_CODE_PREVIEW_MAX_CODE_POINTS);
+  const rawLang = rawInfo.split(/[ \t]+/u, 1)[0] ?? "";
+  const lang = terminalSafeBounded(rawLang, X_CODE_INFO_MAX_CODE_POINTS);
+  const sourceStartLine = sourceLineOffset + startLineIndex + 1;
+  const sourceEndLine = sourceLineOffset + endLineIndex + 1;
+  const placeholder = codePlaceholder(index);
+  const sourceEndOffsetExclusive = endLineIndex + 1 < layout.lineStartOffsets.length
+    ? layout.lineStartOffsets[endLineIndex + 1]
+    : normalized.length;
+
+  return {
+    startLineIndex,
+    endLineIndex,
+    sourceEndOffsetExclusive,
+    sourceLines,
+    codeFlag: {
+      index,
+      ...(lang.value ? { lang: `${lang.value}${lang.truncated ? "…" : ""}` } : {}),
+      preview: `${preview.value}${preview.truncated ? "…" : ""}`,
+      sourceLine: sourceStartLine,
+    },
+    fidelityFlag: {
+      kind: "code_block",
+      index,
+      placeholder,
+      sourceStartLine,
+      sourceEndLine,
+      sourceLineCount: sourceLines.length,
+      fence: marker[0] === "`" ? "backtick" : "tilde",
+      closure,
+      infoString: info.value || null,
+      infoStringTruncated: info.truncated,
+      preview: preview.value,
+      previewTruncated: preview.truncated,
+      digestNormalization: "lf_joined_source_lines",
+      normalizedSourceSha256: createHash("sha256").update(sourceSegment, "utf8").digest("hex"),
+      note:
+        "The LF-normalized fenced source segment was replaced by the exact placeholder; provide and verify a screenshot/image before final publication.",
+    },
+  };
+}
+
+function parserConfirmedXCodeSpans(
+  normalized: string,
+  sourceLineOffset: number,
+): XCodeTransformSpan[] {
+  const layout = xCodeSourceLayout(normalized);
+  const parserSource = normalized.endsWith("\n") ? normalized : `${normalized}\n`;
+  let tokens: unknown[];
+  try {
+    tokens = xTransportMarkdownParser.lexer(parserSource) as unknown[];
+  } catch {
+    throw xCodeMappingError(
+      "x_code_block_parse_failed",
+      "parser_failed",
+      "The X Markdown parser could not classify fenced code blocks. No transport text was generated.",
+    );
+  }
+
+  const spans: XCodeTransformSpan[] = [];
+  for (const value of tokens) {
+    const token = asMarkedToken(value);
+    if (!token || typeof token.raw !== "string" || token.raw.length === 0) {
+      throw xCodeMappingError(
+        "x_code_block_source_mapping_failed",
+        "invalid_parser_token_boundary",
+        "The X Markdown parser returned an unmappable source token. No transport text was generated.",
+      );
+    }
+
+    if (isParserConfirmedFence(token)) {
+      if (
+        typeof token.xFenceSourceLength !== "number" ||
+        !Number.isSafeInteger(token.xFenceSourceLength) ||
+        token.xFenceSourceLength <= 0 ||
+        token.xFenceSourceLength > token.raw.length ||
+        typeof token.xFenceRemainingSourceLength !== "number" ||
+        !Number.isSafeInteger(token.xFenceRemainingSourceLength) ||
+        token.xFenceRemainingSourceLength <= 0 ||
+        token.xFenceRemainingSourceLength > parserSource.length
+      ) {
+        throw xCodeMappingError(
+          "x_code_block_source_mapping_failed",
+          "unrecognized_fence_token",
+          "A parser-confirmed X code block did not carry an exact source-boundary map. No transport text was generated.",
+        );
+      }
+      const tokenStartOffset = parserSource.length - token.xFenceRemainingSourceLength;
+      const span = mapParserConfirmedFence(
+        normalized,
+        layout,
+        tokenStartOffset,
+        sourceLineOffset,
+        spans.length + 1,
+      );
+      const mappedParserEnd = Math.min(
+        tokenStartOffset + token.xFenceSourceLength,
+        normalized.length,
+      );
+      if (mappedParserEnd !== span.sourceEndOffsetExclusive) {
+        throw xCodeMappingError(
+          "x_code_block_source_mapping_failed",
+          "fence_boundary_unmappable",
+          "A parser-confirmed X code block could not be mapped to the documented source boundary grammar. No transport text was generated.",
+        );
+      }
+      spans.push(span);
+      continue;
+    }
+    if (
+      containsNestedParserConfirmedFence(token.tokens) ||
+      containsNestedParserConfirmedFence(token.items)
+    ) {
+      throw xCodeMappingError(
+        "x_nested_code_block_mapping_unsupported",
+        "nested_fenced_code",
+        "A parser-confirmed fenced code block is nested inside Markdown quote/list structure, whose exact X placeholder mapping is not supported. Move the fence to the top level; no transport text was generated.",
+      );
+    }
+  }
+  return spans;
+}
+
+/**
+ * X tweet/thread/reply parser. Unlike the legacy shared parser used by Article
+ * and sibling channels, every transformed fence must be classified by marked
+ * and mapped to an exact top-level source span before it can be replaced.
+ */
+function parseXTransportMarkdown(md: string, sourceLineOffset = 0): ParsedDoc {
+  const normalized = md.replace(/\r\n?/g, "\n");
+  const lines = normalized.split("\n");
+  const lineOffset = Number.isFinite(sourceLineOffset)
+    ? Math.max(0, Math.trunc(sourceLineOffset))
+    : 0;
+  const spans = parserConfirmedXCodeSpans(normalized, lineOffset);
+  const spanByStartLine = new Map(spans.map((span) => [span.startLineIndex, span]));
+
+  let title = "";
+  let titleLineConsumed = false;
+  const bodyLines: string[] = [];
+  const proseLines: string[] = [];
+  const linkLines: string[] = [];
+  const proseOmissions: ProseOmissionFlag[] = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    const span = spanByStartLine.get(i);
+    if (span) {
+      bodyLines.push(...span.sourceLines);
+      proseLines.push(span.fidelityFlag.placeholder);
+      i = span.endLineIndex;
+      continue;
+    }
+
+    const line = lines[i] ?? "";
+    if (!titleLineConsumed) {
+      const h1 = line.match(/^#\s+(.+)$/);
+      if (h1) {
+        title = h1[1].trim();
+        titleLineConsumed = true;
+        proseOmissions.push({
+          kind: "title_heading",
+          source: line,
+          sourceLine: lineOffset + i + 1,
+          note: "Consumed as the document title and omitted from tweet/thread transport text.",
+        });
+        continue;
+      }
+      if (line.trim() && !title) {
+        title = line.trim();
+        titleLineConsumed = true;
+        proseLines.push(line);
+        continue;
+      }
+    }
+
+    bodyLines.push(line);
+    linkLines.push(line);
+    const isMetaPair = /^[A-Z][\w/]*(?: [\w/]+){0,2}:\s+\S/.test(line) && i < 8;
+    const isImageOnly = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line);
+    const isHeading = /^#{1,6}\s/.test(line);
+    if (isMetaPair || isImageOnly || isHeading) {
+      const kind: ProseOmissionFlag["kind"] = isMetaPair
+        ? "metadata_like"
+        : isImageOnly
+          ? "markdown_image"
+          : "section_heading";
+      const note = isMetaPair
+        ? "Matched the leading metadata-like Key: value heuristic and was omitted from tweet/thread transport text."
+        : isImageOnly
+          ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
+          : "Section headings are omitted from the tweet/thread prose stream.";
+      proseOmissions.push({ kind, source: line, sourceLine: lineOffset + i + 1, note });
+      continue;
+    }
+    proseLines.push(line);
+  }
+
+  const prose = proseLines.join("\n").trim();
+  const placeholders = Array.from(prose.matchAll(xCodePlaceholderRegex()), (match) => match[0]);
+  if (
+    placeholders.length !== spans.length ||
+    placeholders.some((placeholder, index) => placeholder !== spans[index]?.fidelityFlag.placeholder)
+  ) {
+    throw xCodeMappingError(
+      "x_code_block_placeholder_collision",
+      "reserved_placeholder_collision",
+      "Caller prose conflicts with the reserved X code-block placeholder syntax. Remove the literal placeholder text; no transport text was generated.",
+    );
+  }
+
+  return {
+    title: title || "Untitled",
+    body: bodyLines.join("\n").trim(),
+    prose,
+    codeFlags: spans.map((span) => span.codeFlag),
+    linkFlags: collectLinkFlags(linkLines.join("\n")),
+    proseOmissions,
+    codeFidelityFlags: spans.map((span) => span.fidelityFlag),
   };
 }
 
@@ -391,10 +894,11 @@ function packChunks(
     current = "";
   };
 
-  // Each piece is a non-whitespace run plus its exact following separator.
-  // This still prefers natural word boundaries, but concatenating the chunks
-  // after removing numbering reconstructs `prose` byte-for-byte.
-  const pieces = prose.match(/\S+\s*|\s+/gu) ?? [];
+  // Each piece is a non-whitespace run plus its exact following separator,
+  // except generated code placeholders: those stay atomic even though their
+  // fixed human-readable representation contains spaces. Concatenating chunks
+  // after removing numbering still reconstructs `prose` byte-for-byte.
+  const pieces = packingPieces(prose);
   for (const piece of pieces) {
     if (measure(current + piece) <= effective) {
       current += piece;
@@ -416,6 +920,23 @@ function packChunks(
   }
   flush();
   return chunks;
+}
+
+function packingPieces(prose: string): string[] {
+  const pieces: string[] = [];
+  let cursor = 0;
+  for (const match of prose.matchAll(xCodePlaceholderRegex())) {
+    const matchIndex = match.index;
+    if (matchIndex > cursor) {
+      pieces.push(...(prose.slice(cursor, matchIndex).match(/\S+\s*|\s+/gu) ?? []));
+    }
+    pieces.push(match[0]);
+    cursor = matchIndex + match[0].length;
+  }
+  if (cursor < prose.length) {
+    pieces.push(...(prose.slice(cursor).match(/\S+\s*|\s+/gu) ?? []));
+  }
+  return pieces;
 }
 
 /** Hard-slice an over-long token into <=limit weighted pieces without breaking graphemes. */
@@ -450,8 +971,16 @@ function hardSlice(token: string, limit: number, measure: TextMeasure): string[]
 // Optional LLM voice pass
 // ---------------------------------------------------------------------------
 
-async function maybeVoicePass(prose: string, opts: GenerateOptions): Promise<string> {
+async function maybeVoicePass(
+  prose: string,
+  opts: GenerateOptions,
+  protectedPlaceholders: readonly string[],
+): Promise<string> {
   if (!opts.voice) return prose;
+  // Voice rewriting cannot prove that a placeholder stayed at the exact
+  // source position described by its fidelity receipt. Keep the entire
+  // deterministic prose canonical whenever any code transform is present.
+  if (protectedPlaceholders.length > 0) return prose;
   const client =
     opts.voice.client ?? new (await import("../gemini.js")).GeminiClient();
   const prompt = [
@@ -470,7 +999,8 @@ async function maybeVoicePass(prose: string, opts: GenerateOptions): Promise<str
       opts.voice.thinkingLevel ?? ("minimal" as ThinkingLevel),
     );
     const trimmed = out.trim();
-    return trimmed || prose; // fall back to deterministic source if empty
+    if (!trimmed) return prose;
+    return xCodePlaceholderRegex().test(trimmed) ? prose : trimmed;
   } catch {
     // Voice pass is advisory — never fail generation on an LLM error.
     return prose;
@@ -481,6 +1011,45 @@ async function maybeVoicePass(prose: string, opts: GenerateOptions): Promise<str
 // Public API
 // ---------------------------------------------------------------------------
 
+function fidelityStartLine(flag: XContentFidelityFlag): number {
+  return flag.kind === "code_block" ? flag.sourceStartLine : flag.sourceLine;
+}
+
+function boundedEvidence(value: string | null, truncated: boolean): string {
+  if (value === null) return "none";
+  return `${JSON.stringify(value)}${truncated ? " (bounded prefix; truncated)" : ""}`;
+}
+
+function renderFidelityWarning(flag: XContentFidelityFlag): string {
+  if (flag.kind !== "code_block") {
+    return `Source line ${flag.sourceLine} (${flag.kind}) was omitted: ${JSON.stringify(flag.source)}. ${flag.note}`;
+  }
+  const lineLabel = flag.sourceStartLine === flag.sourceEndLine
+    ? `line ${flag.sourceStartLine}`
+    : `lines ${flag.sourceStartLine}-${flag.sourceEndLine}`;
+  return (
+    `Source ${lineLabel} (code_block) ${flag.sourceLineCount === 1 ? "was" : "were"} replaced by ${JSON.stringify(flag.placeholder)}; ` +
+    `fence=${flag.fence}, closure=${flag.closure}, lineCount=${flag.sourceLineCount}, ` +
+    `info=${boundedEvidence(flag.infoString, flag.infoStringTruncated)}, ` +
+    `preview=${boundedEvidence(flag.preview, flag.previewTruncated)}, ` +
+    `digestNormalization=${flag.digestNormalization}, ` +
+    `LF-normalized source sha256=${flag.normalizedSourceSha256}. ${flag.note}`
+  );
+}
+
+function renderFailureFidelityEvidence(flag: XContentFidelityFlag): string {
+  if (flag.kind !== "code_block") {
+    return `line ${flag.sourceLine} [${flag.kind}] ${JSON.stringify(flag.source)}: ${flag.note}`;
+  }
+  return (
+    `lines ${flag.sourceStartLine}-${flag.sourceEndLine} [code_block] ` +
+    `placeholder=${JSON.stringify(flag.placeholder)}, closure=${flag.closure}, ` +
+    `digest-normalization=${flag.digestNormalization}, ` +
+    `LF-normalized-source-sha256=${flag.normalizedSourceSha256}, ` +
+    `preview=${boundedEvidence(flag.preview, flag.previewTruncated)}: ${flag.note}`
+  );
+}
+
 /**
  * Generate X content from canonical base markdown. Deterministic except for the
  * optional voice pass (whose output is re-validated by the same deterministic
@@ -490,16 +1059,19 @@ export async function generateContent(
   md: string,
   opts: GenerateOptions,
 ): Promise<GeneratedContent> {
-  const parsed = parseBaseMarkdown(md, opts.sourceLineOffset ?? 0);
-  const fidelityFlags = opts.format === "article" ? [] : parsed.proseOmissions;
-  const warnings: string[] = fidelityFlags.map(
-    (flag) =>
-      `Source line ${flag.sourceLine} (${flag.kind}) was omitted: ${JSON.stringify(flag.source)}. ${flag.note}`,
-  );
+  const parsed = opts.format === "article"
+    ? parseBaseMarkdown(md, opts.sourceLineOffset ?? 0)
+    : parseXTransportMarkdown(md, opts.sourceLineOffset ?? 0);
+  const fidelityFlags: XContentFidelityFlag[] = opts.format === "article"
+    ? []
+    : [...parsed.proseOmissions, ...parsed.codeFidelityFlags]
+      .sort((left, right) => fidelityStartLine(left) - fidelityStartLine(right));
+  const warnings = fidelityFlags.map(renderFidelityWarning);
 
   const tweetLimit = opts.long ? opts.longLimit ?? TWEET_LIMIT_LONG : TWEET_LIMIT_DEFAULT;
 
-  const prose = await maybeVoicePass(parsed.prose, opts);
+  const protectedPlaceholders = parsed.codeFidelityFlags.map((flag) => flag.placeholder);
+  const prose = await maybeVoicePass(parsed.prose, opts, protectedPlaceholders);
 
   const base: GeneratedContent = {
     format: opts.format,
@@ -516,13 +1088,10 @@ export async function generateContent(
     } catch (error) {
       if (!(error instanceof LocalValidationError) || fidelityFlags.length === 0) throw error;
       const evidence = fidelityFlags
-        .map(
-          (flag) =>
-            `line ${flag.sourceLine} [${flag.kind}] ${JSON.stringify(flag.source)}: ${flag.note}`,
-        )
+        .map(renderFailureFidelityEvidence)
         .join("\n  ");
       throw new LocalValidationError(
-        `${error.message}\nSource fidelity evidence for omitted lines:\n  ${evidence}`,
+        `${error.message}\nSource fidelity evidence for transformations:\n  ${evidence}`,
         error.problem,
       );
     }

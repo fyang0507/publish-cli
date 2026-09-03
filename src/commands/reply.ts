@@ -875,6 +875,14 @@ export function registerReplyCommand(x: Command): void {
         "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or unterminated metadata exits 2.\n" +
         "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
         "  Inline --text is always literal and is never interpreted as frontmatter.\n" +
+        "\nReply code-block transport:\n" +
+        "  Every parser-confirmed top-level backtick/tilde fenced block becomes an exact numbered [code block #N → screenshot] placeholder in the reply or reply thread; #1 counts as 29 twitter-text weighted characters normally and 28 Unicode code points with --long.\n" +
+        "  Literal caller transport prose matching the reserved [code block #N → screenshot] syntax exits 2 locally before platform/state access; occurrences inside transformed code or an omitted heading do not collide.\n" +
+        "  Each replacement emits a screenshot advisory plus a code_block fidelity warning with its inclusive original line range, closure, bounded terminal-safe info/preview, and LF-normalized source SHA-256.\n" +
+        "  Openers/closers allow 0–3 leading spaces; a closer needs the same marker at least as long plus only trailing spaces or tabs. Backtick info cannot contain a backtick.\n" +
+        "  Mixed-marker pseudo-closers remain payload, and a valid unclosed top-level fence is transformed through end of input.\n" +
+        "  Indented/ordinary fence-like prose stays literal. Parser exceptions, unmappable source-token boundaries, and parser-confirmed quote/list-nested fences exit 2 locally with bounded evidence before platform/state access.\n" +
+        "  URLs inside transformed code are not link flags, and the optional voice pass is skipped when code is transformed. The CLI does not attach the required screenshot/image; add and verify it during human review.\n" +
         "\nReply target grammar:\n" +
         "  --to is exact: whitespace, BOM/control characters, and backslashes are rejected.\n" +
         "  A raw ID is 5–25 ASCII digits matching [1-9][0-9]{4,24}; leading zeroes are rejected.\n" +
