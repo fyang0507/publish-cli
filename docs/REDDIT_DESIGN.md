@@ -386,7 +386,7 @@ is trustworthy until run headful (`--inspect`) against real Reddit.
   (and `draft` preflight) headful to skip the doomed headless attempt on hosts whose
   fingerprint Reddit 403-blocks (see §3.3). Unset by default.
 - `DataPaths`: `redditProfileDir` (`<baseDir>/reddit-profile`), `redditCookieCache`
-  (`<baseDir>/reddit-cookies.json`) — machine-local, **off Google Drive**, same
+  (`<baseDir>/reddit-cookies.json`) — machine-local, **off cloud-synced storage**, same
   posture as the X/LinkedIn profiles. `mkdirSync` the profile like the others.
 - No `watch.yaml` changes (publish-only). No change to
   `scripts/install-agent-skills.js` (Reddit lives inside the existing

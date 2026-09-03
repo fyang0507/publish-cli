@@ -1,67 +1,62 @@
-# Reddit channel — handoff (updated 2026-07-04: LIVE-VERIFIED ✅)
+# Reddit channel — historical handoff (last updated 2026-07-04)
 
-Self-contained pickup notes. Read this, then
-[REDDIT_DESIGN.md](./REDDIT_DESIGN.md) for the full design.
+These are historical implementation and live-verification notes. Before current
+Reddit work, run `publish reddit info --json`; that native response owns channel
+capabilities, authentication, readiness, recovery, and stop conditions. Use
+action-level `--help` for flags, [README.md](../README.md) for setup, and
+[REDDIT_DESIGN.md](./REDDIT_DESIGN.md) only for architectural history.
 
 ## TL;DR
 
-A **browser-driven** Reddit PUBLISH channel (`publish reddit inspect | search |
-draft`, self-posts only, **draft-only, never posts**) is **implemented and
-LIVE-VERIFIED end-to-end** on branch `worktree-reddit-channel-design` (PR #27).
+A browser-driven Reddit implementation (`publish reddit inspect | search |
+draft`) was exercised through a private self-post draft in July 2026. This dated
+evidence does not establish current readiness or behavior; use the native `info`
+response for the current contract.
 
 **2026-07-03 live verification (headful, operator solved the login captcha):**
-- `reddit search` + logged-out `reddit inspect codex` return **real data**.
-- Credential login succeeds + persists; a **real `reddit draft` to r/codex stages
-  a native PRIVATE draft** (login → preflight → title/body → flair → Save Draft),
-  confirmed in Reddit Drafts, **nothing posted**. The delete path also works
-  (test drafts cleaned up).
+- `reddit search` and logged-out `reddit inspect codex` returned live data.
+- Credential login succeeded and persisted into the dated follow-up. A
+  `reddit draft` flow to r/codex filled the private composer and used Save Draft;
+  the session observed the test draft in Reddit Drafts, then removed it. Nothing
+  was posted.
 - Several selectors were **live-calibrated** against Reddit's new
   `<shreddit-composer>` (see commit `ec82f72`): `loggedInSignal`, the flair-list
   endpoint, the body editor, and the flair modal.
 
-**Markdown mode — now works reliably (item #2 DONE, live-verified 2026-07-04):**
-the "Switch to Markdown" control is an `rpl-menu-item[role=menuitem]` inside the
-body toolbar's "…" (More options) overflow — NOT a `<button>` (the only matching
-`<button aria-label>` is a permanently-hidden responsive copy). `stageDraft` now
-matches it by role/text, confirms the switch engaged (the reverse toggle becomes
-"Switch to Rich Text Editor" / a Markdown `<textarea>` appears), and types the body
-into that `<textarea>`, so a normal draft is staged **in Markdown mode and renders
-correctly**. The advisory to flip "… → Switch to Markdown" manually now fires ONLY
-in the rare case the switch genuinely can't engage — a fallback, no longer the
-expected outcome.
+**Markdown mode — observed working on 2026-07-04:** the session found "Switch to
+Markdown" as an `rpl-menu-item[role=menuitem]` inside the body toolbar's More
+options menu rather than the visible button assumed by the earlier selector. At
+that revision, `stageDraft` selected the menu item, checked for the reverse Rich
+Text toggle or a Markdown textarea, and filled the textarea. The observed draft
+was staged in Markdown mode and rendered as expected. The manual-switch advisory
+was a fallback at that revision. The native `info` response owns the current
+contract and recovery guidance.
 
-Note (reads, item #4 DONE, live-verified 2026-07-04): on some networks/machines
-Reddit 403-blocks headless Chrome's fingerprint (a non-JSON "network security"
-wall) on the read path. Reads are **login-free**, so `inspect`/`search` now
-**auto-retry headful once** on a block (with an advisory note), and
-`REDDIT_READS_HEADFUL=1` starts them headful to skip the doomed first attempt
-(leave unset on headless-server / good-fingerprint hosts). This is distinct from the
-one-time first **login**, which still needs headful `--inspect` (captcha) and is a
-setup-stage cost only. Draft **staging still runs headless** on the persisted
-session cookie; the never-posts boundary is unchanged.
+**Headless-read observation (2026-07-04):** some tested environments returned a
+non-JSON network-security response to headless reads. The dated revision added
+one headful retry and an environment override. This is historical behavior, not
+current readiness, login, or recovery guidance.
 
-## Where things live
+## Current sources
 
-- **Branch / worktree:** `worktree-reddit-channel-design` at
-  `.claude/worktrees/reddit-channel-design` (this dir). **PR #27** (draft).
-- **Design doc:** `REDDIT_DESIGN.md` (9 sections; authoritative).
-- **Memory:** `~/.claude/projects/…/memory/reddit-channel-browser-driven.md`
-  (why browser not API; live-calibrated facts; IP-ban caution).
+- **Channel contract and readiness:** `publish reddit info --json`.
+- **Command flags:** `publish reddit inspect --help`, `publish reddit search
+  --help`, and `publish reddit draft --help`.
+- **Setup and examples:** [README.md](../README.md) and the checked-in
+  `.env.example`.
+- **Architecture history:** [REDDIT_DESIGN.md](./REDDIT_DESIGN.md).
 
 ## Architecture decision (important context)
 
-Originally designed against Reddit's official **OAuth API** (per
-PRODUCT_SPEC §2.2 / LINKEDIN_DESIGN §3.1). We **reversed to browser-driven**
-because Reddit's external app creation is now gated behind the Responsible
-Builder Policy → **Developer Platform (Devvit)** onboarding (`npm create
-devvit@latest`, apps that run *inside* Reddit) and requires a **dedicated bot
-account** — it never issues external `client_id`/`client_secret` for a CLI. So
-the channel mirrors X/LinkedIn: persistent Playwright profile, operator logs in
-**as themselves**, drafts land in **their own** Reddit Drafts. Full rationale in
-REDDIT_DESIGN.md §3.1. **Do not re-attempt the API path** unless Reddit reopens a
-non-Devvit external OAuth flow.
+The initial design considered Reddit's OAuth API (PRODUCT_SPEC §2.2 /
+LINKEDIN_DESIGN §3.1). Research recorded in July 2026 found external app creation
+routed through Responsible Builder Policy and Developer Platform onboarding,
+which did not provide the external credentials needed by the CLI design. The
+dated implementation therefore selected a persistent Playwright profile. See
+REDDIT_DESIGN.md §3.1 for that historical rationale; use native `info` for the
+current transport and platform guidance.
 
-## What's implemented (all new/edited, committed)
+## Implementation snapshot recorded in July 2026
 
 | File | Purpose |
 |---|---|
@@ -73,84 +68,56 @@ non-Devvit external OAuth flow.
 | `src/cli.ts`, `src/config.ts`, `.env.example` | wiring: reddit group; `REDDIT_*` creds + `reddit-profile`/`reddit-cookies` in `dataPaths()` |
 | `skills/publish/SKILL.md`, `AGENTS.md`, `README.md` | docs registrations |
 
-## Verified ✅ (locally)
+## Local evidence recorded in July 2026
 
-- `npx tsc --noEmit` green; `npm run build` ok.
-- All `--help` render; `reddit` group wired.
-- `reddit draft --dry-run` is **browser-free and needs no creds** (keeps Markdown
-  verbatim). A prior bug where dry-run launched the browser was fixed.
-- **Never-posts boundary** confirmed in code: Post appears only as a documented
-  forbidden selector; "Save Draft" is the sole save path + bail safeguard.
-- **Block-handling** verified against the live 403 wall: `inspect`/`search` report
-  `✗ … blocked or unreachable — HTTP 403 …` and exit 1 (no hollow/fake data).
+- `npx tsc --noEmit` and `npm run build` completed successfully.
+- The dated `--help` checks rendered and the `reddit` group was wired.
+- `reddit draft --dry-run` stayed browser-free in the dated test and preserved
+  Markdown verbatim. A prior bug where dry-run launched the browser was fixed.
+- The code review found Post only in a documented forbidden selector, with Save
+  Draft as the exercised save path and a bail safeguard.
+- The dated 403 test made `inspect` and `search` report the block and exit 1
+  instead of returning placeholder data.
 - Login selectors, hosts (old.reddit vs www), `page.goto` transport, and the
   `post_requirements` USER_REQUIRED-envelope fix were **live-calibrated** against
-  real Reddit *before* the IP ban (see REDDIT_DESIGN §3.3 / memory).
+  real Reddit during the dated verification (see REDDIT_DESIGN §3.3).
 
-## Outstanding ❌ (the actual next task)
+## Historical network caveat
 
-Real-data live verification — none of this has run against live data yet:
-1. `reddit search "…"` returns real candidate subreddits.
-2. `reddit inspect codex` returns real subscribers/rules + verdict; logged-out it
-   should show flairs/post_requirements as "requires login (validated at draft
-   time)". Logged-in it should show the real flair list + requirements.
-3. **Headful login** succeeds and persists a session (captcha, human-solved).
-4. A real `reddit draft` against **r/codex** stages a native draft (verify it
-   lands in Drafts, is private, never posted) and the **eligibility-block path**
-   (karma/age → plain "can't post to r/codex: <reason>") behaves.
-5. Calibrate any drifted composer/`loggedInSignal` selectors found during (3)/(4).
+One July 2026 verification environment received Reddit's non-JSON HTTP 403
+network-security wall after repeated probes. That observation is historical, not
+a statement about the current operator or network. If the native readiness or a
+read command reports the wall, stop instead of looping or treating it as proof of
+logout.
 
-## ⚠️ Blocker: this machine's IP is Reddit-banned
+## Reproduce verification safely
 
-On 2026-07-02 an investigation subagent probed Reddit too aggressively and tripped
-its **network ban**: every endpoint (www + old.reddit) returns HTTP 403 with a
-non-JSON "You've been blocked by network security" wall. This blocks **reads AND
-login** from this machine until it lifts (IP-level, usually temporary — hours).
-
-**Lesson for the fresh agent: rate-limit ALL live Reddit calls hard** — a handful,
-several seconds apart. Do not loop/burst. The code already backs off + surfaces
-`RedditReadBlockedError`; if you see the 403 wall, STOP and wait, don't retry in a
-loop (that prolongs the ban).
-
-## How to finish (fresh-agent runbook)
-
-Preconditions: Reddit reachable again (ban lifted, or use a **different network /
-VPN / hotspot**). No 2FA on the operator's account (confirmed).
-
-1. **Creds.** They live in the **main checkout's** `.env`
-   (`/Users/fredy/Google Drive/My Drive/Projects/publish-cli/.env`), NOT the
-   worktree. To run from the worktree, copy the two keys in without printing them:
+1. **Create checkout-local configuration without exposing another workspace.**
+   From this repository root, initialize the ignored `.env` once, then use a
+   private editor to replace only the needed `REDDIT_*` placeholders. Never print,
+   pipe, or commit credential values.
+   ```bash
+   test -f .env || cp .env.example .env
    ```
-   grep '^REDDIT_' "/Users/fredy/Google Drive/My Drive/Projects/publish-cli/.env" >> .env
+   `PUBLISH_DATA_DIR` owns machine-local profiles and cookie caches; leave it
+   unset for the documented default or set it to an operator-chosen absolute path
+   outside this repository and cloud-synced storage. `PUBLISH_DATA_REPO` owns the
+   first data-workspace override; resolution then checks
+   `publish.config.dev.yaml`, followed by a `.agents/workspace.yaml` walk-up.
+2. **Build and load the owned contract and help.**
+   ```bash
+   npm run build
+   node dist/cli.js reddit info --json
+   node dist/cli.js reddit draft --help
    ```
-   (worktree `.env` is gitignored). Keys: `REDDIT_USERNAME`, `REDDIT_PASSWORD`
-   (`REDDIT_EMAIL` only if an email challenge appears).
-2. **Build:** `npm run build`.
-3. **Verify reads FIRST (unauthenticated, no login), rate-limited:**
+3. **Exercise the local-only path before any separately authorized live check.**
+   ```bash
+   node dist/cli.js reddit draft --subreddit codex --title "test" --text "hello from publish-cli" --dry-run
    ```
-   node dist/cli.js reddit search "ai agents" --limit 5
-   node dist/cli.js reddit inspect codex
-   ```
-   Expect real data; logged-out inspect noting flair/post_requirements need login
-   is correct, not a bug. If 403 wall → still banned; stop and wait.
-4. **Headful login (HUMAN — captcha; an agent cannot do this):** ask the operator
-   to run and solve the captcha:
-   ```
-   ! node dist/cli.js reddit inspect codex --inspect
-   ```
-   This persists the session in the machine-local `reddit-profile`. Calibrate
-   `REDDIT_LOGIN_SELECTORS` / `loggedInSignal` in `src/reddit/session.ts` if login
-   auto-fill misbehaves (selectors are best-effort; see REDDIT_DESIGN §9).
-5. **Verify draft (now logged-in):**
-   ```
-   node dist/cli.js reddit draft --subreddit codex --title "test" --text "hello from publish-cli" --dry-run   # local-only validation; no browser/live contract
-   node dist/cli.js reddit draft --subreddit codex --title "test" --text "hello from publish-cli"              # stages a native DRAFT (never posts)
-   ```
-   Then confirm on reddit.com that a **private draft** was created and nothing was
-   posted. Exercise the eligibility path (r/codex may gate on karma → expect a
-   plain "can't post to r/codex: …").
-6. Calibrate any drifted composer selectors in `src/reddit/draftPoster.ts`
-   (`REDDIT_COMPOSER_SELECTORS`), rebuild, re-verify. Commit + push to PR #27.
+4. For an authorized live verification, follow the current native `info`
+   recovery and stop conditions. Rate-limit reads, keep any login/CAPTCHA or
+   other challenge human-controlled, and verify the native saved draft without
+   crossing the final-publication boundary.
 
 ## Guardrails (do not break)
 
@@ -158,6 +125,6 @@ VPN / hotspot**). No 2FA on the operator's account (confirmed).
   comment-only forbidden selector; keep the Save-Draft bail safeguard.
 - **Reuse by import, don't edit X/LinkedIn** — Reddit imports `../x/content.ts`
   and `../x/draftPoster.ts` primitives + `../commands/contentInput.ts`.
-- **Machine-local state off Google Drive** — profiles/cookies live under
+- **Machine-local state off cloud-synced storage** — profiles/cookies live under
   `~/.publish-cli` (PUBLISH_DATA_DIR); never commit `.env`.
 - **Verify live before claiming a flow works** (AGENTS.md) — but rate-limit.

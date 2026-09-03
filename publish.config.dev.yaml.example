@@ -2,7 +2,8 @@
 #
 # publish-cli writes its durable dedupe DB to `<data_repo_path>/.publish-cli/` and
 # copies the shipped skills into `<data_repo_path>/.agents/skills/`.
-# Relative paths resolve from this config file, so sibling checkouts can use ../fred-agent.
+# Relative paths resolve from this config file, so a sibling workspace can use
+# ../your-agent-workspace.
 #
 # Resolution order (see src/dataRepo.ts): PUBLISH_DATA_REPO env var → this file →
 # walk up from cwd for `.agents/workspace.yaml`. Alternatively just set
