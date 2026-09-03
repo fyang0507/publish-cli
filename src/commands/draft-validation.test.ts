@@ -93,7 +93,7 @@ function runCli(
   fixture: CliFixture,
   args: string[],
   input?: string,
-  options: { allowReplyDryRunDatabase?: boolean; cwd?: string } = {},
+  options: { allowReplyDryRunDatabase?: boolean; cwd?: string; wechatAuthor?: string } = {},
 ): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, ["--import", fixture.loaderPath, CLI_PATH, ...args], {
     encoding: "utf8",
@@ -104,6 +104,9 @@ function runCli(
       PUBLISH_DATA_DIR: fixture.dataDir,
       PUBLISH_DATA_REPO: fixture.repoDir,
       PUBLISH_TEST_ALLOW_REPLY_DRY_RUN_DATABASE: options.allowReplyDryRunDatabase ? "1" : "0",
+      // Keep WeChat author tests independent of the invoking shell and any
+      // checkout-local .env. Individual cases opt into a concrete fallback.
+      WECHAT_AUTHOR: options.wechatAuthor ?? "",
     },
   });
 }
@@ -641,6 +644,121 @@ test("WeChat file/stdin frontmatter is normalized while inline text remains lite
   }
 });
 
+test("WeChat CLI honors flag, frontmatter, environment, and empty author precedence", () => {
+  const fixture = createFixture();
+  try {
+    const cover = join(fixture.dir, "wechat-author-cover.png");
+    const file = join(fixture.dir, "wechat-author.md");
+    const blankFile = join(fixture.dir, "wechat-author-blank.md");
+    const nonStringFile = join(fixture.dir, "wechat-author-number.md");
+    writeFileSync(cover, png(900, 900));
+    writeFileSync(file, "---\nauthor: Metadata Author\n---\nBody");
+    writeFileSync(blankFile, "---\nauthor: \"   \"\n---\nBody");
+    writeFileSync(nonStringFile, "---\nauthor: 42\n---\nBody");
+
+    const flagWins = runCli(
+      fixture,
+      [
+        "wechat", "draft", "--from", file, "--title", "Title", "--cover", cover,
+        "--author", "  Flag Author  ", "--dry-run",
+      ],
+      undefined,
+      { wechatAuthor: "Environment Author" },
+    );
+    assert.equal(flagWins.status, 0, output(flagWins));
+    assert.match(flagWins.stdout, /^author: Flag Author$/m);
+    assert.doesNotMatch(output(flagWins), /Metadata Author|Environment Author|PLATFORM_IMPORT_BLOCKED/);
+
+    for (const supplied of ["", "   "]) {
+      const flagClears = runCli(
+        fixture,
+        [
+          "wechat", "draft", "--from", file, "--title", "Title", "--cover", cover,
+          "--author", supplied, "--dry-run",
+        ],
+        undefined,
+        { wechatAuthor: "Environment Author" },
+      );
+      assert.equal(flagClears.status, 0, output(flagClears));
+      assert.match(flagClears.stdout, /^author: \(none\)$/m);
+      assert.doesNotMatch(output(flagClears), /Metadata Author|Environment Author|PLATFORM_IMPORT_BLOCKED/);
+    }
+
+    const metadataWins = runCli(
+      fixture,
+      ["wechat", "draft", "--from", file, "--title", "Title", "--cover", cover, "--dry-run"],
+      undefined,
+      { wechatAuthor: "Environment Author" },
+    );
+    assert.equal(metadataWins.status, 0, output(metadataWins));
+    assert.match(metadataWins.stdout, /^author: Metadata Author$/m);
+    assert.doesNotMatch(output(metadataWins), /Environment Author|PLATFORM_IMPORT_BLOCKED/);
+
+    for (const sourcePath of [blankFile, nonStringFile]) {
+      const environmentWins = runCli(
+        fixture,
+        ["wechat", "draft", "--from", sourcePath, "--title", "Title", "--cover", cover, "--dry-run"],
+        undefined,
+        { wechatAuthor: "  Environment Author  " },
+      );
+      assert.equal(environmentWins.status, 0, output(environmentWins));
+      assert.match(environmentWins.stdout, /^author: Environment Author$/m);
+      assert.doesNotMatch(output(environmentWins), /author: 42|PLATFORM_IMPORT_BLOCKED/);
+    }
+
+    const stdinMetadata = runCli(
+      fixture,
+      ["wechat", "draft", "--from", "-", "--title", "Title", "--cover", cover, "--dry-run"],
+      "---\nauthor: Stdin Author\n---\nStdin body",
+      { wechatAuthor: "Environment Author" },
+    );
+    assert.equal(stdinMetadata.status, 0, output(stdinMetadata));
+    assert.match(stdinMetadata.stdout, /^author: Stdin Author$/m);
+    assert.doesNotMatch(output(stdinMetadata), /Environment Author|PLATFORM_IMPORT_BLOCKED/);
+
+    const stdinEnvironment = runCli(
+      fixture,
+      ["wechat", "draft", "--from", "-", "--title", "Title", "--cover", cover, "--dry-run"],
+      "---\nauthor: \"   \"\n---\nStdin body",
+      { wechatAuthor: "  Environment Author  " },
+    );
+    assert.equal(stdinEnvironment.status, 0, output(stdinEnvironment));
+    assert.match(stdinEnvironment.stdout, /^author: Environment Author$/m);
+    assert.doesNotMatch(output(stdinEnvironment), /PLATFORM_IMPORT_BLOCKED/);
+
+    const inlineLiteral = runCli(
+      fixture,
+      [
+        "wechat", "draft", "--text", "---\nauthor: Literal Body Author\n---\nInline body",
+        "--title", "Title", "--cover", cover, "--dry-run",
+      ],
+      undefined,
+      { wechatAuthor: "Environment Author" },
+    );
+    assert.equal(inlineLiteral.status, 0, output(inlineLiteral));
+    assert.match(inlineLiteral.stdout, /^author: Environment Author$/m);
+    assert.match(inlineLiteral.stdout, /author: Literal Body Author/);
+    assert.doesNotMatch(output(inlineLiteral), /PLATFORM_IMPORT_BLOCKED/);
+
+    for (const configured of ["", "   "]) {
+      const emptyFallback = runCli(
+        fixture,
+        ["wechat", "draft", "--text", "Body", "--title", "Title", "--cover", cover, "--dry-run"],
+        undefined,
+        { wechatAuthor: configured },
+      );
+      assert.equal(emptyFallback.status, 0, output(emptyFallback));
+      assert.match(emptyFallback.stdout, /^author: \(none\)$/m);
+      assert.doesNotMatch(output(emptyFallback), /PLATFORM_IMPORT_BLOCKED/);
+    }
+
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
 test("malformed WeChat mapping frontmatter exits 2 before artifacts, assets, state, or API imports", () => {
   const fixture = createFixture();
   try {
@@ -667,13 +785,16 @@ test("malformed WeChat mapping frontmatter exits 2 before artifacts, assets, sta
         const result = runCli(fixture, [
           "wechat", "draft", "--from", sourcePath, "--out", outPath,
           ...(dryRun ? ["--dry-run"] : []),
-        ]);
+        ], undefined, { wechatAuthor: "ENV_AUTHOR_SECRET_SENTINEL_66" });
         assert.equal(result.status, 2, output(result));
         assert.equal(result.signal, null, output(result));
         assert.equal(result.stdout, "");
         assert.match(output(result), evidence);
         assert.match(output(result), new RegExp(sourcePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-        assert.doesNotMatch(output(result), /workflow-secret|Visible body|PLATFORM_IMPORT_BLOCKED/);
+        assert.doesNotMatch(
+          output(result),
+          /workflow-secret|Visible body|ENV_AUTHOR_SECRET_SENTINEL_66|PLATFORM_IMPORT_BLOCKED/,
+        );
         if (dryRun) {
           assert.equal(readFileSync(outPath, "utf8"), "sentinel: do not overwrite");
         } else {
@@ -682,18 +803,32 @@ test("malformed WeChat mapping frontmatter exits 2 before artifacts, assets, sta
       }
     }
 
-    const malformedStdinOut = join(fixture.dir, "malformed-stdin.html");
-    const malformedStdin = runCli(
-      fixture,
-      ["wechat", "draft", "--from", "-", "--out", malformedStdinOut, "--dry-run"],
-      "\ufeff---\rtitle: Hidden\rprivate: stdin-secret\rowner: [broken\r---\rBody",
-    );
-    assert.equal(malformedStdin.status, 2, output(malformedStdin));
-    assert.equal(malformedStdin.stdout, "");
-    assert.match(output(malformedStdin), /stdin \(--from -\): leading frontmatter is malformed YAML/);
-    assert.match(output(malformedStdin), /actual: malformed_yaml; expected: a valid YAML mapping/);
-    assert.doesNotMatch(output(malformedStdin), /stdin-secret|Body|PLATFORM_IMPORT_BLOCKED/);
-    assert.equal(existsSync(malformedStdinOut), false);
+    for (const dryRun of [false, true]) {
+      const malformedStdinOut = join(fixture.dir, `malformed-stdin-${dryRun ? "dry" : "real"}.html`);
+      if (dryRun) writeFileSync(malformedStdinOut, "sentinel: do not overwrite");
+      const malformedStdin = runCli(
+        fixture,
+        [
+          "wechat", "draft", "--from", "-", "--out", malformedStdinOut,
+          ...(dryRun ? ["--dry-run"] : []),
+        ],
+        "\ufeff---\rtitle: Hidden\rprivate: stdin-secret\rowner: [broken\r---\rBody",
+        { wechatAuthor: "STDIN_ENV_AUTHOR_SECRET_SENTINEL_66" },
+      );
+      assert.equal(malformedStdin.status, 2, output(malformedStdin));
+      assert.equal(malformedStdin.stdout, "");
+      assert.match(output(malformedStdin), /stdin \(--from -\): leading frontmatter is malformed YAML/);
+      assert.match(output(malformedStdin), /actual: malformed_yaml; expected: a valid YAML mapping/);
+      assert.doesNotMatch(
+        output(malformedStdin),
+        /stdin-secret|Body|STDIN_ENV_AUTHOR_SECRET_SENTINEL_66|PLATFORM_IMPORT_BLOCKED/,
+      );
+      if (dryRun) {
+        assert.equal(readFileSync(malformedStdinOut, "utf8"), "sentinel: do not overwrite");
+      } else {
+        assert.equal(existsSync(malformedStdinOut), false);
+      }
+    }
 
     const literalMalformed = runCli(
       fixture,

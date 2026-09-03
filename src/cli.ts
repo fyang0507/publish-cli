@@ -13,6 +13,7 @@ import { registerWechatCheckCommand } from "./commands/wechat-check.js";
 import { registerWechatDraftCommand } from "./commands/wechat-draft.js";
 import { registerAuthCheckCommand } from "./commands/auth-check.js";
 import { registerChannelInfoCommand } from "./commands/channel-info.js";
+import { getWechatAuthorFallback } from "./config.js";
 
 const program = new Command();
 
@@ -96,7 +97,7 @@ registerChannelInfoCommand(wechat, "wechat");
 registerWechatCheckCommand(wechat);
 
 // --- draft: owned-content publisher (native WeChat article drafts, never posts) ---
-registerWechatDraftCommand(wechat);
+registerWechatDraftCommand(wechat, getWechatAuthorFallback);
 
 // Downstream channel contracts intentionally begin with truthful discovery only.
 // #35 owns Xiaohongshu execution details; #37 owns the 1point3acres handoff.

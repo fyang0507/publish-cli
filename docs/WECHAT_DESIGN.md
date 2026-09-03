@@ -108,10 +108,12 @@ Reddit exposes `inspect` / `search` / `draft`.
 New channel group in `src/cli.ts`, mirroring `x` / `linkedin` / `reddit`:
 
 ```ts
+import { getWechatAuthorFallback } from "./config.js";
+
 const wechat = program.command("wechat")
   .description("WeChat Official Account channel: check (credentials/IP) + draft (native article drafts, never posts)");
 registerWechatCheckCommand(wechat);
-registerWechatDraftCommand(wechat);
+registerWechatDraftCommand(wechat, getWechatAuthorFallback);
 ```
 
 **`check` — verify credentials + token + IP allowlist (travel-aware).**
@@ -453,7 +455,7 @@ among the consumers (no code change — the resolver is already channel-agnostic
 | `src/wechat/content.ts` | `generateArticle` — normalized markdown plus parsed metadata → `{title, author, digest, html, coverPath, sourceUrl, bodyImages[], linkFlags, warnings[]}`. Reuses `parseBaseMarkdown` from `src/x/content.ts`; adds the `marked`-based inline-style renderer + link→citation transform. Deterministic, no LLM. |
 | `src/wechat/draft.ts` | Orchestration ("poster" analog, no browser): upload cover + body images via `client.ts`, rewrite `<img>` srcs, assemble + send the `draft/add` payload. |
 | `src/commands/wechat-check.ts` | `publish wechat check` — credential + token + IP-allowlist preflight through the configured egress (reports the IP the API actually sees; travel-aware `40164`). |
-| `src/commands/wechat-draft.ts` | `publish wechat draft` command body; resolves content and classifies file/stdin frontmatter through the shared seam before generation. |
+| `src/commands/wechat-draft.ts` | `publish wechat draft` command body; resolves content and classifies file/stdin frontmatter through the shared seam before invoking the injected, config-owned author fallback and starting generation. |
 
 **Edits:** `src/cli.ts` (register the `wechat` group), `src/config.ts` (env +
 `wechatTokenCache`), `src/commands/contentInput.ts` (docstring), `.env.example`,

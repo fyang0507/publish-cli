@@ -51,14 +51,59 @@ interface WechatDraftOptions extends ContentInputOptions {
   dryRun?: boolean; // --dry-run => opts.dryRun
 }
 
-export function registerWechatDraftCommand(parent: Command): void {
+export type WechatAuthorFallbackResolver = () => string;
+
+export interface ResolvedWechatDraftInput {
+  markdown: string;
+  frontmatter: Record<string, unknown>;
+  baseDir: string;
+  authorFallback: string;
+}
+
+/**
+ * Resolve and classify caller content before consulting the configured author
+ * fallback. Keeping that final lookup injectable makes the ordering explicit:
+ * malformed file/stdin frontmatter throws without touching the new fallback
+ * seam, while inline text remains literal.
+ */
+export function resolveWechatDraftInput(
+  opts: ContentInputOptions,
+  resolveAuthorFallback: WechatAuthorFallbackResolver,
+): ResolvedWechatDraftInput {
+  const input = resolveContentInputDetails(opts);
+  let markdown = input.markdown;
+  let frontmatter: Record<string, unknown> = {};
+  const baseDir = input.sourcePath ? dirname(input.sourcePath) : process.cwd();
+  if (input.kind !== "text") {
+    const sourceName = input.kind === "stdin"
+      ? "stdin (--from -)"
+      : (input.sourcePath ?? "--from input");
+    const split = splitLeadingFrontmatter(markdown, sourceName, {
+      policy: "mapping-only",
+      preserveBodyLineEndings: true,
+    });
+    markdown = split.body;
+    frontmatter = split.data;
+  }
+  return {
+    markdown,
+    frontmatter,
+    baseDir,
+    authorFallback: resolveAuthorFallback(),
+  };
+}
+
+export function registerWechatDraftCommand(
+  parent: Command,
+  resolveAuthorFallback: WechatAuthorFallbackResolver,
+): void {
   parent
     .command("draft")
     .description("Stage a NATIVE WeChat article draft from inline text or a markdown file — never publishes")
     .option("--from <base.md>", "Canonical markdown ('-' = stdin); accepts leading WeChat YAML mapping metadata")
     .option("--text <content>", "Literal inline body; leading --- is content (exactly one of --text / --from)")
     .option("--title <title>", "Article title (documented ≤32 字; exact measurement is server-authoritative)")
-    .option("--author <name>", "Article author (or from file/stdin frontmatter / WECHAT_AUTHOR)")
+    .option("--author <name>", "Article author; explicit value (including blank) overrides frontmatter / WECHAT_AUTHOR")
     .option("--digest <summary>", "Digest 摘要 (documented ≤120 字; omit to let WeChat derive the first 54 字)")
     .option("--cover <image>", "Cover image path — required (or from file/stdin frontmatter coverImage/cover/image)")
     .option("--source-url <url>", "阅读原文 link (or from file/stdin frontmatter sourceUrl/contentSourceUrl/source_url)")
@@ -75,27 +120,15 @@ export function registerWechatDraftCommand(parent: Command): void {
         "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or\n" +
         "  unterminated metadata exits 2 before --out, token, upload, or API access.\n" +
         "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart\n" +
-        "  from a leading transport BOM. Inline --text is always literal.\n",
+        "  from a leading transport BOM. Inline --text is always literal.\n" +
+        "\nAuthor precedence:\n" +
+        "  Explicit --author (blank or whitespace intentionally clears) > nonblank string\n" +
+        "  file/stdin frontmatter author > trimmed WECHAT_AUTHOR > empty.\n",
     )
     .action(async (opts: WechatDraftOptions) => {
-      let md: string;
-      let frontmatter: Record<string, unknown> = {};
-      let baseDir = process.cwd();
+      let input: ResolvedWechatDraftInput;
       try {
-        const input = resolveContentInputDetails(opts);
-        md = input.markdown;
-        baseDir = input.sourcePath ? dirname(input.sourcePath) : process.cwd();
-        if (input.kind !== "text") {
-          const sourceName = input.kind === "stdin"
-            ? "stdin (--from -)"
-            : (input.sourcePath ?? "--from input");
-          const split = splitLeadingFrontmatter(md, sourceName, {
-            policy: "mapping-only",
-            preserveBodyLineEndings: true,
-          });
-          md = split.body;
-          frontmatter = split.data;
-        }
+        input = resolveWechatDraftInput(opts, resolveAuthorFallback);
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);
@@ -108,17 +141,18 @@ export function registerWechatDraftCommand(parent: Command): void {
       // or cover — a usage error (exit 2), same tier as resolveContentInput.
       let article: GeneratedArticle;
       try {
-        article = generateArticle(md, {
+        article = generateArticle(input.markdown, {
           title: opts.title,
           author: opts.author,
+          authorFallback: input.authorFallback,
           digest: opts.digest,
           // A --cover flag is relative to the invocation CWD (resolved here); a
           // frontmatter coverImage is relative to the markdown dir (baseDir, below).
           cover: opts.cover ? resolve(opts.cover) : undefined,
           sourceUrl: opts.sourceUrl,
-          frontmatter,
+          frontmatter: input.frontmatter,
           keepLinks: opts.keepLinks,
-          baseDir,
+          baseDir: input.baseDir,
         });
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
