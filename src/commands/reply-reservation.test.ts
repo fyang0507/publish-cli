@@ -19,7 +19,11 @@ import {
 } from "./reply.js";
 import type { GeneratedContent } from "../x/content.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
-import type { XDraftRowEvidence } from "../x/saveProgress.js";
+import {
+  xReplyTargetEvidenceNotChecked,
+  type XDraftRowEvidence,
+  type XReplyTargetEvidence,
+} from "../x/saveProgress.js";
 
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RECOVERY_FLAG = "--recover-stale-reservation-after-confirming-no-draft";
@@ -112,6 +116,22 @@ function rowEvidence(verified: boolean): XDraftRowEvidence {
       };
 }
 
+function targetEvidence(targetTweetId: string, verified: boolean): XReplyTargetEvidence {
+  return verified
+    ? {
+        status: "verified",
+        method: "same_content_row_target_id",
+        scope: "current_save_attempt",
+        requestedTargetId: targetTweetId,
+        rowBinding: "same_content_matched_draft",
+        targetMatch: "exact",
+        targetContextCount: 1,
+        distinctStatusIdCount: 1,
+        reason: "exact_requested_target",
+      }
+    : xReplyTargetEvidenceNotChecked(targetTweetId);
+}
+
 function stageResult(targetTweetId: string, verified = true): StageReplyResult {
   return {
     format: "tweet",
@@ -119,6 +139,7 @@ function stageResult(targetTweetId: string, verified = true): StageReplyResult {
     saveMechanism: "composer_close_save",
     savePhase: verified ? "verified" : "save_delivered_unverified",
     draftRowEvidence: rowEvidence(verified),
+    replyTargetEvidence: targetEvidence(targetTweetId, verified),
     note: "Offline barrier stage result.",
     replyToId: targetTweetId,
   } as StageReplyResult;

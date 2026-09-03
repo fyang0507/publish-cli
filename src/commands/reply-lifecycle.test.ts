@@ -17,8 +17,11 @@ import type { GeneratedContent } from "../x/content.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
 import {
   XDraftStageError,
+  xReplyTargetEvidenceNotCalibrated,
+  xReplyTargetEvidenceNotChecked,
   type XDraftRowEvidence,
   type XDraftSaveFailurePhase,
+  type XReplyTargetEvidence,
 } from "../x/saveProgress.js";
 
 const TARGET_ID = "1234567890123456789";
@@ -85,6 +88,8 @@ interface HarnessOptions {
   stageResultGetter?: "throwing" | "stateful";
   stageRowEvidence?: unknown;
   stageRowEvidenceGetter?: "throwing" | "stateful";
+  stageTargetEvidence?: unknown;
+  stageTargetEvidenceGetter?: "throwing" | "stateful";
   stageNote?: string;
   finalizeFails?: boolean;
   releaseFails?: boolean;
@@ -132,6 +137,22 @@ function rowEvidence(verified: boolean): XDraftRowEvidence {
         baseline,
         postSave: observedRows(1, 0),
       };
+}
+
+function replyTargetEvidence(verified: boolean): XReplyTargetEvidence {
+  return verified
+    ? {
+        status: "verified",
+        method: "same_content_row_target_id",
+        scope: "current_save_attempt",
+        requestedTargetId: TARGET_ID,
+        rowBinding: "same_content_matched_draft",
+        targetMatch: "exact",
+        targetContextCount: 1,
+        distinctStatusIdCount: 1,
+        reason: "exact_requested_target",
+      }
+    : xReplyTargetEvidenceNotChecked(TARGET_ID);
 }
 
 function createHarness(options: HarnessOptions = {}): Harness {
@@ -203,6 +224,9 @@ function createHarness(options: HarnessOptions = {}): Harness {
           draftRowEvidence: Object.prototype.hasOwnProperty.call(options, "stageRowEvidence")
             ? options.stageRowEvidence
             : rowEvidence(Boolean(options.verified)),
+          replyTargetEvidence: Object.prototype.hasOwnProperty.call(options, "stageTargetEvidence")
+            ? options.stageTargetEvidence
+            : replyTargetEvidence(Boolean(options.verified)),
           note: options.stageNote ?? "Offline injected stage result.",
           replyToId: options.stageReplyToId ?? TARGET_ID,
         } as StageReplyResult;
@@ -234,6 +258,22 @@ function createHarness(options: HarnessOptions = {}): Harness {
             },
           });
         }
+        if (options.stageTargetEvidenceGetter === "throwing") {
+          Object.defineProperty(result, "replyTargetEvidence", {
+            get() { throw new Error("RAW_TARGET_EVIDENCE_GETTER_PRIVATE_PATH"); },
+          });
+        } else if (options.stageTargetEvidenceGetter === "stateful") {
+          let reads = 0;
+          Object.defineProperty(result, "replyTargetEvidence", {
+            get() {
+              reads += 1;
+              events.push(`stage:target-evidence-read:${reads}`);
+              return reads === 1
+                ? xReplyTargetEvidenceNotCalibrated(TARGET_ID)
+                : replyTargetEvidence(true);
+            },
+          });
+        }
         return result;
       };
     },
@@ -254,7 +294,7 @@ function input(overrides: Partial<ReplyRealRunInput> = {}): ReplyRealRunInput {
 test("post-save finalization failure preserves phase evidence without claiming durable state", async () => {
   for (const [verified, status, draftEvidence] of [
     [false, "staged-unverified", /native draft may exist/i],
-    [true, "staged", /full intended reply text was observed.*reply-target binding was not verified/i],
+    [true, "staged", /full intended X reply text observed.*exact requested status id bound.*yes/i],
   ] as const) {
     const harness = createHarness({ finalizeFails: true, verified });
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -281,6 +321,32 @@ test("post-save finalization failure preserves phase evidence without claiming d
       outcome.message,
       /Failed to stage|RAW_FINALIZE_ERROR_WITH_PRIVATE_PATH|offline-owner-token/,
     );
+  }
+});
+
+test("finalize and close failures retain mixed positive-content target-unavailable facts", async () => {
+  for (const closeFails of [false, true]) {
+    const harness = createHarness({
+      stageRowEvidence: rowEvidence(true),
+      stageTargetEvidence: xReplyTargetEvidenceNotCalibrated(TARGET_ID),
+      finalizeFails: !closeFails,
+      closeFails,
+    });
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assert.equal(outcome.kind, "ledger_persistence_failed");
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.savePhase, "save_delivered_unverified");
+    assert.equal(outcome.draftRowEvidence?.status, "verified");
+    assert.equal(outcome.replyTargetEvidence?.reason, "no_exact_target_id_signal");
+    assert.match(outcome.message, /full intended X reply text observed.*: yes/);
+    assert.match(outcome.message, /exact requested status id bound.*: no/);
+    assert.match(
+      outcome.message,
+      closeFails
+        ? /finalization completed as staged-unverified.*did not close cleanly/s
+        : /reservation and finalized-history state are unknown/,
+    );
+    assert.doesNotMatch(outcome.message, /RAW_FINALIZE|RAW_CLOSE|✓/);
   }
 });
 
@@ -312,7 +378,6 @@ test("undefined or wrong-target stage results remain inconclusive and retain the
     { stageResultMechanism: "article_create_autosave" as const },
     { stageResultPosts: 2 },
     { stageRowEvidence: null },
-    { stageRowEvidence: rowEvidence(true) },
   ]) {
     const harness = createHarness(options);
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -383,8 +448,8 @@ test("nested row evidence is snapshotted once and malformed facts never finalize
 
 test("verified and unverified returns finalize before close but only verified succeeds", async () => {
   for (const [verified, status, kind, exitCode, evidence] of [
-    [true, "staged", "staged", 0, /saved draft reply-target binding verified: no/],
-    [false, "staged-unverified", "staged_unverified", 1, /finalized as staged-unverified/],
+    [true, "staged", "staged", 0, /exact requested status id bound.*: yes/],
+    [false, "staged-unverified", "staged_unverified", 1, /target checking was skipped because the content row was not verified/],
   ] as const) {
     const harness = createHarness({ verified });
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -401,9 +466,10 @@ test("verified and unverified returns finalize before close but only verified su
     assert.equal(outcome.exitCode, exitCode);
     assert.equal(outcome.savePhase, verified ? "verified" : "save_delivered_unverified");
     assert.equal(outcome.draftRowEvidence?.status, verified ? "verified" : "unverified");
+    assert.equal(outcome.replyTargetEvidence?.status, verified ? "verified" : "unverified");
     assert.match(outcome.message, evidence);
     if (verified) {
-      assert.match(outcome.message, new RegExp(`Native X Save action returned.*NEVER posted.*request context: target ${TARGET_ID}.*intent only.*full intended X reply text`, "s"));
+      assert.match(outcome.message, new RegExp(`Native X Save action returned.*NEVER posted.*request context: target ${TARGET_ID}.*full intended X reply text`, "s"));
       assert.match(outcome.message, /visible scoped row multiset changed by exactly that one full-text value/);
       assert.match(outcome.message, /full-list completeness and causality: unproven/);
       assert.doesNotMatch(outcome.message, /target preserved|reply draft[^\n]*\bto \d+/i);
@@ -413,6 +479,176 @@ test("verified and unverified returns finalize before close but only verified su
       assert.doesNotMatch(outcome.message, /Offline injected stage result/);
     }
   }
+});
+
+test("content-positive target-unavailable is a resolved staged-unverified result", async () => {
+  for (const reportedVerified of [false, true]) {
+    const harness = createHarness({
+      verified: reportedVerified,
+      stageRowEvidence: rowEvidence(true),
+      stageTargetEvidence: xReplyTargetEvidenceNotCalibrated(TARGET_ID),
+    });
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+
+    assert.match(harness.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+    assert.equal(outcome.kind, "staged_unverified");
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.savePhase, "save_delivered_unverified");
+    assert.equal(outcome.draftRowEvidence?.status, "verified");
+    assert.equal(outcome.replyTargetEvidence?.status, "unverified");
+    assert.equal(outcome.replyTargetEvidence?.reason, "no_exact_target_id_signal");
+    assert.match(outcome.message, /full intended X reply text observed.*: yes/);
+    assert.match(outcome.message, /calibrated Unsent row and reopened composer expose no exact target-id signal/);
+    assert.match(outcome.message, /exact CLI-owned profile used by this run/);
+    assert.doesNotMatch(outcome.message, /✓|target preserved|Offline injected stage result/);
+  }
+});
+
+test("target-only malformed, throwing, and stateful evidence cannot escape or promote", async () => {
+  const cases: HarnessOptions[] = [
+    { verified: true, stageTargetEvidence: null },
+    { verified: true, stageTargetEvidence: { status: "verified" } },
+    {
+      verified: true,
+      stageTargetEvidence: {
+        ...replyTargetEvidence(true),
+        requestedTargetId: OTHER_TARGET_ID,
+      },
+    },
+    { verified: true, stageTargetEvidenceGetter: "throwing" },
+    { verified: true, stageTargetEvidenceGetter: "stateful" },
+  ];
+  for (const fixture of cases) {
+    const harness = createHarness(fixture);
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assert.equal(outcome.kind, "staged_unverified");
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.draftRowEvidence?.status, "verified");
+    assert.equal(outcome.replyTargetEvidence?.status, "unverified");
+    assert.notEqual(outcome.replyTargetEvidence?.status, "verified");
+    assert.ok(
+      outcome.replyTargetEvidence?.reason === "probe_failed" ||
+      outcome.replyTargetEvidence?.reason === "no_exact_target_id_signal",
+    );
+    assert.match(harness.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+    assert.doesNotMatch(outcome.message, /RAW_TARGET|PRIVATE_PATH|9876543210987654321/);
+  }
+  const stateful = createHarness({ verified: true, stageTargetEvidenceGetter: "stateful" });
+  await executeReplyRealRun(input(), stateful.deps);
+  assert.equal(
+    stateful.events.filter((event) => event.startsWith("stage:target-evidence-read")).length,
+    1,
+  );
+});
+
+test("missing, ambiguous, and different native target observations remain bounded", async () => {
+  const common = {
+    status: "unverified" as const,
+    method: "same_content_row_target_id" as const,
+    scope: "current_save_attempt" as const,
+    requestedTargetId: TARGET_ID,
+    rowBinding: "same_content_matched_draft" as const,
+  };
+  const cases = [
+    {
+      evidence: {
+        ...common,
+        targetMatch: "not_observed",
+        targetContextCount: 0,
+        distinctStatusIdCount: 0,
+        reason: "target_context_missing",
+      },
+      reason: "target_context_missing",
+    },
+    {
+      evidence: {
+        ...common,
+        targetMatch: "ambiguous",
+        targetContextCount: 2,
+        distinctStatusIdCount: null,
+        reason: "target_context_ambiguous",
+      },
+      reason: "target_context_ambiguous",
+    },
+    {
+      evidence: {
+        ...common,
+        targetMatch: "ambiguous",
+        targetContextCount: 1,
+        distinctStatusIdCount: 2,
+        reason: "target_id_ambiguous",
+      },
+      reason: "target_id_ambiguous",
+    },
+    {
+      evidence: {
+        ...common,
+        targetMatch: "different",
+        targetContextCount: 1,
+        distinctStatusIdCount: 1,
+        reason: "target_id_mismatch",
+      },
+      reason: "target_id_mismatch",
+    },
+  ];
+  for (const fixture of cases) {
+    const harness = createHarness({
+      stageRowEvidence: rowEvidence(true),
+      stageTargetEvidence: fixture.evidence,
+      stageNote: RAW_CANARY,
+    });
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assert.equal(outcome.kind, "staged_unverified");
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.draftRowEvidence?.status, "verified");
+    assert.equal(outcome.replyTargetEvidence?.reason, fixture.reason);
+    assert.match(harness.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+    assert.match(outcome.message, /bounded native target observation was not exact and unambiguous/);
+    assert.doesNotMatch(outcome.message, /PRIVATE_PATH|session-secret|https:\/\//);
+  }
+
+  const contradictory = createHarness({
+    stageTargetEvidence: replyTargetEvidence(true),
+  });
+  const outcome = await executeReplyRealRun(input(), contradictory.deps);
+  assert.equal(outcome.kind, "staged_unverified");
+  assert.equal(outcome.draftRowEvidence?.status, "unverified");
+  assert.equal(outcome.replyTargetEvidence?.reason, "content_unverified");
+});
+
+test("an exact-content top-level Unsent row cannot substitute for reply-target identity", async () => {
+  const targetMissing = {
+    status: "unverified" as const,
+    method: "same_content_row_target_id" as const,
+    scope: "current_save_attempt" as const,
+    requestedTargetId: TARGET_ID,
+    rowBinding: "same_content_matched_draft" as const,
+    targetMatch: "not_observed" as const,
+    targetContextCount: 0 as const,
+    distinctStatusIdCount: 0 as const,
+    reason: "target_context_missing" as const,
+  };
+  const harness = createHarness({
+    stageRowEvidence: rowEvidence(true),
+    stageTargetEvidence: targetMissing,
+  });
+  const outcome = await executeReplyRealRun(input(), harness.deps);
+
+  assert.deepEqual(harness.events, [
+    "ledger:open",
+    `ledger:claim:${TARGET_ID}:force=false`,
+    "stage:load",
+    `stage:run:${TARGET_URL}:tweet`,
+    `ledger:finalize:${TARGET_ID}:staged-unverified`,
+    "ledger:close",
+  ]);
+  assert.equal(outcome.kind, "staged_unverified");
+  assert.equal(outcome.exitCode, 1);
+  assert.equal(outcome.draftRowEvidence?.status, "verified");
+  assert.equal(outcome.replyTargetEvidence?.reason, "target_context_missing");
+  assert.match(outcome.message, /full intended X reply text observed.*: yes/);
+  assert.match(outcome.message, /exact requested status id bound.*: no/);
+  assert.doesNotMatch(outcome.message, /exact requested status id bound.*: yes/);
 });
 
 test("coherent baseline-unavailable evidence finalizes staged-unverified after Save returned", async () => {
@@ -470,7 +706,7 @@ test("verified reply-thread receipts limit positive row evidence to the first ro
   assert.doesNotMatch(outcome.message, /full intended X reply text/);
 });
 
-test("reply receipts never turn requested-target intent into verified target binding", async () => {
+test("reply receipts never infer target identity from requested-target intent", async () => {
   const stagedUnverifiedPrior: ReplyLedgerEntry = {
     ...PRIOR,
     status: "staged-unverified",
@@ -490,8 +726,10 @@ test("reply receipts never turn requested-target intent into verified target bin
       outcome.message,
       /reply target preserved|target preserved|Already staged a reply to|Staged a NATIVE X reply draft[^\n]*\bto\b/i,
     );
-    if (outcome.savePhase === "verified") {
-      assert.match(outcome.message, /reply-target binding (?:was )?not verified|reply-target binding verified: no/i);
+    if (outcome.replyTargetEvidence?.status === "verified") {
+      assert.match(outcome.message, /exact requested status id bound.*: yes/i);
+    } else if (outcome.savePhase === "save_delivered_unverified") {
+      assert.match(outcome.message, /exact requested status id bound.*: no/i);
     }
     assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
   }
@@ -654,6 +892,7 @@ test("staged-unverified history blocks with manual-check guidance before force",
   const outcome = await executeReplyRealRun(input(), harness.deps);
   assert.equal(outcome.kind, "duplicate");
   assert.equal(outcome.savePhase, null, "historical ledger evidence is not this run's Save phase");
+  assert.equal(outcome.replyTargetEvidence, null, "historical rows never become current target proof");
   assert.equal(outcome.priorStatus, "staged-unverified");
   assert.match(outcome.message, /exact CLI-owned profile used by that run/);
   assert.match(outcome.message, /If a matching draft exists or the comparison is uncertain, do not retry or use --force/);
@@ -664,6 +903,7 @@ test("staged-unverified history blocks with manual-check guidance before force",
   const closeOutcome = await executeReplyRealRun(input(), closeHarness.deps);
   assert.equal(closeOutcome.exitCode, 1);
   assert.equal(closeOutcome.savePhase, null);
+  assert.equal(closeOutcome.replyTargetEvidence, null);
   assert.equal(closeOutcome.priorStatus, "staged-unverified");
   assert.match(closeOutcome.message, /exact CLI-owned profile used by that run/);
   assert.match(closeOutcome.message, /Only after confidently finding no matching draft.*--force/s);
@@ -716,7 +956,7 @@ test("close failures preserve the primary reservation and persistence facts", as
   assert.equal(successOutcome.kind, "ledger_persistence_failed");
   assert.equal(successOutcome.exitCode, 1);
   assert.match(successOutcome.message, /finalization completed as staged/);
-  assert.match(successOutcome.message, /text-persistence observation was verified, but reply-target binding was not/i);
+  assert.match(successOutcome.message, /scoped content-row and exact target-id observations were positive/i);
   assert.match(successOutcome.message, /Do not retry or use --force/);
   assert.doesNotMatch(successOutcome.message, /✓ Staged|RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
 
