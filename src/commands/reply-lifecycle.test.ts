@@ -79,6 +79,7 @@ interface HarnessOptions {
   loadStageFails?: boolean;
   loadStageNonFunction?: boolean;
   stageFails?: boolean;
+  stageFailureValueFactory?: () => unknown;
   stageFailurePhase?: XDraftSaveFailurePhase;
   stageFailureMechanism?: "composer_close_save" | "article_create_autosave";
   stageReturnsUndefined?: boolean;
@@ -90,6 +91,7 @@ interface HarnessOptions {
   stageRowEvidenceGetter?: "throwing" | "stateful";
   stageTargetEvidence?: unknown;
   stageTargetEvidenceGetter?: "throwing" | "stateful";
+  stageResultTransform?: (result: StageReplyResult, events: string[]) => unknown;
   stageNote?: string;
   finalizeFails?: boolean;
   releaseFails?: boolean;
@@ -209,6 +211,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
         assert.deepEqual(stageOptions, { inspect: true });
         assert.equal("force" in stageOptions, false, "dedupe --force must not become session force");
         if (options.stageFails) throw new Error("NATIVE_STAGE_ERROR");
+        if (options.stageFailureValueFactory) throw options.stageFailureValueFactory();
         if (options.stageFailurePhase) {
           throw new XDraftStageError(
             options.stageFailurePhase,
@@ -274,7 +277,7 @@ function createHarness(options: HarnessOptions = {}): Harness {
             },
           });
         }
-        return result;
+        return (options.stageResultTransform?.(result, events) ?? result) as StageReplyResult;
       };
     },
   };
@@ -289,6 +292,36 @@ function input(overrides: Partial<ReplyRealRunInput> = {}): ReplyRealRunInput {
     inspect: true,
     ...overrides,
   };
+}
+
+function defineResultGetter(
+  result: StageReplyResult,
+  path: readonly string[],
+  getter: () => unknown,
+): void {
+  let owner: Record<string, unknown> = result as unknown as Record<string, unknown>;
+  for (const key of path.slice(0, -1)) {
+    owner = owner[key] as Record<string, unknown>;
+  }
+  Object.defineProperty(owner, path.at(-1)!, {
+    configurable: true,
+    enumerable: true,
+    get: getter,
+  });
+}
+
+function assertResolvedCoreFault(
+  outcome: Awaited<ReturnType<typeof executeReplyRealRun>>,
+  events: readonly string[],
+): void {
+  assert.equal(outcome.kind, "stage_result_inconclusive");
+  assert.equal(outcome.exitCode, 1);
+  assert.equal(outcome.savePhase, "save_delivery_unknown");
+  assert.equal(outcome.saveMechanism, "composer_close_save");
+  assert.equal(events.some((event) => event.startsWith("ledger:release")), false);
+  assert.equal(events.some((event) => event.startsWith("ledger:finalize")), false);
+  assert.match(outcome.message, /reservation .* remains/i);
+  assert.doesNotMatch(outcome.message, /RAW_|PRIVATE_PATH|selector|cookie|session-secret/);
 }
 
 test("post-save finalization failure preserves phase evidence without claiming durable state", async () => {
@@ -397,21 +430,196 @@ test("undefined or wrong-target stage results remain inconclusive and retain the
   }
 });
 
-test("reply result getters cannot leak or change phase after validation", async () => {
+test("core reply result accessors are rejected without invocation or ledger mutation", async () => {
   const throwing = createHarness({ stageResultGetter: "throwing" });
   const thrownOutcome = await executeReplyRealRun(input(), throwing.deps);
-  assert.equal(thrownOutcome.kind, "native_stage_uncertain");
-  assert.equal(thrownOutcome.savePhase, "save_delivery_unknown");
-  assert.equal(throwing.events.some((event) => event.startsWith("ledger:finalize")), false);
-  assert.doesNotMatch(thrownOutcome.message, /RAW_STAGE_RESULT_GETTER/);
+  assertResolvedCoreFault(thrownOutcome, throwing.events);
 
   const stateful = createHarness({ stageResultGetter: "stateful" });
   const statefulOutcome = await executeReplyRealRun(input(), stateful.deps);
-  assert.equal(stateful.events.filter((event) => event.startsWith("stage:phase-read")).length, 1);
-  assert.match(stateful.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
-  assert.equal(statefulOutcome.kind, "staged_unverified");
-  assert.equal(statefulOutcome.savePhase, "save_delivered_unverified");
-  assert.equal(statefulOutcome.exitCode, 1);
+  assert.equal(stateful.events.filter((event) => event.startsWith("stage:phase-read")).length, 0);
+  assertResolvedCoreFault(statefulOutcome, stateful.events);
+});
+
+test("a branded error thrown by a resolved result getter cannot claim pre-Save evidence", async () => {
+  const harness = createHarness({
+    stageResultTransform(result) {
+      Object.defineProperty(result, "format", {
+        get() {
+          throw new XDraftStageError("save_not_attempted", "composer_close_save");
+        },
+      });
+      return result;
+    },
+  });
+  const outcome = await executeReplyRealRun(input(), harness.deps);
+
+  assert.equal(outcome.kind, "stage_result_inconclusive");
+  assert.equal(outcome.savePhase, "save_delivery_unknown");
+  assert.equal(harness.events.some((event) => event.startsWith("ledger:release")), false);
+  assert.equal(harness.events.some((event) => event.startsWith("ledger:finalize")), false);
+  assert.match(outcome.message, /reservation .* remains/i);
+});
+
+test("every core getter phase and mechanism stays post-resolution uncertainty", async () => {
+  const fields = [
+    "format",
+    "posts",
+    "replyToId",
+    "savePhase",
+    "saveMechanism",
+    "draftRowEvidence",
+  ] as const;
+  const phases: XDraftSaveFailurePhase[] = [
+    "save_not_attempted",
+    "save_delivery_unknown",
+    "save_delivered_unverified",
+  ];
+  const mechanisms = ["composer_close_save", "article_create_autosave"] as const;
+
+  for (const field of fields) {
+    for (const phase of phases) {
+      for (const mechanism of mechanisms) {
+        let reads = 0;
+        const harness = createHarness({
+          stageResultTransform(result) {
+            defineResultGetter(result, [field], () => {
+              reads += 1;
+              throw new XDraftStageError(phase, mechanism);
+            });
+            return result;
+          },
+        });
+        const outcome = await executeReplyRealRun(input(), harness.deps);
+        assert.equal(reads, 0, `${field}/${phase}/${mechanism} accessor was invoked`);
+        assertResolvedCoreFault(outcome, harness.events);
+      }
+    }
+  }
+});
+
+test("every nested row getter is rejected before it can carry phase or mutate target proof", async () => {
+  const rowPaths: readonly (readonly string[])[] = [
+    ["draftRowEvidence", "status"],
+    ["draftRowEvidence", "method"],
+    ["draftRowEvidence", "contentMatch"],
+    ["draftRowEvidence", "nativeRowId"],
+    ["draftRowEvidence", "listCompleteness"],
+    ["draftRowEvidence", "baseline"],
+    ["draftRowEvidence", "postSave"],
+    ...(["baseline", "postSave"] as const).flatMap((observation) =>
+      [
+        "outcome",
+        "route",
+        "modal",
+        "rows",
+        "visibleModalCount",
+        "visibleRowCount",
+        "exactFullTextMatches",
+      ].map((field) => ["draftRowEvidence", observation, field] as const)
+    ),
+  ];
+  const phases: XDraftSaveFailurePhase[] = [
+    "save_not_attempted",
+    "save_delivery_unknown",
+    "save_delivered_unverified",
+  ];
+  const mechanisms = ["composer_close_save", "article_create_autosave"] as const;
+
+  for (const path of rowPaths) {
+    for (const phase of phases) {
+      for (const mechanism of mechanisms) {
+        let reads = 0;
+        const harness = createHarness({
+          stageResultTransform(result) {
+            defineResultGetter(result, path, () => {
+              reads += 1;
+              throw new XDraftStageError(phase, mechanism);
+            });
+            return result;
+          },
+        });
+        const outcome = await executeReplyRealRun(input(), harness.deps);
+        assert.equal(reads, 0, `${path.join(".")} accessor was invoked`);
+        assertResolvedCoreFault(outcome, harness.events);
+      }
+    }
+  }
+
+  let sideEffectReads = 0;
+  const sideEffect = createHarness({
+    verified: true,
+    stageResultTransform(result) {
+      defineResultGetter(result, ["draftRowEvidence", "status"], () => {
+        sideEffectReads += 1;
+        result.replyTargetEvidence = replyTargetEvidence(true);
+        return "verified";
+      });
+      return result;
+    },
+  });
+  const sideEffectOutcome = await executeReplyRealRun(input(), sideEffect.deps);
+  assert.equal(sideEffectReads, 0);
+  assertResolvedCoreFault(sideEffectOutcome, sideEffect.events);
+});
+
+test("root and nested core proxies, stable accessors, cycles, and revoked results never finalize", async () => {
+  const fixtures: Array<{
+    name: string;
+    transform(result: StageReplyResult): unknown;
+  }> = [
+    {
+      name: "transparent root proxy",
+      transform(result) {
+        return new Proxy(result, {});
+      },
+    },
+    {
+      name: "revoked root proxy",
+      transform(result) {
+        const revocable = Proxy.revocable(result, {});
+        // Let the async stage function resolve the non-thenable proxy first,
+        // then revoke it before the awaiting command observes the value.
+        queueMicrotask(revocable.revoke);
+        return revocable.proxy;
+      },
+    },
+    {
+      name: "nested row proxy",
+      transform(result) {
+        result.draftRowEvidence = new Proxy(result.draftRowEvidence, {});
+        return result;
+      },
+    },
+    {
+      name: "cyclic row evidence",
+      transform(result) {
+        const evidence = result.draftRowEvidence as XDraftRowEvidence & { cycle?: unknown };
+        evidence.cycle = evidence;
+        return result;
+      },
+    },
+  ];
+  for (const fixture of fixtures) {
+    const harness = createHarness({ stageResultTransform: fixture.transform });
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assertResolvedCoreFault(outcome, harness.events);
+  }
+
+  let stableReads = 0;
+  const stable = createHarness({
+    stageResultTransform(result) {
+      const value = result.format;
+      defineResultGetter(result, ["format"], () => {
+        stableReads += 1;
+        return value;
+      });
+      return result;
+    },
+  });
+  const stableOutcome = await executeReplyRealRun(input(), stable.deps);
+  assert.equal(stableReads, 0);
+  assertResolvedCoreFault(stableOutcome, stable.events);
 });
 
 test("nested row evidence is snapshotted once and malformed facts never finalize", async () => {
@@ -428,7 +636,7 @@ test("nested row evidence is snapshotted once and malformed facts never finalize
   ]) {
     const harness = createHarness(options);
     const outcome = await executeReplyRealRun(input(), harness.deps);
-    assert.equal(outcome.kind, options.stageRowEvidenceGetter ? "native_stage_uncertain" : "stage_result_inconclusive");
+    assert.equal(outcome.kind, "stage_result_inconclusive");
     assert.equal(outcome.exitCode, 1);
     assert.equal(outcome.draftRowEvidence, null);
     assert.equal(harness.events.some((event) => event.startsWith("ledger:finalize")), false);
@@ -440,7 +648,7 @@ test("nested row evidence is snapshotted once and malformed facts never finalize
     stageRowEvidenceGetter: "stateful",
   });
   const outcome = await executeReplyRealRun(input(), stateful.deps);
-  assert.equal(stateful.events.filter((event) => event.startsWith("stage:evidence-read")).length, 1);
+  assert.equal(stateful.events.filter((event) => event.startsWith("stage:evidence-read")).length, 0);
   assert.equal(outcome.kind, "stage_result_inconclusive");
   assert.equal(outcome.draftRowEvidence, null);
   assert.equal(stateful.events.some((event) => event.startsWith("ledger:finalize")), false);
@@ -479,6 +687,25 @@ test("verified and unverified returns finalize before close but only verified su
       assert.doesNotMatch(outcome.message, /Offline injected stage result/);
     }
   }
+});
+
+test("compatibility note remains unread and cannot affect a valid closed result", async () => {
+  let reads = 0;
+  const harness = createHarness({
+    verified: true,
+    stageResultTransform(result) {
+      defineResultGetter(result, ["note"], () => {
+        reads += 1;
+        throw new XDraftStageError("save_not_attempted", "composer_close_save");
+      });
+      return result;
+    },
+  });
+  const outcome = await executeReplyRealRun(input(), harness.deps);
+  assert.equal(reads, 0);
+  assert.equal(outcome.kind, "staged");
+  assert.equal(outcome.savePhase, "verified");
+  assert.match(harness.events.join("\n"), /ledger:finalize:.*:staged/);
 });
 
 test("content-positive target-unavailable is a resolved staged-unverified result", async () => {
@@ -537,8 +764,131 @@ test("target-only malformed, throwing, and stateful evidence cannot escape or pr
   await executeReplyRealRun(input(), stateful.deps);
   assert.equal(
     stateful.events.filter((event) => event.startsWith("stage:target-evidence-read")).length,
-    1,
+    0,
   );
+});
+
+test("hostile target-only observations normalize only after the core Save proof closes", async () => {
+  const phases: XDraftSaveFailurePhase[] = [
+    "save_not_attempted",
+    "save_delivery_unknown",
+    "save_delivered_unverified",
+  ];
+  const mechanisms = ["composer_close_save", "article_create_autosave"] as const;
+  for (const phase of phases) {
+    for (const mechanism of mechanisms) {
+      let reads = 0;
+      const harness = createHarness({
+        verified: true,
+        stageResultTransform(result) {
+          defineResultGetter(result, ["replyTargetEvidence", "reason"], () => {
+            reads += 1;
+            throw new XDraftStageError(phase, mechanism);
+          });
+          return result;
+        },
+      });
+      const outcome = await executeReplyRealRun(input(), harness.deps);
+      assert.equal(reads, 0);
+      assert.equal(outcome.kind, "staged_unverified");
+      assert.equal(outcome.savePhase, "save_delivered_unverified");
+      assert.equal(outcome.replyTargetEvidence?.reason, "probe_failed");
+      assert.equal(harness.events.some((event) => event.startsWith("ledger:release")), false);
+      assert.match(harness.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+      assert.doesNotMatch(outcome.message, /RAW_|PRIVATE_PATH|✓ Staged/);
+    }
+  }
+
+  const revokedTarget = createHarness({
+    verified: true,
+    stageResultTransform(result) {
+      const revocable = Proxy.revocable(result.replyTargetEvidence, {});
+      revocable.revoke();
+      result.replyTargetEvidence = revocable.proxy;
+      return result;
+    },
+  });
+  const revokedOutcome = await executeReplyRealRun(input(), revokedTarget.deps);
+  assert.equal(revokedOutcome.kind, "staged_unverified");
+  assert.equal(revokedOutcome.replyTargetEvidence?.reason, "probe_failed");
+  assert.match(revokedTarget.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+
+  let topAccessorReads = 0;
+  let nestedAccessorReads = 0;
+  const hostileShapes: Array<{
+    name: string;
+    transform(result: StageReplyResult): StageReplyResult;
+  }> = [
+    {
+      name: "top-level stable accessor",
+      transform(result) {
+        const evidence = result.replyTargetEvidence;
+        defineResultGetter(result, ["replyTargetEvidence"], () => {
+          topAccessorReads += 1;
+          return evidence;
+        });
+        return result;
+      },
+    },
+    {
+      name: "nested stable accessor",
+      transform(result) {
+        const reason = result.replyTargetEvidence.reason;
+        defineResultGetter(result, ["replyTargetEvidence", "reason"], () => {
+          nestedAccessorReads += 1;
+          return reason;
+        });
+        return result;
+      },
+    },
+    {
+      name: "transparent target proxy",
+      transform(result) {
+        result.replyTargetEvidence = new Proxy(result.replyTargetEvidence, {});
+        return result;
+      },
+    },
+    {
+      name: "non-enumerable target field",
+      transform(result) {
+        Object.defineProperty(result.replyTargetEvidence, "reason", {
+          configurable: true,
+          enumerable: false,
+          value: result.replyTargetEvidence.reason,
+        });
+        return result;
+      },
+    },
+    {
+      name: "exotic target prototype",
+      transform(result) {
+        Object.setPrototypeOf(result.replyTargetEvidence, { hostile: true });
+        return result;
+      },
+    },
+    {
+      name: "cyclic target evidence",
+      transform(result) {
+        const evidence = result.replyTargetEvidence as XReplyTargetEvidence & { cycle?: unknown };
+        evidence.cycle = evidence;
+        return result;
+      },
+    },
+  ];
+  for (const fixture of hostileShapes) {
+    const harness = createHarness({
+      verified: true,
+      stageResultTransform: fixture.transform,
+    });
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assert.equal(outcome.kind, "staged_unverified", fixture.name);
+    assert.equal(outcome.savePhase, "save_delivered_unverified", fixture.name);
+    assert.equal(outcome.replyTargetEvidence?.reason, "probe_failed", fixture.name);
+    assert.match(harness.events.join("\n"), /ledger:finalize:.*:staged-unverified/);
+    assert.doesNotMatch(harness.events.join("\n"), /ledger:finalize:.*:staged$/m);
+  }
+  assert.equal(topAccessorReads, 0);
+  assert.equal(nestedAccessorReads, 0);
 });
 
 test("missing, ambiguous, and different native target observations remain bounded", async () => {
@@ -812,6 +1162,135 @@ test("only a proven pre-browser loader failure releases the owner-matched reserv
   }
 });
 
+test("caller argument getters cannot enter the typed stage-rejection boundary", async () => {
+  const fixtures: Array<{
+    field: "content" | "targetIdOrUrl" | "inspect" | "content.format";
+    build(read: () => never): ReplyRealRunInput;
+  }> = [
+    {
+      field: "content",
+      build(read) {
+        const hostile = input();
+        Object.defineProperty(hostile, "content", { configurable: true, get: read });
+        return hostile;
+      },
+    },
+    {
+      field: "targetIdOrUrl",
+      build(read) {
+        const hostile = input();
+        Object.defineProperty(hostile, "targetIdOrUrl", { configurable: true, get: read });
+        return hostile;
+      },
+    },
+    {
+      field: "inspect",
+      build(read) {
+        const hostile = input();
+        Object.defineProperty(hostile, "inspect", { configurable: true, get: read });
+        return hostile;
+      },
+    },
+    {
+      field: "content.format",
+      build(read) {
+        const content = { ...CONTENT };
+        Object.defineProperty(content, "format", { configurable: true, get: read });
+        return input({ content: content as GeneratedContent });
+      },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    let reads = 0;
+    const hostile = fixture.build(() => {
+      reads += 1;
+      throw new XDraftStageError("save_not_attempted", "composer_close_save");
+    });
+    const harness = createHarness();
+    const outcome = await executeReplyRealRun(hostile, harness.deps);
+    assert.equal(reads, 1, fixture.field);
+    assert.equal(outcome.kind, "stage_runtime_failed");
+    assert.equal(outcome.reservationRelease, "released");
+    assert.equal(harness.events.some((event) => event.startsWith("stage:run")), false);
+    assert.equal(harness.events.some((event) => event.startsWith("ledger:finalize")), false);
+    assert.match(outcome.message, /stage port was never invoked/);
+    assert.doesNotMatch(outcome.message, /typed poster evidence|RAW_|PRIVATE_PATH/);
+  }
+});
+
+test("only copied branded composer rejections carry phase through Catch A", async () => {
+  const forged = Object.assign(Object.create(XDraftStageError.prototype) as object, {
+    savePhase: "save_not_attempted",
+    saveMechanism: "composer_close_save",
+  });
+  const invalidFactories: Array<() => unknown> = [
+    () => new Error("RAW_REJECTION_PRIVATE_PATH"),
+    () => forged,
+    () => new Proxy(
+      new XDraftStageError("save_not_attempted", "composer_close_save"),
+      {},
+    ),
+    () => {
+      const revocable = Proxy.revocable(
+        new XDraftStageError("save_not_attempted", "composer_close_save"),
+        {},
+      );
+      revocable.revoke();
+      return revocable.proxy;
+    },
+    () => {
+      const error = new XDraftStageError("save_not_attempted", "composer_close_save");
+      Object.defineProperty(error, "savePhase", {
+        configurable: true,
+        get() {
+          throw new Error("RAW_PHASE_GETTER_PRIVATE_PATH");
+        },
+      });
+      return error;
+    },
+    () => new XDraftStageError("save_not_attempted", null),
+    ...(["save_not_attempted", "save_delivery_unknown", "save_delivered_unverified"] as const)
+      .map((phase) => () => new XDraftStageError(phase, "article_create_autosave")),
+  ];
+
+  for (const stageFailureValueFactory of invalidFactories) {
+    const harness = createHarness({ stageFailureValueFactory });
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assert.equal(outcome.kind, "native_stage_uncertain");
+    assert.equal(outcome.savePhase, "save_delivery_unknown");
+    assert.equal(harness.events.some((event) => event.startsWith("ledger:release")), false);
+    assert.equal(harness.events.some((event) => event.startsWith("ledger:finalize")), false);
+    assert.match(outcome.message, /reservation .* remains/i);
+    assert.doesNotMatch(outcome.message, /RAW_|PRIVATE_PATH|save_not_attempted/);
+  }
+});
+
+test("a synchronous throw inside the stage port remains an authoritative Catch A rejection", async () => {
+  const harness = createHarness();
+  const deps: ReplyRealRunDependencies = {
+    ...harness.deps,
+    async loadStageReplyDraft() {
+      harness.events.push("stage:load");
+      return (_content, _targetIdOrUrl, _options) => {
+        harness.events.push("stage:run:sync");
+        throw new XDraftStageError("save_not_attempted", "composer_close_save");
+      };
+    },
+  };
+  const outcome = await executeReplyRealRun(input(), deps);
+  assert.equal(outcome.kind, "native_stage_not_attempted");
+  assert.equal(outcome.reservationRelease, "released");
+  assert.deepEqual(harness.events, [
+    "ledger:open",
+    `ledger:claim:${TARGET_ID}:force=false`,
+    "stage:load",
+    "stage:run:sync",
+    `ledger:release:${RESERVATION.reservationId}`,
+    "ledger:close",
+  ]);
+});
+
 test("typed Save-not-attempted evidence releases only the matching composer reservation", async () => {
   const released = createHarness({ stageFailurePhase: "save_not_attempted" });
   const releasedOutcome = await executeReplyRealRun(input(), released.deps);
@@ -960,6 +1439,29 @@ test("close failures preserve the primary reservation and persistence facts", as
   assert.match(successOutcome.message, /Do not retry or use --force/);
   assert.doesNotMatch(successOutcome.message, /✓ Staged|RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
 
+  let mutatedTargetReads = 0;
+  const mutableInput = input();
+  const mutatedTarget = createHarness({
+    verified: true,
+    closeFails: true,
+    stageResultTransform(result) {
+      Object.defineProperty(mutableInput, "replyToId", {
+        configurable: true,
+        get() {
+          mutatedTargetReads += 1;
+          throw new Error("RAW_MUTATED_REPLY_TARGET_PRIVATE_PATH");
+        },
+      });
+      return result;
+    },
+  });
+  const mutatedTargetOutcome = await executeReplyRealRun(mutableInput, mutatedTarget.deps);
+  assert.equal(mutatedTargetReads, 0);
+  assert.equal(mutatedTargetOutcome.kind, "ledger_persistence_failed");
+  assert.equal(mutatedTargetOutcome.savePhase, "verified");
+  assert.match(mutatedTargetOutcome.message, /finalization completed as staged/);
+  assert.doesNotMatch(mutatedTargetOutcome.message, /RAW_MUTATED|PRIVATE_PATH/);
+
   const unverified = createHarness({
     stageFailurePhase: "save_delivered_unverified",
     closeFails: true,
@@ -996,6 +1498,21 @@ test("close failures preserve the primary reservation and persistence facts", as
   assert.match(inconclusiveOutcome.message, /native draft may exist/i);
   assert.match(inconclusiveOutcome.message, /reply ledger also failed to close/);
   assert.doesNotMatch(inconclusiveOutcome.message, /RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
+
+  const hostileResult = createHarness({
+    stageResultGetter: "throwing",
+    releaseFails: true,
+    finalizeFails: true,
+    closeFails: true,
+  });
+  const hostileResultOutcome = await executeReplyRealRun(input(), hostileResult.deps);
+  assert.equal(hostileResultOutcome.kind, "stage_result_inconclusive");
+  assert.equal(hostileResultOutcome.savePhase, "save_delivery_unknown");
+  assert.equal(hostileResult.events.some((event) => event.startsWith("ledger:release")), false);
+  assert.equal(hostileResult.events.some((event) => event.startsWith("ledger:finalize")), false);
+  assert.match(hostileResultOutcome.message, /reservation .* remains/i);
+  assert.match(hostileResultOutcome.message, /reply ledger also failed to close/i);
+  assert.doesNotMatch(hostileResultOutcome.message, /RAW_|PRIVATE_PATH|selector|cookie/);
 
   const blocked = createHarness({ blockedState: "active", closeFails: true });
   const blockedOutcome = await executeReplyRealRun(input(), blocked.deps);
