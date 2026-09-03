@@ -181,7 +181,14 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Tweet\/thread\/reply staging treats the close→Save click as the persistence action/);
   assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
   assert.match(x, /Article verification reopens the captured canonical edit URL and matches the intended title plus, when present, a body prefix/);
-  assert.match(x, /text observation does not verify the saved draft's reply-target binding; confirm the target manually before posting/);
+  assert.match(x, /read-only baseline in the same CLI-owned browser context/);
+  assert.match(x, /exactly one row whose dedicated content field equals the full intended tweet or first thread\/reply row/);
+  assert.match(x, /post-Save visible scoped-row multiset equal to the baseline plus exactly that full-text value/);
+  assert.match(x, /Background feed, navigation, modal labels, prefixes, substring matches/);
+  assert.match(x, /pre-existing identical visible rows, duplicate post-Save matches/);
+  assert.match(x, /no stable native row ID.*does not prove the rendered rows are the complete drafts list or that this run caused the added value/s);
+  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code count, and cover selection\/upload\/ratio\/crop action facts in both verified and unverified receipts; those facts do not prove cover attachment or persistence/);
+  assert.match(x, /For replies, it also does not verify the saved draft's reply-target binding/);
   assert.doesNotMatch(x, /reply target preserved|target preserved|Already staged a reply to/i);
   assert.match(x, /Only `verified` exits successfully/);
   assert.match(x, /Save-progress errors and failure receipts are bounded and do not expose raw selectors, page text, credentials, private paths/);
@@ -614,7 +621,12 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
     /Inline --text is always literal/,
     /Tweet\/thread staging invokes the close→Save action; Article staging invokes Create\/autosave/,
-    /observing a normalized prefix of the intended tweet or first thread post on the exact X Unsent\/Drafts route, or matching the Article title and, when present, body prefix/,
+    /one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row/,
+    /visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value/,
+    /Matching background\/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows/,
+    /no stable native row id and does not prove full-list completeness or causality/,
+    /Article success instead requires matching the title and, when present, body prefix/,
+    /returned Article outcome reports bounded body-input, excluded-code, and cover selection\/upload\/ratio\/crop action facts whether verified or unverified; those facts do not prove cover attachment or persistence/i,
     /rejected Save\/Create action has unknown delivery.*returned action without a positive reopen match is unverified/s,
     /Both exit 1 because a draft may exist/,
     /compare X Unsent\/Drafts or X Articles → Drafts manually in the exact CLI-owned profile/,
@@ -651,7 +663,11 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /If a matching draft exists or the comparison is uncertain, leave the reservation in place/,
     /Recovery clears only the stale claim and exits/,
     /poster reports one closed phase: Save not attempted, Save delivery unknown, Save returned but persistence unverified, or verified in X Unsent\/Drafts/,
-    /Verification observes the intended text prefix on the exact Unsent\/Drafts route; it does not verify the saved draft's reply-target binding/,
+    /one calibrated native Unsent row whose full text exactly matches the intended first reply row/,
+    /visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value/,
+    /Matching background\/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows/,
+    /no stable native row id and does not prove full-list completeness or causality/,
+    /Row verification does not verify the saved draft's reply-target binding/,
     /Confirm the target manually before posting/,
     /Typed proof that Save was not attempted releases only this run's owner-matched reservation/,
     /delivery-unknown or malformed outcome retains it/,

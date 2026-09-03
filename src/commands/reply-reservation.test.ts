@@ -19,6 +19,7 @@ import {
 } from "./reply.js";
 import type { GeneratedContent } from "../x/content.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
+import type { XDraftRowEvidence } from "../x/saveProgress.js";
 
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RECOVERY_FLAG = "--recover-stale-reservation-after-confirming-no-draft";
@@ -76,15 +77,51 @@ function input(targetTweetId: string, force = false): ReplyRealRunInput {
   };
 }
 
+function observedRows(visibleRowCount: number, exactFullTextMatches: number) {
+  return {
+    outcome: "observed" as const,
+    route: "exact" as const,
+    modal: "single_visible" as const,
+    rows: "all_readable" as const,
+    visibleModalCount: 1 as const,
+    visibleRowCount,
+    exactFullTextMatches,
+  };
+}
+
+function rowEvidence(verified: boolean): XDraftRowEvidence {
+  const baseline = observedRows(1, 0);
+  return verified
+    ? {
+        status: "verified",
+        method: "unsent_row_full_text_delta",
+        contentMatch: "visible_scoped_multiset_plus_one",
+        nativeRowId: "unavailable",
+        listCompleteness: "visible_scoped_rows_only",
+        baseline,
+        postSave: observedRows(2, 1),
+      }
+    : {
+        status: "unverified",
+        method: "unsent_row_full_text_delta",
+        contentMatch: "post_exact_missing",
+        nativeRowId: "unavailable",
+        listCompleteness: "visible_scoped_rows_only",
+        baseline,
+        postSave: observedRows(1, 0),
+      };
+}
+
 function stageResult(targetTweetId: string, verified = true): StageReplyResult {
   return {
     format: "tweet",
     posts: 1,
     saveMechanism: "composer_close_save",
     savePhase: verified ? "verified" : "save_delivered_unverified",
+    draftRowEvidence: rowEvidence(verified),
     note: "Offline barrier stage result.",
     replyToId: targetTweetId,
-  };
+  } as StageReplyResult;
 }
 
 function dependencies(

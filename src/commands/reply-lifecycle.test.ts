@@ -15,11 +15,17 @@ import type {
 } from "../db.js";
 import type { GeneratedContent } from "../x/content.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
-import { XDraftStageError, type XDraftSaveFailurePhase } from "../x/saveProgress.js";
+import {
+  XDraftStageError,
+  type XDraftRowEvidence,
+  type XDraftSaveFailurePhase,
+} from "../x/saveProgress.js";
 
 const TARGET_ID = "1234567890123456789";
 const OTHER_TARGET_ID = "9876543210987654321";
 const TARGET_URL = `https://x.com/operator/status/${TARGET_ID}`;
+const RAW_CANARY =
+  "selector=[data-secret] PRIVATE_PATH_CANARY/operator/secret cookie=session-secret page=Private composer text";
 
 const CONTENT: GeneratedContent = {
   format: "tweet",
@@ -29,6 +35,19 @@ const CONTENT: GeneratedContent = {
     chars: 32,
     unit: "twitter_text_weighted",
   },
+  codeFlags: [],
+  linkFlags: [],
+  fidelityFlags: [],
+  warnings: [],
+};
+
+const THREAD_CONTENT: GeneratedContent = {
+  format: "thread",
+  limit: 280,
+  thread: [
+    { index: 1, total: 2, text: "1/2 First reply-thread row.", chars: 27 },
+    { index: 2, total: 2, text: "2/2 Second reply-thread row.", chars: 28 },
+  ],
   codeFlags: [],
   linkFlags: [],
   fidelityFlags: [],
@@ -64,6 +83,9 @@ interface HarnessOptions {
   stageResultMechanism?: "composer_close_save" | "article_create_autosave";
   stageResultPosts?: number;
   stageResultGetter?: "throwing" | "stateful";
+  stageRowEvidence?: unknown;
+  stageRowEvidenceGetter?: "throwing" | "stateful";
+  stageNote?: string;
   finalizeFails?: boolean;
   releaseFails?: boolean;
   releaseReturnsFalse?: boolean;
@@ -75,6 +97,41 @@ interface HarnessOptions {
 interface Harness {
   deps: ReplyRealRunDependencies;
   events: string[];
+}
+
+function observedRows(visibleRowCount: number, exactFullTextMatches: number) {
+  return {
+    outcome: "observed" as const,
+    route: "exact" as const,
+    modal: "single_visible" as const,
+    rows: "all_readable" as const,
+    visibleModalCount: 1 as const,
+    visibleRowCount,
+    exactFullTextMatches,
+  };
+}
+
+function rowEvidence(verified: boolean): XDraftRowEvidence {
+  const baseline = observedRows(1, 0);
+  return verified
+    ? {
+        status: "verified",
+        method: "unsent_row_full_text_delta",
+        contentMatch: "visible_scoped_multiset_plus_one",
+        nativeRowId: "unavailable",
+        listCompleteness: "visible_scoped_rows_only",
+        baseline,
+        postSave: observedRows(2, 1),
+      }
+    : {
+        status: "unverified",
+        method: "unsent_row_full_text_delta",
+        contentMatch: "post_exact_missing",
+        nativeRowId: "unavailable",
+        listCompleteness: "visible_scoped_rows_only",
+        baseline,
+        postSave: observedRows(1, 0),
+      };
 }
 
 function createHarness(options: HarnessOptions = {}): Harness {
@@ -143,7 +200,10 @@ function createHarness(options: HarnessOptions = {}): Harness {
           posts: options.stageResultPosts ?? (content.format === "thread" ? (content.thread?.length ?? 0) : 1),
           saveMechanism: options.stageResultMechanism ?? "composer_close_save",
           savePhase: options.verified ? "verified" : "save_delivered_unverified",
-          note: "Offline injected stage result.",
+          draftRowEvidence: Object.prototype.hasOwnProperty.call(options, "stageRowEvidence")
+            ? options.stageRowEvidence
+            : rowEvidence(Boolean(options.verified)),
+          note: options.stageNote ?? "Offline injected stage result.",
           replyToId: options.stageReplyToId ?? TARGET_ID,
         } as StageReplyResult;
         if (options.stageResultGetter === "throwing") {
@@ -157,6 +217,20 @@ function createHarness(options: HarnessOptions = {}): Harness {
               reads += 1;
               events.push(`stage:phase-read:${reads}`);
               return reads === 1 ? "save_delivered_unverified" : "verified";
+            },
+          });
+        }
+        if (options.stageRowEvidenceGetter === "throwing") {
+          Object.defineProperty(result, "draftRowEvidence", {
+            get() { throw new Error("RAW_ROW_EVIDENCE_GETTER_PRIVATE_PATH"); },
+          });
+        } else if (options.stageRowEvidenceGetter === "stateful") {
+          let reads = 0;
+          Object.defineProperty(result, "draftRowEvidence", {
+            get() {
+              reads += 1;
+              events.push(`stage:evidence-read:${reads}`);
+              return reads === 1 ? rowEvidence(false) : rowEvidence(true);
             },
           });
         }
@@ -180,7 +254,7 @@ function input(overrides: Partial<ReplyRealRunInput> = {}): ReplyRealRunInput {
 test("post-save finalization failure preserves phase evidence without claiming durable state", async () => {
   for (const [verified, status, draftEvidence] of [
     [false, "staged-unverified", /native draft may exist/i],
-    [true, "staged", /intended reply text prefix was observed.*reply-target binding was not verified/i],
+    [true, "staged", /full intended reply text was observed.*reply-target binding was not verified/i],
   ] as const) {
     const harness = createHarness({ finalizeFails: true, verified });
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -201,6 +275,7 @@ test("post-save finalization failure preserves phase evidence without claiming d
     assert.match(outcome.message, /record and reservation finalization outcome could not be confirmed/);
     assert.match(outcome.message, /reservation and finalized-history state are unknown/);
     assert.equal(outcome.savePhase, verified ? "verified" : "save_delivered_unverified");
+    assert.equal(outcome.draftRowEvidence?.status, verified ? "verified" : "unverified");
     assert.match(outcome.message, /exact CLI-owned profile used by this run/);
     assert.doesNotMatch(
       outcome.message,
@@ -236,6 +311,8 @@ test("undefined or wrong-target stage results remain inconclusive and retain the
     { stageReplyToId: OTHER_TARGET_ID },
     { stageResultMechanism: "article_create_autosave" as const },
     { stageResultPosts: 2 },
+    { stageRowEvidence: null },
+    { stageRowEvidence: rowEvidence(true) },
   ]) {
     const harness = createHarness(options);
     const outcome = await executeReplyRealRun(input(), harness.deps);
@@ -272,6 +349,38 @@ test("reply result getters cannot leak or change phase after validation", async 
   assert.equal(statefulOutcome.exitCode, 1);
 });
 
+test("nested row evidence is snapshotted once and malformed facts never finalize", async () => {
+  for (const options of [
+    { stageRowEvidenceGetter: "throwing" as const },
+    { verified: true, stageRowEvidence: rowEvidence(false) },
+    { verified: true, stageRowEvidence: { status: "verified" } },
+    {
+      stageRowEvidence: {
+        ...rowEvidence(false),
+        postSave: observedRows(2, 1),
+      },
+    },
+  ]) {
+    const harness = createHarness(options);
+    const outcome = await executeReplyRealRun(input(), harness.deps);
+    assert.equal(outcome.kind, options.stageRowEvidenceGetter ? "native_stage_uncertain" : "stage_result_inconclusive");
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.draftRowEvidence, null);
+    assert.equal(harness.events.some((event) => event.startsWith("ledger:finalize")), false);
+    assert.doesNotMatch(outcome.message, /RAW_ROW_EVIDENCE|PRIVATE_PATH/);
+  }
+
+  const stateful = createHarness({
+    verified: true,
+    stageRowEvidenceGetter: "stateful",
+  });
+  const outcome = await executeReplyRealRun(input(), stateful.deps);
+  assert.equal(stateful.events.filter((event) => event.startsWith("stage:evidence-read")).length, 1);
+  assert.equal(outcome.kind, "stage_result_inconclusive");
+  assert.equal(outcome.draftRowEvidence, null);
+  assert.equal(stateful.events.some((event) => event.startsWith("ledger:finalize")), false);
+});
+
 test("verified and unverified returns finalize before close but only verified succeeds", async () => {
   for (const [verified, status, kind, exitCode, evidence] of [
     [true, "staged", "staged", 0, /saved draft reply-target binding verified: no/],
@@ -291,9 +400,12 @@ test("verified and unverified returns finalize before close but only verified su
     assert.equal(outcome.kind, kind);
     assert.equal(outcome.exitCode, exitCode);
     assert.equal(outcome.savePhase, verified ? "verified" : "save_delivered_unverified");
+    assert.equal(outcome.draftRowEvidence?.status, verified ? "verified" : "unverified");
     assert.match(outcome.message, evidence);
     if (verified) {
-      assert.match(outcome.message, new RegExp(`intended X reply text prefix.*requested target ${TARGET_ID}.*NEVER posted`, "s"));
+      assert.match(outcome.message, new RegExp(`Native X Save action returned.*NEVER posted.*request context: target ${TARGET_ID}.*intent only.*full intended X reply text`, "s"));
+      assert.match(outcome.message, /visible scoped row multiset changed by exactly that one full-text value/);
+      assert.match(outcome.message, /full-list completeness and causality: unproven/);
       assert.doesNotMatch(outcome.message, /target preserved|reply draft[^\n]*\bto \d+/i);
     } else {
       assert.match(outcome.message, /exact CLI-owned profile used by this run/);
@@ -303,13 +415,68 @@ test("verified and unverified returns finalize before close but only verified su
   }
 });
 
+test("coherent baseline-unavailable evidence finalizes staged-unverified after Save returned", async () => {
+  const unavailable = {
+    status: "unverified",
+    method: "unsent_row_full_text_delta",
+    contentMatch: "baseline_unavailable",
+    nativeRowId: "unavailable",
+    listCompleteness: "visible_scoped_rows_only",
+    baseline: {
+      outcome: "route_not_exact",
+      route: "not_exact",
+      modal: "not_observed",
+      rows: "not_observed",
+      visibleModalCount: null,
+      visibleRowCount: null,
+      exactFullTextMatches: null,
+    },
+    postSave: {
+      outcome: "probe_failed",
+      route: "unknown",
+      modal: "not_observed",
+      rows: "not_observed",
+      visibleModalCount: null,
+      visibleRowCount: null,
+      exactFullTextMatches: null,
+    },
+  } as const;
+  const harness = createHarness({ verified: false, stageRowEvidence: unavailable });
+  const outcome = await executeReplyRealRun(input(), harness.deps);
+
+  assert.deepEqual(harness.events, [
+    "ledger:open",
+    `ledger:claim:${TARGET_ID}:force=false`,
+    "stage:load",
+    `stage:run:${TARGET_URL}:tweet`,
+    `ledger:finalize:${TARGET_ID}:staged-unverified`,
+    "ledger:close",
+  ]);
+  assert.equal(outcome.kind, "staged_unverified");
+  assert.equal(outcome.exitCode, 1);
+  assert.equal(outcome.savePhase, "save_delivered_unverified");
+  assert.equal(outcome.draftRowEvidence?.contentMatch, "baseline_unavailable");
+  assert.match(outcome.message, /finalized as staged-unverified/);
+});
+
+test("verified reply-thread receipts limit positive row evidence to the first row", async () => {
+  const harness = createHarness({ verified: true });
+  const outcome = await executeReplyRealRun(input({ content: THREAD_CONTENT }), harness.deps);
+  assert.equal(outcome.kind, "staged");
+  assert.equal(outcome.exitCode, 0);
+  assert.match(outcome.message, /full intended X first reply-thread row text/);
+  assert.match(outcome.message, /thread, 2 posts/);
+  assert.match(outcome.message, /Review every saved row/);
+  assert.doesNotMatch(outcome.message, /full intended X reply text/);
+});
+
 test("reply receipts never turn requested-target intent into verified target binding", async () => {
   const stagedUnverifiedPrior: ReplyLedgerEntry = {
     ...PRIOR,
     status: "staged-unverified",
   };
   for (const fixture of [
-    { verified: true },
+    { verified: true, stageNote: RAW_CANARY },
     { verified: true, finalizeFails: true },
     { verified: true, closeFails: true },
     { verified: false },
@@ -326,6 +493,7 @@ test("reply receipts never turn requested-target intent into verified target bin
     if (outcome.savePhase === "verified") {
       assert.match(outcome.message, /reply-target binding (?:was )?not verified|reply-target binding verified: no/i);
     }
+    assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
   }
 });
 

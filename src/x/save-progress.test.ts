@@ -5,16 +5,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Locator, Page } from "playwright";
 import {
+  snapshotXDraftRowEvidence,
   XDraftStageError,
   runXDraftSaveFlow,
   xDraftMayExist,
+  type XArticleCoverHandoff,
+  type XDraftRowEvidence,
 } from "./saveProgress.js";
 import {
   saveAsDraft,
   stageArticleCover,
   stageArticleDraft,
   verifyArticleDraftSaved,
-  verifyDraftSaved,
   type ArticleDraftStageDependencies,
   type SaveAsDraftDependencies,
 } from "./draftPoster.js";
@@ -22,6 +24,52 @@ import { generateContent } from "./content.js";
 
 const RAW_CANARY =
   "selector=[data-secret] PRIVATE_PATH_CANARY/operator/secret token=super-secret page=Private composer text";
+
+function missingCover(): XArticleCoverHandoff {
+  return {
+    status: "missing",
+    ratio: "not_observed",
+    width: null,
+    height: null,
+    crop: "not_observed",
+  };
+}
+
+function observedRows(visibleRowCount: number, exactFullTextMatches: number) {
+  return {
+    outcome: "observed" as const,
+    route: "exact" as const,
+    modal: "single_visible" as const,
+    rows: "all_readable" as const,
+    visibleModalCount: 1 as const,
+    visibleRowCount,
+    exactFullTextMatches,
+  };
+}
+
+function rowEvidence(verified: boolean): XDraftRowEvidence {
+  const baseline = observedRows(1, 0);
+  const postSave = verified ? observedRows(2, 1) : observedRows(1, 0);
+  return verified
+    ? {
+        status: "verified",
+        method: "unsent_row_full_text_delta",
+        contentMatch: "visible_scoped_multiset_plus_one",
+        nativeRowId: "unavailable",
+        listCompleteness: "visible_scoped_rows_only",
+        baseline,
+        postSave,
+      }
+    : {
+        status: "unverified",
+        method: "unsent_row_full_text_delta",
+        contentMatch: "post_exact_missing",
+        nativeRowId: "unavailable",
+        listCompleteness: "visible_scoped_rows_only",
+        baseline,
+        postSave,
+      };
+}
 
 async function capturedStageError(run: () => Promise<unknown>): Promise<XDraftStageError> {
   try {
@@ -211,7 +259,7 @@ test("composer wiring never verifies a stale match when Save was not invoked", a
       {} as Page,
       async () => {
         events.push("verify:stale-match");
-        return true;
+        return rowEvidence(true);
       },
       composerDependencies(fixture, events),
     ));
@@ -228,7 +276,7 @@ test("composer wiring marks click rejection unknown and all later failures unver
     {} as Page,
     async () => {
       clickEvents.push("verify");
-      return true;
+      return rowEvidence(true);
     },
     composerDependencies({ saveFails: true }, clickEvents),
   ));
@@ -243,7 +291,7 @@ test("composer wiring marks click rejection unknown and all later failures unver
       async () => {
         events.push("verify");
         if (fixture.verifyFails) throw new Error(RAW_CANARY);
-        return true;
+        return rowEvidence(true);
       },
       composerDependencies(fixture, events),
     ));
@@ -259,7 +307,7 @@ test("composer wiring returns unverified for a negative reopen and verified only
       {} as Page,
       async () => {
         events.push("verify");
-        return verified;
+        return rowEvidence(verified);
       },
       composerDependencies({ verified }, events),
     );
@@ -268,61 +316,42 @@ test("composer wiring returns unverified for a negative reopen and verified only
   }
 });
 
-test("composer verification requires the exact drafts route around every text observation", async () => {
-  const expected = "Unique staged reply prefix that must not match on home";
-  let bodyReads = 0;
-  const page = {
-    async goto() { return null; },
-    async waitForTimeout() {},
-    url() { return "https://x.com/home"; },
-    locator() {
-      return {
-        async innerText() {
-          bodyReads += 1;
-          return expected;
-        },
-      };
+test("malformed verifier evidence cannot regress a returned Save to delivery-unknown", async () => {
+  for (const malformed of [
+    null,
+    { status: "unverified" },
+    {
+      ...rowEvidence(false),
+      contentMatch: "post_unavailable",
+      baseline: {
+        outcome: "not_observed",
+        route: "not_observed",
+        modal: "not_observed",
+        rows: "not_observed",
+        visibleModalCount: null,
+        visibleRowCount: null,
+        exactFullTextMatches: null,
+      },
     },
-  } as unknown as Page;
-  assert.equal(await verifyDraftSaved(page, expected), false);
-  assert.equal(bodyReads, 0, "wrong-route text must never be considered");
-
-  const draftsPage = {
-    ...page,
-    url() { return "https://x.com/compose/post/unsent/drafts"; },
-  } as unknown as Page;
-  assert.equal(await verifyDraftSaved(draftsPage, expected), true);
-
-  const decoratedPage = {
-    ...page,
-    url() { return "https://x.com/compose/post/unsent/drafts?source=cli#drafts"; },
-  } as unknown as Page;
-  assert.equal(await verifyDraftSaved(decoratedPage, expected), false);
-
-  const malformedRoutePage = {
-    ...page,
-    url() { return "not a URL"; },
-  } as unknown as Page;
-  assert.equal(await verifyDraftSaved(malformedRoutePage, expected), false);
-
-  let currentUrl = "https://x.com/compose/post/unsent/drafts";
-  let driftingBodyReads = 0;
-  const driftingPage = {
-    async goto() { return null; },
-    async waitForTimeout() {},
-    url() { return currentUrl; },
-    locator() {
-      return {
-        async innerText() {
-          driftingBodyReads += 1;
-          currentUrl = "https://x.com/login";
-          return expected;
-        },
-      };
-    },
-  } as unknown as Page;
-  assert.equal(await verifyDraftSaved(driftingPage, expected), false);
-  assert.equal(driftingBodyReads, 1, "route drift during the body read must suppress a matching prefix");
+  ]) {
+    const events: string[] = [];
+    const result = await saveAsDraft(
+      {} as Page,
+      async () => malformed as never,
+      composerDependencies({}, events),
+    );
+    assert.equal(result.savePhase, "save_delivered_unverified");
+    assert.equal(result.draftRowEvidence.contentMatch, "baseline_unavailable");
+    assert.equal(result.draftRowEvidence.baseline.outcome, "not_observed");
+    assert.ok(snapshotXDraftRowEvidence(result.draftRowEvidence));
+    assert.deepEqual(events, [
+      "close:locate",
+      "close:click",
+      "save:locate",
+      "save:click",
+      "save:settle",
+    ]);
+  }
 });
 
 type ArticleFailurePoint =
@@ -392,10 +421,10 @@ function articleDependencies(
       events.push("body:write");
       fail("write_body");
     },
-    async stageCover(page, basePath, notes) {
+    async stageCover(page, basePath) {
       events.push("cover:stage");
       fail("stage_cover");
-      return opts.stageCover ? opts.stageCover(page, basePath, notes) : false;
+      return opts.stageCover ? opts.stageCover(page, basePath) : missingCover();
     },
     async settle() {
       events.push("autosave:settle");
@@ -638,12 +667,18 @@ test("verified Article output stays bounded when a cover upload fails", async ()
         return locator;
       },
     } as unknown as Page;
-    const notes: string[] = [];
-    assert.equal(await stageArticleCover(coverPage, basePath, notes), false);
-    assert.match(notes.join("\n"), /HERO UPLOAD INCOMPLETE/);
-    assert.doesNotMatch(notes.join("\n"), /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer|private-cover|publish-x-article-private/);
+    assert.deepEqual(await stageArticleCover(coverPage, basePath), {
+      status: "upload_incomplete",
+      ratio: "within_5_2",
+      width: 1500,
+      height: 600,
+      crop: "not_observed",
+    });
 
-    const generated = await generateContent("# Article title\n\nArticle body.", { format: "article" });
+    const generated = await generateContent(
+      "# Article title\n\nArticle body.\n\n```js\nconst fixture = true;\n```",
+      { format: "article" },
+    );
     const events: string[] = [];
     const result = await stageArticleDraft(
       {} as never,
@@ -652,14 +687,24 @@ test("verified Article output stays bounded when a cover upload fails", async ()
       basePath,
       articleDependencies(events, {
         verified: true,
-        async stageCover(_page, sourcePath, resultNotes) {
-          return stageArticleCover(coverPage, sourcePath, resultNotes);
+        async stageCover(_page, sourcePath) {
+          return stageArticleCover(coverPage, sourcePath);
         },
       }),
     );
     assert.equal(result.savePhase, "verified");
-    assert.match(result.note, /HERO UPLOAD INCOMPLETE/);
-    assert.doesNotMatch(result.note, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer|private-cover|publish-x-article-private/);
+    if (result.saveMechanism !== "article_create_autosave") {
+      assert.fail("expected an Article result");
+    }
+    assert.equal(result.articleHandoff.codeBlockCount, 1);
+    assert.deepEqual(result.articleHandoff.cover, {
+      status: "upload_incomplete",
+      ratio: "within_5_2",
+      width: 1500,
+      height: 600,
+      crop: "not_observed",
+    });
+    assert.doesNotMatch(JSON.stringify(result.articleHandoff), /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer|private-cover|publish-x-article-private/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
