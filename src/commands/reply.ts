@@ -9,7 +9,12 @@ import {
   isLocalValidationError,
 } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
-import type { ReplyLedgerEntry } from "../db.js";
+import type {
+  ReplyLedgerEntry,
+  ReplyReservation,
+  ReplyReservationClaim,
+  ReplyReservationRecovery,
+} from "../db.js";
 import type { StageReplyResult } from "../x/draftPoster.js";
 
 /**
@@ -29,10 +34,11 @@ import type { StageReplyResult } from "../x/draftPoster.js";
  *      markdown file via --from (exactly one) — and DETERMINISTICALLY generate a
  *      tweet (default; --long raises the cap) — reusing src/x/content.ts.
  *   3. --dry-run: generate + print ONLY; do NOT open the reply ledger or touch
- *      browser/profile/database state. Duplicate-ledger preflight is deferred.
- *   4. Otherwise: check the reply ledger, then drive the persistent logged-in
- *      profile to stage the reply draft when the target is not a duplicate (or
- *      --force explicitly overrides it).
+ *      browser/profile/database state. Reply-ledger claim/finalization is deferred.
+ *   4. Otherwise: atomically reserve the normalized target, commit that short
+ *      SQLite transaction, and only then drive the persistent logged-in profile.
+ *      Finalize staged history and release the owner-matched claim atomically
+ *      after the native staging flow returns.
  */
 
 interface ReplyXOptions {
@@ -43,14 +49,20 @@ interface ReplyXOptions {
   dryRun?: boolean;
   inspect?: boolean;
   force?: boolean;
+  recoverStaleReservationAfterConfirmingNoDraft?: boolean;
 }
 
 export interface ReplyLedgerPort {
-  find(targetTweetId: string): ReplyLedgerEntry | undefined;
-  record(
+  claimReservation(
     targetTweetId: string,
+    opts?: { force?: boolean },
+  ): ReplyReservationClaim;
+  releaseReservation(reservation: ReplyReservation): boolean;
+  finalizeReservation(
+    reservation: ReplyReservation,
     opts?: { status?: string; draftRef?: string | null },
   ): void;
+  recoverStaleReservation(targetTweetId: string): ReplyReservationRecovery;
   close(): void;
 }
 
@@ -74,6 +86,12 @@ export interface ReplyRealRunInput {
 export interface ReplyRealRunOutcome {
   kind:
     | "duplicate"
+    | "reservation_active"
+    | "reservation_stale"
+    | "reservation_ambiguous"
+    | "reservation_missing"
+    | "reservation_recovered"
+    | "reservation_recovery_uncertain"
     | "ledger_preflight_failed"
     | "stage_runtime_failed"
     | "stage_result_inconclusive"
@@ -84,6 +102,8 @@ export interface ReplyRealRunOutcome {
   stream: "stdout" | "stderr";
   message: string;
 }
+
+const RECOVER_RESERVATION_FLAG = "--recover-stale-reservation-after-confirming-no-draft";
 
 function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
   return {
@@ -96,19 +116,107 @@ function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
   };
 }
 
-function ledgerPreflightFailure(phase: "open" | "find"): ReplyRealRunOutcome {
-  const action = phase === "open" ? "open" : "read";
+function reservationBlockedOutcome(
+  claim: Extract<ReplyReservationClaim, { kind: "reservation_blocked" }>,
+): ReplyRealRunOutcome {
+  const target = claim.reservation.targetTweetId;
+  const reservedAtMs = Date.parse(claim.reservation.reservedAt);
+  const heldSince = Number.isFinite(reservedAtMs)
+    ? new Date(reservedAtMs).toISOString()
+    : "an invalid or unknown time";
+  if (claim.state === "active") {
+    return {
+      kind: "reservation_active",
+      exitCode: 2,
+      stream: "stderr",
+      message:
+        `\n✗ An active X reply reservation already owns target ${target} since ${heldSince}. No native staging was attempted.\n` +
+        "  Another run may still be staging. --force cannot bypass any reservation; wait for the owning run to finish.",
+    };
+  }
+  if (claim.state === "stale") {
+    return {
+      kind: "reservation_stale",
+      exitCode: 2,
+      stream: "stderr",
+      message:
+        `\n✗ A stale X reply reservation blocks target ${target}; it was acquired at ${heldSince}. No native staging was attempted.\n` +
+        "  Age makes the claim eligible for operator-reviewed recovery; it does not prove that the prior process stopped or that no draft exists.\n" +
+        "  Do not retry; --force cannot bypass the claim. First ensure the prior process stopped and compare X Unsent/Drafts manually in the exact CLI-owned profile used by that run.\n" +
+        "  If a matching draft exists or the comparison is uncertain, leave the reservation in place and do not retry.\n" +
+        `  Only after confirming no matching reply draft exists, run publish x reply --to ${target} ${RECOVER_RESERVATION_FLAG}; it clears the claim and exits without staging.`,
+    };
+  }
+  return {
+    kind: "reservation_ambiguous",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ An X reply reservation with ambiguous timing blocks target ${target}. No native staging was attempted.\n` +
+      "  The prior process state and native-draft outcome are unknown. --force cannot bypass the claim.\n" +
+      "  Compare X Unsent/Drafts manually in the exact CLI-owned profile used by the originating run, then repair the local durable state before any retry.",
+  };
+}
+
+function ledgerPreflightFailure(phase: "open" | "claim" | "recovery"): ReplyRealRunOutcome {
+  const action = phase === "open"
+    ? "open"
+    : phase === "claim"
+      ? "atomically claim a target in"
+      : "recover a stale target reservation from";
+  const recovery = phase === "recovery";
   return {
     kind: "ledger_preflight_failed",
     exitCode: 1,
     stream: "stderr",
     message:
       `\n✗ Could not ${action} the X reply duplicate ledger. No native staging was attempted.\n` +
-      "  Repair the local durable state before retrying; the duplicate guard could not run.",
+      (recovery
+        ? "  Reservation recovery could not be confirmed. Do not stage or use --force until the local durable state is inspected."
+        : "  Repair the local durable state before retrying; the duplicate guard could not run."),
   };
 }
 
-function nativeStageFailure(error: unknown): ReplyRealRunOutcome {
+function reservationRecoveredOutcome(targetTweetId: string): ReplyRealRunOutcome {
+  return {
+    kind: "reservation_recovered",
+    exitCode: 0,
+    stream: "stdout",
+    message:
+      `\n✓ Cleared the stale X reply reservation for target ${targetTweetId}. No native staging was attempted.\n` +
+      "  This recovery relies on the operator's attestation that the prior process stopped, X Unsent/Drafts was checked in the exact CLI-owned profile used by that run, and no matching reply draft was found.\n" +
+      "  Clearing only removes the local claim; the CLI neither verifies nor deletes native drafts. Any staging requires a separate reply command; use --force only to intentionally bypass finalized history.",
+  };
+}
+
+function reservationRecoveryOutcome(result: ReplyReservationRecovery, targetTweetId: string): ReplyRealRunOutcome {
+  if (result.kind === "recovered") return reservationRecoveredOutcome(targetTweetId);
+  if (result.kind === "missing") {
+    return {
+      kind: "reservation_missing",
+      exitCode: 2,
+      stream: "stderr",
+      message:
+        `\n✗ No X reply reservation exists for target ${targetTweetId}. No state was cleared and no native staging was attempted.`,
+    };
+  }
+  return reservationBlockedOutcome({
+    kind: "reservation_blocked",
+    reservation: result.reservation,
+    state: result.state,
+  });
+}
+
+function retainedReservationGuidance(replyToId: string): string {
+  return (
+    `  The reservation for target ${replyToId} remains because the native-draft outcome is not safe to infer.\n` +
+    "  Do not retry or use --force. Ensure the prior process stopped and check X Unsent/Drafts manually in the exact CLI-owned profile used by this run.\n" +
+    "  If a matching draft exists or the comparison is uncertain, leave the reservation in place.\n" +
+    `  After 24 hours and only after confirming no matching reply draft exists, ${RECOVER_RESERVATION_FLAG} can clear the stale claim; it never stages a draft.`
+  );
+}
+
+function nativeStageFailure(error: unknown, replyToId: string): ReplyRealRunOutcome {
   const detail = error instanceof Error ? error.message : String(error);
   return {
     kind: "native_stage_failed",
@@ -116,7 +224,8 @@ function nativeStageFailure(error: unknown): ReplyRealRunOutcome {
     stream: "stderr",
     message:
       `\n✗ Failed to stage the X reply draft: ${detail}\n` +
-      "  Composer selectors may need live calibration — re-run with --inspect to watch the DOM.",
+      "  Composer selectors may need live calibration, but --inspect cannot bypass or clear the retained reservation.\n" +
+      retainedReservationGuidance(replyToId),
   };
 }
 
@@ -127,7 +236,7 @@ function stageRuntimeFailure(): ReplyRealRunOutcome {
     stream: "stderr",
     message:
       "\n✗ Could not initialize the X reply staging runtime. No native staging was attempted.\n" +
-      "  Verify the local installation and runtime dependencies before retrying.",
+      "  Verify the local installation and runtime dependencies.",
   };
 }
 
@@ -138,30 +247,33 @@ function stageResultInconclusive(replyToId: string): ReplyRealRunOutcome {
     stream: "stderr",
     message:
       `\n✗ X reply staging returned no usable result for target ${replyToId} (NEVER posted).\n` +
-      "  The native draft may exist, and no reply-ledger record was written.\n" +
-      "  Do not retry automatically. Before any retry, compare X Unsent/Drafts manually in the same CLI-owned profile.",
+      "  The native draft may exist, and no reply-ledger finalization was confirmed.\n" +
+      retainedReservationGuidance(replyToId),
   };
 }
 
 function ledgerPersistenceFailure(
   result: StageReplyResult,
-  phase: "record" | "close",
+  phase: "finalize" | "close",
+  replyToId: string,
 ): ReplyRealRunOutcome {
   const draftState = result.verified
     ? "The native draft was verified in X Unsent/Drafts"
     : "The native draft may exist";
-  const ledgerState = phase === "record"
-    ? "its reply-ledger record could not be confirmed"
-    : "the reply ledger did not close cleanly after its record was written";
-  const failureKind = phase === "record" ? "persistence" : "cleanup";
+  const ledgerState = phase === "finalize"
+    ? "its reply-ledger record and reservation finalization could not be confirmed"
+    : "its reply-ledger record and reservation finalization completed, but the ledger did not close cleanly";
+  const failureKind = phase === "finalize" ? "persistence" : "cleanup";
   return {
     kind: "ledger_persistence_failed",
     exitCode: 1,
     stream: "stderr",
     message:
-      `\n✗ X reply ledger ${failureKind} failed after the native staging flow returned for target ${result.replyToId} (NEVER posted).\n` +
+      `\n✗ X reply ledger ${failureKind} failed after the native staging flow returned for target ${replyToId} (NEVER posted).\n` +
       `  ${draftState}, but ${ledgerState}.\n` +
-      "  Do not retry automatically. Before any retry, compare X Unsent/Drafts manually in the same CLI-owned profile.",
+      (phase === "finalize"
+        ? retainedReservationGuidance(replyToId)
+        : "  Do not retry automatically. Before any retry, compare X Unsent/Drafts manually in the exact CLI-owned profile used by this run."),
   };
 }
 
@@ -188,6 +300,16 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
       message: `${outcome.message}\n  Closing the reply ledger also failed; cleanup was attempted once and was not retried.`,
     };
   }
+  if (outcome.kind === "reservation_recovered") {
+    return {
+      kind: "reservation_recovery_uncertain",
+      exitCode: 1,
+      stream: "stderr",
+      message:
+        "\n✗ The stale reservation clear returned, but the reply ledger did not close cleanly. No native staging was attempted.\n" +
+        "  Inspect the local durable state before any reply action; do not stage or use --force while recovery state is uncertain.",
+    };
+  }
   if (outcome.kind === "duplicate") {
     const duplicateFact = outcome.message.split("\n", 1)[0];
     return {
@@ -205,14 +327,35 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
       ...outcome,
       message:
         `${stageFact}\n` +
-        "  The reply ledger also failed to close after the native staging failure.\n" +
-        "  Repair durable state before retrying. Use --inspect later only if the native error specifically indicates composer selector drift.",
+        "  The reservation remains, and the reply ledger also failed to close after the native staging failure.\n" +
+        "  Do not retry or use --force. Repair durable state and compare X Unsent/Drafts in the exact originating CLI-owned profile.",
     };
   }
   return {
     ...outcome,
     exitCode: 1,
     message: `${outcome.message}\n  The reply ledger also failed to close; repair durable state before retrying.`,
+  };
+}
+
+function withPreBrowserRelease(
+  outcome: ReplyRealRunOutcome,
+  released: boolean,
+): ReplyRealRunOutcome {
+  if (released) {
+    return {
+      ...outcome,
+      message:
+        `${outcome.message}\n` +
+        "  The owner-matched reservation was released because the browser staging function was never invoked. Repair the runtime before any separate retry.",
+    };
+  }
+  return {
+    ...outcome,
+    exitCode: 1,
+    message:
+      `${outcome.message}\n` +
+      "  The owner-matched reservation could not be released. --force cannot bypass it; repair durable state before retrying.",
   };
 }
 
@@ -234,20 +377,27 @@ export async function executeReplyRealRun(
 
   let outcome: ReplyRealRunOutcome | undefined;
   let stageResult: StageReplyResult | undefined;
+  let reservation: ReplyReservation | undefined;
   let closeFailed = false;
   try {
-    let prior: ReplyLedgerEntry | undefined;
+    let claim: ReplyReservationClaim | undefined;
     try {
-      prior = ledger.find(input.replyToId);
+      claim = ledger.claimReservation(input.replyToId, { force: input.force });
     } catch {
-      outcome = ledgerPreflightFailure("find");
+      outcome = ledgerPreflightFailure("claim");
     }
 
-    if (!outcome && prior && !input.force) {
-      outcome = duplicateOutcome(prior);
+    if (!outcome && !claim) outcome = ledgerPreflightFailure("claim");
+
+    if (!outcome && claim?.kind === "already_staged") {
+      outcome = duplicateOutcome(claim.entry);
+    } else if (!outcome && claim?.kind === "reservation_blocked") {
+      outcome = reservationBlockedOutcome(claim);
+    } else if (!outcome && claim?.kind === "acquired") {
+      reservation = claim.reservation;
     }
 
-    if (!outcome) {
+    if (!outcome && reservation) {
       let stageReplyDraft:
         | Awaited<ReturnType<ReplyRealRunDependencies["loadStageReplyDraft"]>>
         | undefined;
@@ -259,28 +409,39 @@ export async function executeReplyRealRun(
 
       if (!outcome && typeof stageReplyDraft !== "function") {
         outcome = stageRuntimeFailure();
+      }
+
+      if (outcome?.kind === "stage_runtime_failed") {
+        let released = false;
+        try {
+          released = ledger.releaseReservation(reservation);
+        } catch {
+          released = false;
+        }
+        outcome = withPreBrowserRelease(outcome, released);
       } else if (stageReplyDraft) {
         try {
           const result = await stageReplyDraft(input.content, input.targetIdOrUrl, {
             inspect: input.inspect,
           });
-          if (result) stageResult = result;
+          if (result && result.replyToId === input.replyToId) stageResult = result;
           else outcome = stageResultInconclusive(input.replyToId);
         } catch (error) {
-          outcome = nativeStageFailure(error);
+          outcome = nativeStageFailure(error, input.replyToId);
         }
       }
     }
 
-    if (!outcome && stageResult) {
+    if (!outcome && stageResult && reservation) {
       try {
-        // Attempt durable write-dedup only after the native staging flow returns.
-        ledger.record(stageResult.replyToId, {
+        // Atomically persist write-dedup and release only this process's claim,
+        // after the native staging flow returns.
+        ledger.finalizeReservation(reservation, {
           status: stageResult.verified ? "staged" : "staged-unverified",
         });
         outcome = stagedOutcome(stageResult);
       } catch {
-        outcome = ledgerPersistenceFailure(stageResult, "record");
+        outcome = ledgerPersistenceFailure(stageResult, "finalize", input.replyToId);
       }
     }
   } finally {
@@ -294,9 +455,38 @@ export async function executeReplyRealRun(
   if (!outcome) return stageResultInconclusive(input.replyToId);
   if (!closeFailed) return outcome;
   if (stageResult && outcome.kind === "staged") {
-    return ledgerPersistenceFailure(stageResult, "close");
+    return ledgerPersistenceFailure(stageResult, "close", input.replyToId);
   }
   return withLedgerCloseFailure(outcome);
+}
+
+export async function executeReplyReservationRecovery(
+  replyToId: string,
+  deps: ReplyRealRunDependencies,
+): Promise<ReplyRealRunOutcome> {
+  let ledger: ReplyLedgerPort;
+  try {
+    ledger = await deps.openLedger();
+  } catch {
+    return ledgerPreflightFailure("open");
+  }
+
+  let outcome: ReplyRealRunOutcome;
+  let closeFailed = false;
+  try {
+    try {
+      outcome = reservationRecoveryOutcome(ledger.recoverStaleReservation(replyToId), replyToId);
+    } catch {
+      outcome = ledgerPreflightFailure("recovery");
+    }
+  } finally {
+    try {
+      ledger.close();
+    } catch {
+      closeFailed = true;
+    }
+  }
+  return closeFailed ? withLedgerCloseFailure(outcome) : outcome;
 }
 
 const productionReplyRealRunDependencies: ReplyRealRunDependencies = {
@@ -318,9 +508,13 @@ export function registerReplyCommand(x: Command): void {
     .option("--text <content>", "Reply content inline (exactly one of --text / --from)")
     .option("--from <base.md>", "Canonical markdown ('-' = stdin); strips leading mapping/empty YAML frontmatter")
     .option("--long", "Use the local 25,000-code-point guard for Premium long replies; X acceptance is server-authoritative")
-    .option("--dry-run", "Locally validate syntax/content, generate, and render; skips browser and duplicate ledger")
+    .option("--dry-run", "Locally validate syntax/content, generate, and render; skips browser and reply ledger")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
-    .option("--force", "Real runs only: re-stage even if a reply to this tweet was already recorded in the ledger")
+    .option("--force", "Real runs only: bypass finalized history, never any reservation")
+    .option(
+      RECOVER_RESERVATION_FLAG,
+      "Attest the prior process stopped and exact originating profile has no matching draft; clear an eligible 24h-old claim and exit",
+    )
     .addHelpText(
       "after",
       "\nFile/stdin frontmatter:\n" +
@@ -330,15 +524,61 @@ export function registerReplyCommand(x: Command): void {
         "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
         "  Inline --text is always literal and is never interpreted as frontmatter.\n" +
         "\nDry-run behavior:\n" +
-        "  --dry-run skips the duplicate ledger and all browser/profile/database state.\n" +
+        "  --dry-run skips the reply ledger/reservations and all browser/profile/database state.\n" +
         "  Target ID/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X.\n" +
-        "  A real run still checks the ledger and may refuse a recorded target unless --force is supplied.\n" +
+        "  A real run first claims the normalized target, then may refuse finalized history unless --force is supplied.\n" +
+        "  --force never bypasses an in-flight or retained reservation.\n" +
+        "\nConcurrent-run reservation:\n" +
+        "  Real runs atomically reserve the normalized target before browser staging when they share the same live SQLite file.\n" +
+        "  --force bypasses finalized history only; it never bypasses an active, stale, or ambiguous reservation.\n" +
+        "  A claim aged 24 hours is only eligible for explicit review-based recovery; age never clears it or starts staging.\n" +
+        `  ${RECOVER_RESERVATION_FLAG} attests the prior process stopped, X Unsent/Drafts was checked in the exact CLI-owned profile used by that run, and no matching reply draft was found.\n` +
+        "  If a matching draft exists or the comparison is uncertain, leave the reservation in place and do not retry or use --force.\n" +
+        "  Recovery clears only the stale claim and exits. It cannot be combined with content or staging flags.\n" +
         "\nReal-run ledger recovery:\n" +
-        "  If native staging returns but reply-ledger record/close fails, exit 1; the draft may exist.\n" +
-        "  Before any retry, compare X Unsent/Drafts manually in the same CLI-owned profile.\n" +
+        "  If native staging returns but reply-ledger finalization/close fails, exit 1; the draft may exist.\n" +
+        "  Before any retry, compare X Unsent/Drafts manually in the exact CLI-owned profile used by the failed run.\n" +
         "  --inspect and selector calibration cannot repair a reply-ledger failure.\n",
     )
     .action(async (opts: ReplyXOptions) => {
+      if (opts.recoverStaleReservationAfterConfirmingNoDraft) {
+        const conflicts = [
+          opts.text !== undefined ? "--text" : undefined,
+          opts.from !== undefined ? "--from" : undefined,
+          opts.long ? "--long" : undefined,
+          opts.dryRun ? "--dry-run" : undefined,
+          opts.inspect ? "--inspect" : undefined,
+          opts.force ? "--force" : undefined,
+        ].filter((flag): flag is string => flag !== undefined);
+        if (conflicts.length > 0) {
+          console.error(
+            `${RECOVER_RESERVATION_FLAG} is recovery-only and accepts only --to; remove ${conflicts.join(
+              ", ",
+            )}. No reply-ledger or browser state was accessed.`,
+          );
+          process.exit(2);
+          return;
+        }
+
+        let recoveryTargetId: string;
+        try {
+          recoveryTargetId = extractTweetId(opts.to);
+        } catch (error) {
+          console.error(`Invalid --to: ${(error as Error).message}`);
+          process.exit(2);
+          return;
+        }
+
+        const outcome = await executeReplyReservationRecovery(
+          recoveryTargetId,
+          productionReplyRealRunDependencies,
+        );
+        if (outcome.stream === "stdout") console.log(outcome.message);
+        else console.error(outcome.message);
+        process.exit(outcome.exitCode);
+        return;
+      }
+
       // Resolve content (inline --text or --from file/stdin) up front so a usage
       // error fails fast before we touch the browser or the ledger.
       let md: string;
@@ -421,8 +661,8 @@ export function registerReplyCommand(x: Command): void {
             "  No browser opened; no profile, data-repository, or SQLite runtime state was read or written.\n" +
             "  Target ID/URL syntax was validated locally. Target existence, visibility, and reply eligibility were not " +
             "verified; X remains authoritative for those checks during a real run.\n" +
-            "  Duplicate-ledger preflight was skipped. A real run checks the ledger before staging and may " +
-            "refuse a recorded target unless --force is explicitly supplied.",
+            "  Reply-ledger claim/finalization was skipped. A real run first claims the normalized target and may " +
+            "refuse finalized history unless --force is explicitly supplied; --force never bypasses an in-flight or retained reservation.",
         );
         process.exit(0);
       }

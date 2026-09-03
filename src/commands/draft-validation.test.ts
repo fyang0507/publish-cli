@@ -246,11 +246,12 @@ test("valid X reply dry-runs render tweet and lossless thread previews without r
         result.stdout,
         /Target existence, visibility, and reply eligibility were not verified; X remains authoritative for those checks during a real run/,
       );
-      assert.match(result.stdout, /Duplicate-ledger preflight was skipped/);
+      assert.match(result.stdout, /Reply-ledger claim\/finalization was skipped/);
       assert.match(
         result.stdout,
-        /real run checks the ledger before staging and may refuse a recorded target unless --force is explicitly supplied/,
+        /real run first claims the normalized target and may refuse finalized history unless --force is explicitly supplied/,
       );
+      assert.match(result.stdout, /--force never bypasses an in-flight or retained reservation/);
       assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED|Already staged/);
       for (const marker of testCase.markers) assert.match(result.stdout, new RegExp(marker));
 

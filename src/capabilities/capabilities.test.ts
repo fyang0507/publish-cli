@@ -154,12 +154,21 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   );
   assert.match(x, /Target existence, visibility, and reply eligibility are not verified by dry-run/);
   assert.match(x, /X remains authoritative for those checks during a real run/);
-  assert.match(x, /Duplicate-ledger preflight is deliberately skipped/);
-  assert.match(x, /later real run still checks the ledger and may refuse a recorded target unless `--force`/);
-  assert.match(x, /Real-run reply deduplication is checked before staging and recorded only after successful staging/);
-  assert.match(x, /native reply staging returns but the reply-ledger record or close fails/);
+  assert.match(x, /Reply-ledger claim\/finalization is deliberately skipped/);
+  assert.match(x, /later real run first claims the normalized target and may refuse finalized history unless `--force`/);
+  assert.match(x, /`--force` never bypasses an in-flight or retained reservation/);
+  assert.match(x, /share the same live SQLite file atomically reserve the normalized target before browser staging/);
+  assert.match(x, /Separate database files are not coordinated/);
+  assert.match(x, /`--force` may intentionally bypass finalized history, but it never bypasses an active, stale, or ambiguous reservation/);
+  assert.match(x, /24-hour-old claim is only eligible for explicit recovery; age never deletes it or starts staging/);
+  assert.match(x, /ensure the prior process stopped and check X Unsent\/Drafts in the exact CLI-owned profile used by that run/);
+  assert.match(x, /If a matching draft exists or the comparison is uncertain, leave the reservation in place/);
+  assert.match(x, /`--recover-stale-reservation-after-confirming-no-draft` clears the stale claim and exits without staging/);
+  assert.match(x, /staging-runtime initialization failure proves that the browser staging function was never invoked/);
+  assert.match(x, /Once `stageReplyDraft` is invoked, a thrown or unusable result retains the claim/);
+  assert.match(x, /native reply staging returns but reply-ledger finalization or close fails/);
   assert.match(x, /draft may already exist while durable deduplication is missing or uncertain/);
-  assert.match(x, /Never retry automatically.*compare X Unsent\/Drafts manually in the same CLI-owned profile/s);
+  assert.match(x, /Never retry automatically.*compare X Unsent\/Drafts manually in the exact CLI-owned profile used by that run/s);
   assert.match(x, /Selector calibration and `--inspect` do not repair a ledger failure/);
   assert.match(x, /intended authenticated action with `--inspect`/);
   assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
@@ -592,11 +601,18 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /mapping-intent malformed or unterminated metadata exits 2/,
     /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
     /Inline --text is always literal/,
-    /--dry-run skips the duplicate ledger and all browser\/profile\/database state/,
+    /--dry-run skips the reply ledger\/reservations and all browser\/profile\/database state/,
     /Target ID\/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X/,
-    /real run still checks the ledger and may refuse a recorded target unless --force/,
-    /If native staging returns but reply-ledger record\/close fails, exit 1; the draft may exist/,
-    /Before any retry, compare X Unsent\/Drafts manually in the same CLI-owned profile/,
+    /real run first claims the normalized target, then may refuse finalized history unless --force/,
+    /--force never bypasses an in-flight or retained reservation/,
+    /atomically reserve the normalized target before browser staging when they share the same live SQLite file/,
+    /--force bypasses finalized history only; it never bypasses an active, stale, or ambiguous reservation/,
+    /24 hours is only eligible for explicit review-based recovery; age never clears it or starts staging/,
+    /--recover-stale-reservation-after-confirming-no-draft attests the prior process stopped, X Unsent\/Drafts was checked in the exact CLI-owned profile used by that run, and no matching reply draft was found/,
+    /If a matching draft exists or the comparison is uncertain, leave the reservation in place/,
+    /Recovery clears only the stale claim and exits/,
+    /If native staging returns but reply-ledger finalization\/close fails, exit 1; the draft may exist/,
+    /Before any retry, compare X Unsent\/Drafts manually in the exact CLI-owned profile used by the failed run/,
     /--inspect and selector calibration cannot repair a reply-ledger failure/,
   ]) assert.match(xReplyHelp.stdout, evidence);
 
