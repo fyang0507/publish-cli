@@ -9,6 +9,13 @@ import {
 } from "../x/content.js";
 import { isLocalValidationError } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
+import {
+  isXDraftReturnedSavePhase,
+  isXDraftStageError,
+  type XDraftSaveMechanism,
+  type XDraftSavePhase,
+} from "../x/saveProgress.js";
+import type { StageDraftOptions, StageDraftResult } from "../x/draftPoster.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -40,6 +47,191 @@ interface DraftXOptions {
   dryRun?: boolean;
   inspect?: boolean;
 }
+
+export interface XDraftRealRunInput {
+  content: GeneratedContent;
+  inspect?: boolean;
+  basePath?: string;
+}
+
+export interface XDraftRealRunDependencies {
+  loadStageDraft(): Promise<(
+    content: GeneratedContent,
+    opts: StageDraftOptions,
+  ) => Promise<StageDraftResult>>;
+}
+
+export interface XDraftRealRunOutcome {
+  kind: "stage_runtime_failed" | "save_incomplete" | "staged";
+  savePhase: XDraftSavePhase;
+  saveMechanism: XDraftSaveMechanism;
+  exitCode: 0 | 1;
+  stream: "stdout" | "stderr";
+  message: string;
+}
+
+function nativeDraftLocation(format: GeneratedContent["format"]): string {
+  return format === "article" ? "X Articles → Drafts" : "X Unsent/Drafts";
+}
+
+function verificationEvidenceLabel(format: GeneratedContent["format"]): string {
+  return format === "article"
+    ? "by reopening the canonical Article edit URL"
+    : "in X Unsent/Drafts";
+}
+
+function beforeSaveFailure(format: GeneratedContent["format"]): XDraftRealRunOutcome {
+  const mechanism = format === "article" ? "Article Create/autosave" : "composer Save";
+  return {
+    kind: "save_incomplete",
+    savePhase: "save_not_attempted",
+    saveMechanism: format === "article" ? "article_create_autosave" : "composer_close_save",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ X ${format} draft staging stopped before the native ${mechanism} action was invoked. NEVER posted.\n` +
+      "  No saved-draft outcome is claimed. Verify the local runtime and browser flow before a separate retry.",
+  };
+}
+
+function uncertainSaveOutcome(
+  format: GeneratedContent["format"],
+  phase: "save_delivery_unknown" | "save_delivered_unverified",
+): XDraftRealRunOutcome {
+  const location = nativeDraftLocation(format);
+  const fact = phase === "save_delivery_unknown"
+    ? "The native Save/autosave action was invoked, but delivery is unknown"
+    : "The native Save/autosave action returned, but persistence was not verified";
+  return {
+    kind: "save_incomplete",
+    savePhase: phase,
+    saveMechanism: format === "article" ? "article_create_autosave" : "composer_close_save",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ ${fact} for the X ${format} draft. NEVER posted.\n` +
+      `  A native draft may exist. Before any retry, compare ${location} manually in the exact CLI-owned profile used by this run.\n` +
+      "  Do not retry automatically. Selector calibration and --inspect cannot prove whether the draft persisted.",
+  };
+}
+
+function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
+  const count = result.format === "thread"
+    ? `${result.posts} posts`
+    : result.format === "article"
+      ? "1 article"
+      : "1 tweet";
+  return {
+    kind: "staged",
+    savePhase: "verified",
+    saveMechanism: result.saveMechanism,
+    exitCode: 0,
+    stream: "stdout",
+    message:
+      `\n✓ Staged a NATIVE X draft (${result.format}, ${count}). NEVER posted.\n` +
+      `  verified ${verificationEvidenceLabel(result.format)}: yes\n` +
+      `  ${result.note}`,
+  };
+}
+
+/** Stateful X draft boundary; dry-run returns before this seam is called. */
+export async function executeXDraftRealRun(
+  input: XDraftRealRunInput,
+  deps: XDraftRealRunDependencies,
+): Promise<XDraftRealRunOutcome> {
+  let stageDraft: Awaited<ReturnType<XDraftRealRunDependencies["loadStageDraft"]>>;
+  try {
+    stageDraft = await deps.loadStageDraft();
+  } catch {
+    return {
+      kind: "stage_runtime_failed",
+      savePhase: "save_not_attempted",
+      saveMechanism: input.content.format === "article"
+        ? "article_create_autosave"
+        : "composer_close_save",
+      exitCode: 1,
+      stream: "stderr",
+      message:
+        "\n✗ Could not initialize the X draft staging runtime. No native Save/autosave action was invoked. NEVER posted.\n" +
+        "  Verify the local installation and runtime dependencies before a separate retry.",
+    };
+  }
+  if (typeof stageDraft !== "function") {
+    return {
+      kind: "stage_runtime_failed",
+      savePhase: "save_not_attempted",
+      saveMechanism: input.content.format === "article"
+        ? "article_create_autosave"
+        : "composer_close_save",
+      exitCode: 1,
+      stream: "stderr",
+      message:
+        "\n✗ Could not initialize the X draft staging runtime. No native Save/autosave action was invoked. NEVER posted.\n" +
+        "  Verify the local installation and runtime dependencies before a separate retry.",
+    };
+  }
+
+  let result: StageDraftResult;
+  try {
+    const returned = await stageDraft(input.content, {
+      inspect: input.inspect,
+      basePath: input.basePath,
+    });
+    if (typeof returned !== "object" || returned === null) {
+      return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+    }
+    // Snapshot each untrusted port field once while exceptions are guarded.
+    // A proxy/stateful getter must not pass validation and later change the
+    // human receipt or manufacture a verified outcome.
+    const candidate = {
+      format: returned.format,
+      posts: returned.posts,
+      note: returned.note,
+      saveMechanism: returned.saveMechanism,
+      savePhase: returned.savePhase,
+    };
+    if (
+      candidate.format !== input.content.format ||
+      candidate.posts !== (input.content.format === "thread"
+        ? (input.content.thread?.length ?? 0)
+        : 1) ||
+      typeof candidate.note !== "string" ||
+      candidate.saveMechanism !== (input.content.format === "article"
+        ? "article_create_autosave"
+        : "composer_close_save") ||
+      !isXDraftReturnedSavePhase(candidate.savePhase)
+    ) {
+      return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+    }
+    result = candidate as StageDraftResult;
+  } catch (error) {
+    if (isXDraftStageError(error)) {
+      const expectedMechanism = input.content.format === "article"
+        ? "article_create_autosave"
+        : "composer_close_save";
+      if (error.saveMechanism !== expectedMechanism) {
+        return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+      }
+      return error.savePhase === "save_not_attempted"
+        ? beforeSaveFailure(input.content.format)
+        : uncertainSaveOutcome(input.content.format, error.savePhase);
+    }
+    // Once the staging function was invoked, an untyped exception carries no
+    // reliable Save boundary. Conservatively assume delivery may have happened.
+    return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+  }
+
+  return result.savePhase === "verified"
+    ? stagedOutcome(result)
+    : uncertainSaveOutcome(result.format, "save_delivered_unverified");
+}
+
+const productionXDraftRealRunDependencies: XDraftRealRunDependencies = {
+  async loadStageDraft() {
+    const { stageDraft } = await import("../x/draftPoster.js");
+    return stageDraft;
+  },
+};
 
 /** Build the dry-run artifact path next to the base file. */
 function artifactPath(fromPath: string, format: XFormat): string {
@@ -90,7 +282,13 @@ export function registerDraftCommand(x: Command): void {
         "  Metadata keys are ignored; an Article title comes from the normalized Markdown body.\n" +
         "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or unterminated metadata exits 2.\n" +
         "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
-        "  Inline --text is always literal and is never interpreted as frontmatter.\n",
+        "  Inline --text is always literal and is never interpreted as frontmatter.\n" +
+        "\nNative-save outcome:\n" +
+        "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
+        "  Success requires observing a normalized prefix of the intended tweet or first thread post on the exact X Unsent/Drafts route, or matching the Article title and, when present, body prefix.\n" +
+        "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
+        "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +
+        "  Never retry automatically. --inspect and selector calibration do not prove persistence.\n",
     )
     .action(async (opts: DraftXOptions) => {
       const format = opts.format as XFormat;
@@ -158,30 +356,12 @@ export function registerDraftCommand(x: Command): void {
         process.exit(0);
       }
 
-      // Real run: stage a native draft on X. Import the poster lazily so --dry-run
-      // (and `--help`) never pull in Playwright / the session module.
-      const { stageDraft } = await import("../x/draftPoster.js");
-
-      try {
-        const result = await stageDraft(content, { inspect: opts.inspect, basePath });
-        const count =
-          result.format === "thread"
-            ? `${result.posts} posts`
-            : result.format === "article"
-              ? "1 article"
-              : "1 tweet";
-        console.log(
-          `\n✓ Staged a NATIVE X draft (${result.format}, ${count}). NEVER posted.\n` +
-            `  verified in Unsent/Drafts: ${result.verified ? "yes" : "unconfirmed"}\n` +
-            `  ${result.note}`,
-        );
-        process.exit(0);
-      } catch (err) {
-        console.error(`\n✗ Failed to stage the X draft: ${(err as Error).message}`);
-        console.error(
-          "  Composer selectors may need live calibration — re-run with --inspect to watch the DOM.",
-        );
-        process.exit(1);
-      }
+      const outcome = await executeXDraftRealRun(
+        { content, inspect: opts.inspect, basePath },
+        productionXDraftRealRunDependencies,
+      );
+      if (outcome.stream === "stdout") console.log(outcome.message);
+      else console.error(outcome.message);
+      process.exit(outcome.exitCode);
     });
 }
