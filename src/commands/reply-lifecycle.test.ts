@@ -48,8 +48,8 @@ const THREAD_CONTENT: GeneratedContent = {
   format: "thread",
   limit: 280,
   thread: [
-    { index: 1, total: 2, text: "1/2 First reply-thread row.", chars: 27 },
-    { index: 2, total: 2, text: "2/2 Second reply-thread row.", chars: 28 },
+    { index: 1, total: 2, text: "First reply-thread row. 1/2", chars: 27 },
+    { index: 2, total: 2, text: "Second reply-thread row. 2/2", chars: 28 },
   ],
   codeFlags: [],
   linkFlags: [],
@@ -1162,7 +1162,7 @@ test("only a proven pre-browser loader failure releases the owner-matched reserv
   }
 });
 
-test("caller argument getters cannot enter the typed stage-rejection boundary", async () => {
+test("caller argument getters fail locally before ledger or typed stage boundaries", async () => {
   const fixtures: Array<{
     field: "content" | "targetIdOrUrl" | "inspect" | "content.format";
     build(read: () => never): ReplyRealRunInput;
@@ -1209,12 +1209,16 @@ test("caller argument getters cannot enter the typed stage-rejection boundary", 
     });
     const harness = createHarness();
     const outcome = await executeReplyRealRun(hostile, harness.deps);
-    assert.equal(reads, 1, fixture.field);
-    assert.equal(outcome.kind, "stage_runtime_failed");
-    assert.equal(outcome.reservationRelease, "released");
-    assert.equal(harness.events.some((event) => event.startsWith("stage:run")), false);
-    assert.equal(harness.events.some((event) => event.startsWith("ledger:finalize")), false);
-    assert.match(outcome.message, /stage port was never invoked/);
+    assert.equal(reads, 0, fixture.field);
+    assert.equal(outcome.kind, "reply_input_invalid");
+    assert.equal(outcome.exitCode, 2);
+    assert.equal(outcome.savePhase, null);
+    assert.equal(outcome.saveMechanism, null);
+    assert.equal(outcome.draftRowEvidence, null);
+    assert.equal(outcome.replyTargetEvidence, null);
+    assert.deepEqual(harness.events, []);
+    assert.match(outcome.message, /failed closed local snapshot validation/i);
+    assert.match(outcome.message, /No reply ledger, runtime loader, profile, browser/i);
     assert.doesNotMatch(outcome.message, /typed poster evidence|RAW_|PRIVATE_PATH/);
   }
 });
