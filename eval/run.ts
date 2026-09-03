@@ -13,7 +13,7 @@
  * A dry run just validates the dataset and prints the sweep matrix + prompt
  * sizes, so it's safe to execute in CI / during build.
  *
- * Run it (Node >= 22.6 strips TS types natively; this repo targets Node 25):
+ * Run it (Node >= 22.19.0, the repository supported floor, strips TS types natively):
  *   node --experimental-strip-types eval/run.ts                 # dry run, no network
  *   node --experimental-strip-types eval/run.ts --run           # LIVE: calls Gemini
  *   node --experimental-strip-types eval/run.ts --run \
