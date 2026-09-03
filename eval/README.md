@@ -18,8 +18,8 @@ dataset, then reports agreement / precision / recall / F1.
 ## Prerequisites
 
 - Build first so `dist/` exists: `npm run build`.
-- Node ≥ 22.6 (this repo targets Node 25) — it strips TypeScript types natively,
-  so `run.ts` executes directly.
+- Node ≥ 22.19.0 (the repository supported floor) — it strips TypeScript types
+  natively, so `run.ts` executes directly.
 - For a **live** run: `GOOGLE_GENERATIVE_AI_API_KEY` in `.env` (same as the CLI).
 
 ## Usage

@@ -43,6 +43,9 @@ the authoritative command and flag lists.
 
 ## Install and build
 
+Node.js 22.19.0 or newer is required (the package metadata declares
+`>=22.19.0`).
+
 ```bash
 npm install
 npm run build
