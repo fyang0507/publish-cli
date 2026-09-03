@@ -148,6 +148,15 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /leading transport BOM/);
   assert.match(x, /actual\/expected evidence before artifacts, state, profiles, browser, or API imports or writes/);
   assert.match(x, /Inline `--text` remains literal/);
+  assert.match(
+    x,
+    /reply --dry-run` validates the reply content and target ID\/URL syntax, then generates and renders a tweet or a reply thread that losslessly splits the normalized reply prose/,
+  );
+  assert.match(x, /Target existence, visibility, and reply eligibility are not verified by dry-run/);
+  assert.match(x, /X remains authoritative for those checks during a real run/);
+  assert.match(x, /Duplicate-ledger preflight is deliberately skipped/);
+  assert.match(x, /later real run still checks the ledger and may refuse a recorded target unless `--force`/);
+  assert.match(x, /Real-run reply deduplication is checked before staging and recorded only after successful staging/);
   assert.match(x, /intended authenticated action with `--inspect`/);
   assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
   assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
@@ -579,6 +588,9 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /mapping-intent malformed or unterminated metadata exits 2/,
     /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
     /Inline --text is always literal/,
+    /--dry-run skips the duplicate ledger and all browser\/profile\/database state/,
+    /Target ID\/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X/,
+    /real run still checks the ledger and may refuse a recorded target unless --force/,
   ]) assert.match(xReplyHelp.stdout, evidence);
 
   const redditDraftHelp = spawnSync(process.execPath, [CLI_PATH, "reddit", "draft", "--help"], { encoding: "utf8" });

@@ -26,8 +26,11 @@ import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentIn
  *   2. Resolve the reply content — inline via --text, or from a canonical
  *      markdown file via --from (exactly one) — and DETERMINISTICALLY generate a
  *      tweet (default; --long raises the cap) — reusing src/x/content.ts.
- *   3. --dry-run: generate + print ONLY; do NOT touch the browser.
- *   4. Otherwise: drive the persistent logged-in profile to stage the reply draft.
+ *   3. --dry-run: generate + print ONLY; do NOT open the reply ledger or touch
+ *      browser/profile/database state. Duplicate-ledger preflight is deferred.
+ *   4. Otherwise: check the reply ledger, then drive the persistent logged-in
+ *      profile to stage the reply draft when the target is not a duplicate (or
+ *      --force explicitly overrides it).
  */
 
 interface ReplyXOptions {
@@ -48,9 +51,9 @@ export function registerReplyCommand(x: Command): void {
     .option("--text <content>", "Reply content inline (exactly one of --text / --from)")
     .option("--from <base.md>", "Canonical markdown ('-' = stdin); strips leading mapping/empty YAML frontmatter")
     .option("--long", "Use the local 25,000-code-point guard for Premium long replies; X acceptance is server-authoritative")
-    .option("--dry-run", "Only generate content; do not open the browser")
+    .option("--dry-run", "Locally validate syntax/content, generate, and render; skips browser and duplicate ledger")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
-    .option("--force", "Re-stage even if a reply to this tweet was already recorded in the ledger")
+    .option("--force", "Real runs only: re-stage even if a reply to this tweet was already recorded in the ledger")
     .addHelpText(
       "after",
       "\nFile/stdin frontmatter:\n" +
@@ -58,7 +61,11 @@ export function registerReplyCommand(x: Command): void {
         "  Metadata keys are ignored; reply text comes only from the normalized Markdown body.\n" +
         "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or unterminated metadata exits 2.\n" +
         "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
-        "  Inline --text is always literal and is never interpreted as frontmatter.\n",
+        "  Inline --text is always literal and is never interpreted as frontmatter.\n" +
+        "\nDry-run behavior:\n" +
+        "  --dry-run skips the duplicate ledger and all browser/profile/database state.\n" +
+        "  Target ID/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X.\n" +
+        "  A real run still checks the ledger and may refuse a recorded target unless --force is supplied.\n",
     )
     .action(async (opts: ReplyXOptions) => {
       // Resolve content (inline --text or --from file/stdin) up front so a usage
@@ -126,12 +133,28 @@ export function registerReplyCommand(x: Command): void {
       }
       if (overflowed) {
         console.log(
-          `[note] Reply content exceeds the single-post limit — staging it as a ${content.thread?.length ?? 0}-post reply thread.`,
+          `[note] Reply content exceeds the single-post limit — generated a ${content.thread?.length ?? 0}-post reply thread without truncating the normalized reply prose.`,
         );
       }
 
       console.log(`Replying to tweet ${replyToId}:\n`);
       console.log(renderForInspection(content));
+
+      // A valid dry-run is deliberately state-free. In particular, return
+      // BEFORE importing db.js: that module loads better-sqlite3 and constructing
+      // ReplyLedger creates profile/data-repository directories plus publish.db.
+      // The real run below remains authoritative for duplicate prevention.
+      if (opts.dryRun) {
+        console.log(
+          `\n[dry-run] Local content validation and generation passed for syntactically valid reply target ${replyToId}. No draft was staged.\n` +
+            "  No browser opened; no profile, data-repository, or SQLite runtime state was read or written.\n" +
+            "  Target ID/URL syntax was validated locally. Target existence, visibility, and reply eligibility were not " +
+            "verified; X remains authoritative for those checks during a real run.\n" +
+            "  Duplicate-ledger preflight was skipped. A real run checks the ledger before staging and may " +
+            "refuse a recorded target unless --force is explicitly supplied.",
+        );
+        process.exit(0);
+      }
 
       // WRITE-DEDUP (issue #10): validation above completes before durable state
       // is opened. Refuse an intentional duplicate unless --force.
@@ -139,26 +162,13 @@ export function registerReplyCommand(x: Command): void {
       const ledger = new ReplyLedger();
       const prior = ledger.find(replyToId);
       if (prior && !opts.force) {
-        if (opts.dryRun) {
-          console.log(
-            `[note] A reply to ${replyToId} was already staged at ${prior.stagedAt} ` +
-              `(status: ${prior.status}). A real run would refuse without --force.\n`,
-          );
-        } else {
-          ledger.close();
-          console.error(
-            `✗ Already staged a reply to ${replyToId} at ${prior.stagedAt} (status: ${prior.status}).\n` +
-              "  Refusing to stage a duplicate reply. Re-run with --force to override.",
-          );
-          process.exit(2);
-          return;
-        }
-      }
-
-      if (opts.dryRun) {
         ledger.close();
-        console.log(`\n[dry-run] No browser touched. Would stage the above as a reply to ${replyToId}.`);
-        process.exit(0);
+        console.error(
+          `✗ Already staged a reply to ${replyToId} at ${prior.stagedAt} (status: ${prior.status}).\n` +
+            "  Refusing to stage a duplicate reply. Re-run with --force to override.",
+        );
+        process.exit(2);
+        return;
       }
 
       const { stageReplyDraft } = await import("../x/draftPoster.js");

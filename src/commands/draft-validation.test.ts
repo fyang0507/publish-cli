@@ -73,11 +73,7 @@ const blocked = ${JSON.stringify([
 registerHooks({
   resolve(specifier, context, nextResolve) {
     const resolved = nextResolve(specifier, context);
-    const allowedKnownIssue57Database =
-      process.env.PUBLISH_TEST_ALLOW_REPLY_DRY_RUN_DATABASE === "1" &&
-      (resolved.url.includes("/dist/db.js") ||
-        resolved.url.includes("/node_modules/better-sqlite3/"));
-    if (!allowedKnownIssue57Database && blocked.some((needle) => resolved.url.includes(needle))) {
+    if (blocked.some((needle) => resolved.url.includes(needle))) {
       throw new Error("PLATFORM_IMPORT_BLOCKED: " + resolved.url);
     }
     return resolved;
@@ -92,7 +88,7 @@ function runCli(
   fixture: CliFixture,
   args: string[],
   input?: string,
-  options: { allowReplyDryRunDatabase?: boolean; cwd?: string; wechatAuthor?: string } = {},
+  options: { cwd?: string; dataDir?: string; repoDir?: string; wechatAuthor?: string } = {},
 ): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, ["--import", fixture.loaderPath, CLI_PATH, ...args], {
     encoding: "utf8",
@@ -100,9 +96,8 @@ function runCli(
     cwd: options.cwd,
     env: {
       ...process.env,
-      PUBLISH_DATA_DIR: fixture.dataDir,
-      PUBLISH_DATA_REPO: fixture.repoDir,
-      PUBLISH_TEST_ALLOW_REPLY_DRY_RUN_DATABASE: options.allowReplyDryRunDatabase ? "1" : "0",
+      PUBLISH_DATA_DIR: options.dataDir ?? fixture.dataDir,
+      PUBLISH_DATA_REPO: options.repoDir ?? fixture.repoDir,
       // Keep WeChat author tests independent of the invoking shell and any
       // checkout-local .env. Individual cases opt into a concrete fallback.
       WECHAT_AUTHOR: options.wechatAuthor ?? "",
@@ -196,6 +191,77 @@ test("invalid draft inputs exit 2 before importing platform/browser/API stacks",
   }
 });
 
+test("valid X reply dry-runs render tweet and lossless thread previews without runtime state", () => {
+  const fixture = createFixture();
+  try {
+    const unverifiedTargetId = "9999999999999999999";
+    const threadMarkers = Array.from(
+      { length: 18 },
+      (_, index) => `lossless-segment-${String(index + 1).padStart(2, "0")}`,
+    );
+    const threadSource = threadMarkers
+      .map((marker) => `${marker} carries distinct caller text through the reply preview.`)
+      .join("\n\n");
+    const cases = [
+      {
+        name: "tweet",
+        args: [
+          "x", "reply", "--to", unverifiedTargetId, "--text",
+          "State-free single reply preview.", "--dry-run",
+        ],
+        format: /format: tweet/,
+        markers: ["State-free single reply preview."],
+      },
+      {
+        name: "thread",
+        args: [
+          "x", "reply", "--to", unverifiedTargetId, "--text",
+          threadSource, "--dry-run", "--force", "--inspect",
+        ],
+        format: /format: thread/,
+        markers: threadMarkers,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const dataDir = join(fixture.dir, `${testCase.name}-absent-data`);
+      const repoDir = join(fixture.dir, `${testCase.name}-absent-repo`);
+      assert.equal(existsSync(dataDir), false);
+      assert.equal(existsSync(repoDir), false);
+
+      const result = runCli(fixture, testCase.args, undefined, { dataDir, repoDir });
+      assert.equal(result.status, 0, output(result));
+      assert.equal(result.signal, null, output(result));
+      assert.equal(result.stderr, "");
+      assert.match(result.stdout, new RegExp(`Replying to tweet ${unverifiedTargetId}:`));
+      assert.match(result.stdout, testCase.format);
+      assert.match(result.stdout, /\[dry-run\] Local content validation and generation passed for syntactically valid reply target/);
+      assert.match(result.stdout, /No draft was staged/);
+      assert.match(
+        result.stdout,
+        /No browser opened; no profile, data-repository, or SQLite runtime state was read or written/,
+      );
+      assert.match(result.stdout, /Target ID\/URL syntax was validated locally/);
+      assert.match(
+        result.stdout,
+        /Target existence, visibility, and reply eligibility were not verified; X remains authoritative for those checks during a real run/,
+      );
+      assert.match(result.stdout, /Duplicate-ledger preflight was skipped/);
+      assert.match(
+        result.stdout,
+        /real run checks the ledger before staging and may refuse a recorded target unless --force is explicitly supplied/,
+      );
+      assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED|Already staged/);
+      for (const marker of testCase.markers) assert.match(result.stdout, new RegExp(marker));
+
+      assert.equal(existsSync(dataDir), false, `${testCase.name}: data dir was created`);
+      assert.equal(existsSync(repoDir), false, `${testCase.name}: data repo was created`);
+    }
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
 test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, and Article generation", () => {
   const fixture = createFixture();
   try {
@@ -277,7 +343,6 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
       fixture,
       ["x", "reply", "--to", "12345", "--from", replyPath, "--dry-run"],
       undefined,
-      { allowReplyDryRunDatabase: true },
     );
     assert.equal(fileReply.status, 0, output(fileReply));
     assert.match(fileReply.stdout, /Visible file reply/);
@@ -287,7 +352,6 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
       fixture,
       ["x", "reply", "--to", "12345", "--from", "-", "--dry-run"],
       "---\r\n---\r\nVisible stdin reply",
-      { allowReplyDryRunDatabase: true },
     );
     assert.equal(stdinReply.status, 0, output(stdinReply));
     assert.match(stdinReply.stdout, /Visible stdin reply/);
@@ -303,20 +367,18 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
       fixture,
       ["x", "reply", "--to", "12345", "--from", replyThreadPath, "--dry-run"],
       undefined,
-      { allowReplyDryRunDatabase: true },
     );
     assert.equal(fileReplyThread.status, 0, output(fileReplyThread));
-    assert.match(fileReplyThread.stdout, /staging it as a [2-9][0-9]*-post reply thread/);
+    assert.match(fileReplyThread.stdout, /generated a [2-9][0-9]*-post reply thread without truncating the normalized reply prose/);
     assert.doesNotMatch(output(fileReplyThread), /reply-thread-file-secret|private:|PLATFORM_IMPORT_BLOCKED/);
 
     const stdinReplyThread = runCli(
       fixture,
       ["x", "reply", "--to", "12345", "--from", "-", "--dry-run"],
       `---\nprivate: reply-thread-stdin-secret\n---\n${replyThreadBody}`,
-      { allowReplyDryRunDatabase: true },
     );
     assert.equal(stdinReplyThread.status, 0, output(stdinReplyThread));
-    assert.match(stdinReplyThread.stdout, /staging it as a [2-9][0-9]*-post reply thread/);
+    assert.match(stdinReplyThread.stdout, /generated a [2-9][0-9]*-post reply thread without truncating the normalized reply prose/);
     assert.doesNotMatch(output(stdinReplyThread), /reply-thread-stdin-secret|private:|PLATFORM_IMPORT_BLOCKED/);
 
     const emptyMap = runCli(
@@ -366,7 +428,6 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
         "---\ntitle: Literal inline reply\n---\nReply body", "--dry-run",
       ],
       undefined,
-      { allowReplyDryRunDatabase: true },
     );
     assert.equal(literalReply.status, 0, output(literalReply));
     assert.match(literalReply.stdout, /---\ntitle: Literal inline reply\n---\nReply body/);
@@ -380,6 +441,8 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
     assert.equal(weighted.status, 0, output(weighted));
     assert.match(weighted.stdout, /\[280 twitter-text weighted chars\]/);
     assert.doesNotMatch(output(weighted), /ignored:|PLATFORM_IMPORT_BLOCKED/);
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }
