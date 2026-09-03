@@ -106,8 +106,8 @@ export function registerWechatDraftCommand(
     .option("--author <name>", "Article author; explicit value (including blank) overrides frontmatter / WECHAT_AUTHOR")
     .option("--digest <summary>", "Digest 摘要 (documented ≤120 字; omit to let WeChat derive the first 54 字)")
     .option("--cover <image>", "Cover image path — required (or from file/stdin frontmatter coverImage/cover/image)")
-    .option("--source-url <url>", "阅读原文 link (or from file/stdin frontmatter sourceUrl/contentSourceUrl/source_url)")
-    .option("--keep-links", "Keep inline external links (default: rewrite to bottom citations)")
+    .option("--source-url <url>", "Absolute explicit http(s) 阅读原文 URL (or file/stdin sourceUrl metadata)")
+    .option("--keep-links", "Keep safe inline external links (default: rewrite external http(s) links to citations)")
     .option("--out <file.html>", "Write the rendered inline-styled HTML to a file for inspection")
     .option("--dry-run", "Render + validate only; NO network, NO token, NO upload, NO draft/add")
     .addHelpText(
@@ -123,7 +123,17 @@ export function registerWechatDraftCommand(
         "  from a leading transport BOM. Inline --text is always literal.\n" +
         "\nAuthor precedence:\n" +
         "  Explicit --author (blank or whitespace intentionally clears) > nonblank string\n" +
-        "  file/stdin frontmatter author > trimmed WECHAT_AUTHOR > empty.\n",
+        "  file/stdin frontmatter author > trimmed WECHAT_AUTHOR > empty.\n" +
+        "\nRendered HTML safety (local, before asset reads or --out):\n" +
+        "  Raw HTML is unsupported, including nested block/inline tags, attributes, and comments.\n" +
+        "  Escape HTML-looking text or put it in a code span/block. Markdown links allow explicit\n" +
+        "  http(s), mailto, relative URLs, and fragments; images allow explicit http(s) or local\n" +
+        "  paths (including Windows drive-absolute, never UNC/network paths); --source-url requires\n" +
+        "  absolute explicit http(s). Active/unknown, obfuscated,\n" +
+        "  malformed/backslash, userinfo-bearing, surrounding-whitespace, control-bearing, and\n" +
+        "  scheme-relative destinations exit 2 before image reads, inspection, --out, token/client\n" +
+        "  imports, uploads, or API access. Dynamic HTML attributes are escaped while exact local\n" +
+        "  image identity/order is retained for upload rewriting.\n",
     )
     .action(async (opts: WechatDraftOptions) => {
       let input: ResolvedWechatDraftInput;

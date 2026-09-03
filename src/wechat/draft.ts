@@ -17,7 +17,7 @@
  */
 
 import type { WeChatClient } from "./client.js";
-import type { GeneratedArticle } from "./content.js";
+import { escapeHtmlAttribute, type GeneratedArticle } from "./content.js";
 import { env } from "../config.js";
 
 /** The 草稿箱 (draft box) landing spot for the operator's manual review + publish. */
@@ -39,6 +39,16 @@ export interface StageArticleResult {
   uploadedImages: { local: string; url: string }[];
   /** Where the operator reviews + (manually) publishes the staged draft. */
   draftBoxUrl: string;
+}
+
+/** Rewrite only generated image elements, never matching text/code elsewhere in the article. */
+function rewriteGeneratedImageSource(html: string, htmlSrc: string, uploadedUrl: string): string {
+  const sourceAttribute = `src="${htmlSrc}"`;
+  const replacement = `src="${escapeHtmlAttribute(uploadedUrl)}"`;
+  return html.replace(/<img\b[^>]*>/g, (imageTag) =>
+    imageTag.includes(sourceAttribute)
+      ? imageTag.split(sourceAttribute).join(replacement)
+      : imageTag);
 }
 
 /**
@@ -68,15 +78,15 @@ export async function stageArticleDraft(
   const thumbMediaId = await client.uploadCover(article.coverPath);
 
   // 3) Upload each local body image and rewrite its <img src> to the WeChat CDN URL.
-  //    Each bodyImages entry carries the verbatim html `src` (for matching) and its
-  //    resolved filesystem `path` (against the markdown dir, for reading) — content.ts
-  //    emits the src verbatim as `src="<src>"`, so a literal substring swap rewrites
-  //    every occurrence of that image.
+  //    Each bodyImages entry carries the raw parser `src` for receipt identity, the
+  //    exact escaped `htmlSrc` emitted into the attribute for matching, and its
+  //    resolved filesystem `path` for reading. The uploaded URL is escaped before
+  //    insertion as well, so neither caller paths nor API values can break markup.
   let html = article.html;
   const uploadedImages: { local: string; url: string }[] = [];
   for (const img of article.bodyImages) {
     const url = await client.uploadBodyImage(img.path);
-    html = html.split(`src="${img.src}"`).join(`src="${url}"`);
+    html = rewriteGeneratedImageSource(html, img.htmlSrc, url);
     uploadedImages.push({ local: img.src, url });
   }
 

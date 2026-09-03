@@ -851,6 +851,109 @@ test("malformed WeChat mapping frontmatter exits 2 before artifacts, assets, sta
   }
 });
 
+test("WeChat HTML and URL safety failures exit 2 before assets, output, state, or API imports", () => {
+  const fixture = createFixture();
+  try {
+    const unsafeFrontmatter = join(fixture.dir, "wechat-unsafe-source.md");
+    writeFileSync(
+      unsafeFrontmatter,
+      "---\ntitle: Title\ncoverImage: ./missing-cover.png\n" +
+        "sourceUrl: data:text/html,FRONTMATTER_SECRET_67\n---\nBody",
+    );
+    const cases: Array<{ name: string; args: string[]; evidence: RegExp }> = [
+      {
+        name: "raw-html",
+        args: [
+          "wechat", "draft", "--title", "Title", "--text",
+          "Body <IMG SRC=x OnErRoR=RAW_HTML_SECRET_67>",
+          "--cover", join(fixture.dir, "missing-cover.png"),
+        ],
+        evidence: /actual: raw_html; expected: Markdown syntax, escaped HTML text, or code/,
+      },
+      {
+        name: "encoded-link-scheme",
+        args: [
+          "wechat", "draft", "--title", "Title", "--text",
+          "[safe-looking](java%73cript%3AURL_SECRET_67)",
+          "--cover", join(fixture.dir, "missing-cover.png"),
+        ],
+        evidence: /actual: javascript; expected: http, https, mailto, a relative URL, or a fragment/,
+      },
+      {
+        name: "scheme-relative-image",
+        args: [
+          "wechat", "draft", "--title", "Title", "--text",
+          "![image](%2f%2fURL_SECRET_67.example/image.png)",
+          "--cover", join(fixture.dir, "missing-cover.png"),
+        ],
+        evidence: /actual: scheme_relative; expected: an http\(s\) URL or local filesystem path/,
+      },
+      {
+        name: "edge-control-link",
+        args: [
+          "wechat", "draft", "--title", "Title", "--text",
+          "[link](<\thttps://URL_SECRET_67.example\t>)",
+          "--cover", join(fixture.dir, "missing-cover.png"),
+        ],
+        evidence: /actual: control_character; expected: http, https, mailto, a relative URL, or a fragment/,
+      },
+      {
+        name: "source-url-flag",
+        args: [
+          "wechat", "draft", "--title", "Title", "--text", "Body",
+          "--source-url", "VBScript:URL_SECRET_67",
+          "--cover", join(fixture.dir, "missing-cover.png"),
+        ],
+        evidence: /actual: vbscript; expected: an absolute http:\/\/ or https:\/\/ URL/,
+      },
+      {
+        name: "source-url-edge-space",
+        args: [
+          "wechat", "draft", "--title", "Title", "--text", "Body",
+          "--source-url", "https://URL_SECRET_67.example/source\u00a0",
+          "--cover", join(fixture.dir, "missing-cover.png"),
+        ],
+        evidence: /actual: surrounding_whitespace; expected: an absolute http:\/\/ or https:\/\/ URL/,
+      },
+      {
+        name: "source-url-frontmatter",
+        args: ["wechat", "draft", "--from", unsafeFrontmatter],
+        evidence: /actual: data; expected: an absolute http:\/\/ or https:\/\/ URL/,
+      },
+    ];
+
+    for (const testCase of cases) {
+      for (const dryRun of [false, true]) {
+        const outPath = join(fixture.dir, `${testCase.name}-${dryRun ? "dry" : "real"}.html`);
+        if (dryRun) writeFileSync(outPath, "sentinel: do not overwrite");
+        const result = runCli(fixture, [
+          ...testCase.args,
+          "--out", outPath,
+          ...(dryRun ? ["--dry-run"] : []),
+        ]);
+        assert.equal(result.status, 2, `${testCase.name}: ${output(result)}`);
+        assert.equal(result.signal, null, output(result));
+        assert.equal(result.stdout, "");
+        assert.match(result.stderr, testCase.evidence);
+        assert.doesNotMatch(
+          output(result),
+          /SECRET_67|missing-cover.*(?:not found|regular file)|PLATFORM_IMPORT_BLOCKED|Please report this|markedjs/,
+        );
+        if (dryRun) {
+          assert.equal(readFileSync(outPath, "utf8"), "sentinel: do not overwrite");
+        } else {
+          assert.equal(existsSync(outPath), false);
+        }
+      }
+    }
+
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
 test("valid dry-runs also avoid platform/browser/API imports", () => {
   const fixture = createFixture();
   try {

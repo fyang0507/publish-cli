@@ -213,6 +213,16 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   );
   assert.match(wechat, /blank or whitespace-only `--author` intentionally clears/);
   assert.match(wechat, /blank, whitespace-only, and non-string frontmatter authors are ignored/);
+  assert.match(wechat, /Caller raw HTML is unsupported.*nested list, quote, table.*exits 2/s);
+  assert.match(wechat, /escaped angle brackets\/entities or inside a code span\/block/);
+  assert.match(wechat, /before cover\/body-image reads.*`--out`.*token\/client imports.*API access/s);
+  assert.match(wechat, /links allow explicit `http:\/\/`, `https:\/\/`, `mailto:`, relative URLs, and fragments/);
+  assert.match(wechat, /images allow explicit HTTP\(S\) URLs or local filesystem paths/);
+  assert.match(wechat, /`sourceUrl`\/`--source-url` requires an absolute explicit HTTP\(S\) URL/);
+  assert.match(wechat, /`javascript:`.*`data:`.*`vbscript:`.*`file:`.*scheme-relative/s);
+  assert.match(wechat, /IPv6\/ports.*HTTP\(S\) userinfo.*malformed absolute\/backslash/s);
+  assert.match(wechat, /drive-absolute Windows image paths.*UNC\/network image paths/s);
+  assert.match(wechat, /Every generated dynamic HTML attribute is escaped.*exact parser\/path identity/s);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
   assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
@@ -609,6 +619,13 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /mapping-intent malformed or\s+unterminated metadata exits 2 before --out, token, upload, or API access/s,
     /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown/,
     /Inline --text is always literal/,
+    /Raw HTML is unsupported, including nested block\/inline tags, attributes, and comments/,
+    /Markdown links allow explicit.*http\(s\), mailto, relative URLs, and fragments/s,
+    /images allow explicit http\(s\) or local.*--source-url requires\s+absolute explicit http\(s\)/s,
+    /Windows drive-absolute, never UNC\/network paths/s,
+    /scheme-relative destinations\s+exit 2 before image reads.*--out.*API access/s,
+    /malformed\/backslash, userinfo-bearing, surrounding-whitespace, control-bearing/s,
+    /Dynamic HTML attributes.*escaped.*exact local\s+image identity\/order/s,
   ]) assert.match(wechatHelp.stdout, evidence);
 
   const xhs = spawnSync(process.execPath, [CLI_PATH, "xhs", "info", "--json"], { encoding: "utf8" });
