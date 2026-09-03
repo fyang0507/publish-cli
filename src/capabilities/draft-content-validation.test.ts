@@ -99,6 +99,143 @@ test("X thread and reply-thread transport preserve exact internal whitespace", a
   );
 });
 
+test("X file-backed mapping frontmatter normalizes before every format without losing source accounting", async () => {
+  for (const newline of ["\n", "\r\n", "\r"]) {
+    const source =
+      `\ufeff---${newline}` +
+      `title: Ignored metadata title${newline}` +
+      `private: workflow-only${newline}` +
+      `---${newline}` +
+      `Visible body${newline}`;
+    const split = splitLeadingFrontmatter(source, "x.md", {
+      policy: "mapping-only",
+      preserveBodyLineEndings: true,
+    });
+    assert.equal(split.body, `Visible body${newline}`);
+    assert.deepEqual(split.data, {
+      title: "Ignored metadata title",
+      private: "workflow-only",
+    });
+    assert.equal(split.bodyLineOffset, 4);
+
+    const tweet = await generateContent(split.body, {
+      format: "tweet",
+      sourceLineOffset: split.bodyLineOffset,
+    });
+    assert.equal(tweet.tweet?.text, "Visible body");
+  }
+
+  for (const empty of [
+    "---\n---\nEmpty body",
+    "---\r\n{}\r\n---\r\nEmpty body",
+    "---\r# comment-only metadata\r---\rEmpty body",
+  ]) {
+    const split = splitLeadingFrontmatter(empty, "x.md", {
+      policy: "mapping-only",
+      preserveBodyLineEndings: true,
+    });
+    assert.equal(split.present, true);
+    assert.deepEqual(split.data, {});
+    assert.equal((await generateContent(split.body, { format: "tweet" })).tweet?.text, "Empty body");
+  }
+
+  const articleInput = splitLeadingFrontmatter(
+    "\ufeff---\rtitle: Never the X headline\rworkflow: private\r---\r# Body headline\r\rArticle body",
+    "article.md",
+    { policy: "mapping-only", preserveBodyLineEndings: true },
+  );
+  const article = await generateContent(articleInput.body, {
+    format: "article",
+    sourceLineOffset: articleInput.bodyLineOffset,
+  });
+  assert.equal(article.article?.title, "Body headline");
+  assert.equal(article.article?.markdown, "# Body headline\n\nArticle body");
+  assert.doesNotMatch(JSON.stringify(article), /Never the X headline|workflow: private/);
+
+  const offsetInput = splitLeadingFrontmatter(
+    "---\nsecret: hidden\n---\n# Visible title\n\n```js\nrun()\n```\n" +
+      "## Visible section\nDraft: v1\n![diagram](diagram.png)\nBody",
+    "offset.md",
+    { policy: "mapping-only", preserveBodyLineEndings: true },
+  );
+  const offset = await generateContent(offsetInput.body, {
+    format: "thread",
+    sourceLineOffset: offsetInput.bodyLineOffset,
+  });
+  assert.equal(offset.fidelityFlags[0]?.sourceLine, 4);
+  assert.equal(offset.codeFlags[0]?.sourceLine, 6);
+  assert.deepEqual(
+    offset.fidelityFlags.map(({ kind, sourceLine }) => ({ kind, sourceLine })),
+    [
+      { kind: "title_heading", sourceLine: 4 },
+      { kind: "section_heading", sourceLine: 9 },
+      { kind: "metadata_like", sourceLine: 10 },
+      { kind: "markdown_image", sourceLine: 11 },
+    ],
+  );
+});
+
+test("X mapping-only ambiguity preserves thematic source bytes through the shared seam", async () => {
+  const ordinaryMarkdown = [
+    "\ufeff---\nfalse\n---\nScalar body",
+    "\ufeff---\r\n- first\r\n- second\r\n---\r\nSequence body",
+    "\ufeff---\r\rA thematic section\r\r---\r\rMore prose",
+    "\ufeff---\nKey:value prose\n---\nColon scalar body",
+  ];
+  for (const source of ordinaryMarkdown) {
+    const split = splitLeadingFrontmatter(source, "x.md", {
+      policy: "mapping-only",
+      preserveBodyLineEndings: true,
+    });
+    assert.deepEqual(split, {
+      body: source.slice(1),
+      data: {},
+      present: false,
+      bodyLineOffset: 0,
+    });
+  }
+
+  const losslessBody = `${"A  B\r\nC\r\n\r\n\r\nD\t\tE ".repeat(30)}tail`;
+  const lossless = splitLeadingFrontmatter(
+    `---\r\ntransport: ignored\r\n---\r\n${losslessBody}`,
+    "thread.md",
+    { policy: "mapping-only", preserveBodyLineEndings: true },
+  );
+  assert.equal(lossless.body, losslessBody);
+  const thread = await generateContent(lossless.body, {
+    format: "thread",
+    sourceLineOffset: lossless.bodyLineOffset,
+  });
+  assert.equal(
+    (thread.thread ?? []).map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""),
+    losslessBody.replace(/\r\n?/g, "\n"),
+    "thread/reply-thread packing loses no bytes after X's pre-existing line-ending normalization",
+  );
+
+  const exact = splitLeadingFrontmatter(
+    `---\nignored: ${"z".repeat(600)}\n---\n${"汉".repeat(140)}`,
+    "weighted.md",
+    { policy: "mapping-only", preserveBodyLineEndings: true },
+  );
+  assert.equal((await generateContent(exact.body, { format: "tweet" })).tweet?.chars, 280);
+
+  const overflow = splitLeadingFrontmatter(
+    `---\nignored: ${"z".repeat(600)}\n---\n${"汉".repeat(141)}`,
+    "weighted.md",
+    { policy: "mapping-only", preserveBodyLineEndings: true },
+  );
+  await assert.rejects(
+    generateContent(overflow.body, { format: "tweet" }),
+    (error: unknown) => {
+      assert.ok(error instanceof LocalValidationError);
+      assert.equal(error.problem.code, "x_text_too_long");
+      assert.equal(error.problem.actual, 282);
+      assert.equal(error.problem.expected, "<= 280");
+      return true;
+    },
+  );
+});
+
 test("X surfaces every heuristic prose omission with exact fidelity evidence", async () => {
   const source = [
     "# Launch notes",

@@ -154,6 +154,8 @@ export interface GeneratedContent {
 
 export interface GenerateOptions {
   format: XFormat;
+  /** Original source lines consumed before `md` (for file-backed frontmatter). */
+  sourceLineOffset?: number;
   /** Raise the single-tweet limit to the Premium long-post cap. */
   long?: boolean;
   /** Override the long-post cap (defaults to TWEET_LIMIT_LONG). */
@@ -195,8 +197,11 @@ const BARE_URL_RE = /(?<![("])\bhttps?:\/\/[^\s)]+/g;
  * Parse the canonical markdown into a title, prose (code-stripped) body, and the
  * code/link advisory flags. Deterministic and dependency-free.
  */
-export function parseBaseMarkdown(md: string): ParsedDoc {
+export function parseBaseMarkdown(md: string, sourceLineOffset = 0): ParsedDoc {
   const lines = md.replace(/\r\n?/g, "\n").split("\n");
+  const lineOffset = Number.isFinite(sourceLineOffset)
+    ? Math.max(0, Math.trunc(sourceLineOffset))
+    : 0;
 
   let title = "";
   const codeFlags: CodeBlockFlag[] = [];
@@ -220,7 +225,12 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
       codeIndex += 1;
       const lang = fence[3].trim() || undefined;
       const preview = (lines[i + 1] ?? "").trim();
-      codeFlags.push({ index: codeIndex, lang, preview, sourceLine: i + 1 });
+      codeFlags.push({
+        index: codeIndex,
+        lang,
+        preview,
+        sourceLine: lineOffset + i + 1,
+      });
       bodyLines.push(line);
       // Insert a placeholder in the prose stream so splitting doesn't merge
       // text across a removed code block.
@@ -247,7 +257,7 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
         proseOmissions.push({
           kind: "title_heading",
           source: line,
-          sourceLine: i + 1,
+          sourceLine: lineOffset + i + 1,
           note: "Consumed as the document title and omitted from tweet/thread transport text.",
         });
         continue; // drop the title line from body/prose
@@ -291,7 +301,12 @@ export function parseBaseMarkdown(md: string): ParsedDoc {
         : isImageOnly
           ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
           : "Section headings are omitted from the tweet/thread prose stream.";
-      proseOmissions.push({ kind, source: line, sourceLine: i + 1, note });
+      proseOmissions.push({
+        kind,
+        source: line,
+        sourceLine: lineOffset + i + 1,
+        note,
+      });
       continue;
     }
     proseLines.push(line);
@@ -475,7 +490,7 @@ export async function generateContent(
   md: string,
   opts: GenerateOptions,
 ): Promise<GeneratedContent> {
-  const parsed = parseBaseMarkdown(md);
+  const parsed = parseBaseMarkdown(md, opts.sourceLineOffset ?? 0);
   const fidelityFlags = opts.format === "article" ? [] : parsed.proseOmissions;
   const warnings: string[] = fidelityFlags.map(
     (flag) =>

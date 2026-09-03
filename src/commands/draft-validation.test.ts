@@ -5,6 +5,7 @@ import {
   existsSync,
   mkdtempSync,
   mkdirSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -55,6 +56,7 @@ const blocked = ${JSON.stringify([
       "/dist/x/draftPoster.js",
       "/dist/x/reader.js",
       "/dist/x/lists.js",
+      "/dist/db.js",
       "/dist/linkedin/session.js",
       "/dist/linkedin/draftPoster.js",
       "/dist/reddit/session.js",
@@ -72,7 +74,11 @@ const blocked = ${JSON.stringify([
 registerHooks({
   resolve(specifier, context, nextResolve) {
     const resolved = nextResolve(specifier, context);
-    if (blocked.some((needle) => resolved.url.includes(needle))) {
+    const allowedKnownIssue57Database =
+      process.env.PUBLISH_TEST_ALLOW_REPLY_DRY_RUN_DATABASE === "1" &&
+      (resolved.url.includes("/dist/db.js") ||
+        resolved.url.includes("/node_modules/better-sqlite3/"));
+    if (!allowedKnownIssue57Database && blocked.some((needle) => resolved.url.includes(needle))) {
       throw new Error("PLATFORM_IMPORT_BLOCKED: " + resolved.url);
     }
     return resolved;
@@ -87,6 +93,7 @@ function runCli(
   fixture: CliFixture,
   args: string[],
   input?: string,
+  options: { allowReplyDryRunDatabase?: boolean } = {},
 ): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, ["--import", fixture.loaderPath, CLI_PATH, ...args], {
     encoding: "utf8",
@@ -95,6 +102,7 @@ function runCli(
       ...process.env,
       PUBLISH_DATA_DIR: fixture.dataDir,
       PUBLISH_DATA_REPO: fixture.repoDir,
+      PUBLISH_TEST_ALLOW_REPLY_DRY_RUN_DATABASE: options.allowReplyDryRunDatabase ? "1" : "0",
     },
   });
 }
@@ -177,6 +185,301 @@ test("invalid draft inputs exit 2 before importing platform/browser/API stacks",
         assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED/);
         assert.doesNotMatch(output(result), /Please report this|markedjs/);
       }
+    }
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, and Article generation", () => {
+  const fixture = createFixture();
+  try {
+    for (const [index, newline] of ["\n", "\r\n", "\r"].entries()) {
+      const sourcePath = join(fixture.dir, `x-mapping-${index}.md`);
+      writeFileSync(
+        sourcePath,
+        `\ufeff---${newline}private: hidden-${index}${newline}count: ${index}${newline}` +
+          `---${newline}Visible ${index}${newline}`,
+      );
+      const result = runCli(fixture, [
+        "x", "draft", "--format", "tweet", "--from", sourcePath, "--dry-run",
+      ]);
+      assert.equal(result.status, 0, output(result));
+      assert.match(result.stdout, new RegExp(`Visible ${index}`));
+      assert.doesNotMatch(output(result), new RegExp(`hidden-${index}|private:|PLATFORM_IMPORT_BLOCKED`));
+    }
+
+    const stdinTweet = runCli(
+      fixture,
+      ["x", "draft", "--format", "tweet", "--from", "-", "--dry-run"],
+      "\ufeff---\rprivate: stdin-tweet-secret\r---\rVisible stdin tweet",
+    );
+    assert.equal(stdinTweet.status, 0, output(stdinTweet));
+    assert.match(stdinTweet.stdout, /Visible stdin tweet/);
+    assert.doesNotMatch(output(stdinTweet), /stdin-tweet-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+
+    const threadBody = `${"Thread body with  two spaces.\n\n\n".repeat(20)}tail`;
+    const threadPath = join(fixture.dir, "x-thread.md");
+    writeFileSync(threadPath, `---\nworkflow: thread-file-secret\n---\n${threadBody}`);
+    const fileThread = runCli(fixture, [
+      "x", "draft", "--format", "thread", "--from", threadPath, "--dry-run",
+    ]);
+    assert.equal(fileThread.status, 0, output(fileThread));
+    assert.match(fileThread.stdout, /thread \([2-9][0-9]* posts\)/);
+    assert.match(fileThread.stdout, /Thread body with  two spaces/);
+    assert.doesNotMatch(output(fileThread), /thread-file-secret|workflow:|PLATFORM_IMPORT_BLOCKED/);
+
+    const stdinThread = runCli(
+      fixture,
+      ["x", "draft", "--format", "thread", "--from", "-", "--dry-run"],
+      `---\r\nworkflow: thread-stdin-secret\r\n---\r\n${threadBody}`,
+    );
+    assert.equal(stdinThread.status, 0, output(stdinThread));
+    assert.match(stdinThread.stdout, /thread \([2-9][0-9]* posts\)/);
+    assert.doesNotMatch(output(stdinThread), /thread-stdin-secret|workflow:|PLATFORM_IMPORT_BLOCKED/);
+
+    const articlePath = join(fixture.dir, "x-article.md");
+    writeFileSync(
+      articlePath,
+      "\ufeff---\rtitle: Metadata must not win\rprivate: article-file-secret\r---\r" +
+        "# Body-derived headline\r\rArticle file body",
+    );
+    const fileArticle = runCli(fixture, [
+      "x", "draft", "--format", "article", "--from", articlePath, "--dry-run",
+    ]);
+    assert.equal(fileArticle.status, 0, output(fileArticle));
+    assert.match(fileArticle.stdout, /article: Body-derived headline/);
+    assert.match(fileArticle.stdout, /Article file body/);
+    assert.doesNotMatch(output(fileArticle), /Metadata must not win|article-file-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+    assert.doesNotMatch(
+      readFileSync(join(fixture.dir, "x-article.x-article.md"), "utf8"),
+      /Metadata must not win|article-file-secret|private:/,
+    );
+
+    const stdinArticle = runCli(
+      fixture,
+      ["x", "draft", "--format", "article", "--from", "-", "--dry-run"],
+      "---\ntitle: Stdin metadata title\nprivate: article-stdin-secret\n---\n" +
+        "# Stdin body headline\n\nArticle stdin body",
+    );
+    assert.equal(stdinArticle.status, 0, output(stdinArticle));
+    assert.match(stdinArticle.stdout, /article: Stdin body headline/);
+    assert.doesNotMatch(output(stdinArticle), /Stdin metadata title|article-stdin-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+
+    const replyPath = join(fixture.dir, "x-reply.md");
+    writeFileSync(replyPath, "---\nprivate: reply-file-secret\n---\nVisible file reply");
+    const fileReply = runCli(
+      fixture,
+      ["x", "reply", "--to", "12345", "--from", replyPath, "--dry-run"],
+      undefined,
+      { allowReplyDryRunDatabase: true },
+    );
+    assert.equal(fileReply.status, 0, output(fileReply));
+    assert.match(fileReply.stdout, /Visible file reply/);
+    assert.doesNotMatch(output(fileReply), /reply-file-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+
+    const stdinReply = runCli(
+      fixture,
+      ["x", "reply", "--to", "12345", "--from", "-", "--dry-run"],
+      "---\r\n---\r\nVisible stdin reply",
+      { allowReplyDryRunDatabase: true },
+    );
+    assert.equal(stdinReply.status, 0, output(stdinReply));
+    assert.match(stdinReply.stdout, /Visible stdin reply/);
+    assert.doesNotMatch(output(stdinReply), /PLATFORM_IMPORT_BLOCKED/);
+
+    const replyThreadBody = `${"Lossless reply thread body.\n\n".repeat(20)}tail`;
+    const replyThreadPath = join(fixture.dir, "x-reply-thread.md");
+    writeFileSync(
+      replyThreadPath,
+      `---\rprivate: reply-thread-file-secret\r---\r${replyThreadBody}`,
+    );
+    const fileReplyThread = runCli(
+      fixture,
+      ["x", "reply", "--to", "12345", "--from", replyThreadPath, "--dry-run"],
+      undefined,
+      { allowReplyDryRunDatabase: true },
+    );
+    assert.equal(fileReplyThread.status, 0, output(fileReplyThread));
+    assert.match(fileReplyThread.stdout, /staging it as a [2-9][0-9]*-post reply thread/);
+    assert.doesNotMatch(output(fileReplyThread), /reply-thread-file-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+
+    const stdinReplyThread = runCli(
+      fixture,
+      ["x", "reply", "--to", "12345", "--from", "-", "--dry-run"],
+      `---\nprivate: reply-thread-stdin-secret\n---\n${replyThreadBody}`,
+      { allowReplyDryRunDatabase: true },
+    );
+    assert.equal(stdinReplyThread.status, 0, output(stdinReplyThread));
+    assert.match(stdinReplyThread.stdout, /staging it as a [2-9][0-9]*-post reply thread/);
+    assert.doesNotMatch(output(stdinReplyThread), /reply-thread-stdin-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+
+    const emptyMap = runCli(
+      fixture,
+      ["x", "draft", "--format", "tweet", "--from", "-", "--dry-run"],
+      "---\n{}\n---\nEmpty-map body",
+    );
+    assert.equal(emptyMap.status, 0, output(emptyMap));
+    assert.match(emptyMap.stdout, /Empty-map body/);
+
+    for (const [name, source, evidence] of [
+      ["scalar", "\ufeff---\rfalse\r---\rScalar body", /---\nfalse\n---\nScalar body/],
+      ["sequence", "\ufeff---\r\n- first\r\n- second\r\n---\r\nSequence body", /---\n- first\n- second\n---\nSequence body/],
+      ["thematic", "\ufeff---\n\nA thematic section\n\n---\n\nMore prose", /---\n\nA thematic section\n\n---\n\nMore prose/],
+    ] as const) {
+      const ordinary = runCli(
+        fixture,
+        ["x", "draft", "--format", "tweet", "--from", "-", "--long", "--dry-run"],
+        source,
+      );
+      assert.equal(ordinary.status, 0, `${name}: ${output(ordinary)}`);
+      assert.match(ordinary.stdout, evidence);
+      assert.doesNotMatch(output(ordinary), /PLATFORM_IMPORT_BLOCKED/);
+    }
+
+    const literal = runCli(fixture, [
+      "x", "draft", "--format", "tweet", "--text",
+      "---\ntitle: Literal inline content\n---\nInline body", "--dry-run",
+    ]);
+    assert.equal(literal.status, 0, output(literal));
+    assert.match(literal.stdout, /---\ntitle: Literal inline content\n---\nInline body/);
+
+    const literalThreadSource =
+      "---\ntitle: Literal inline thread\n---\n" +
+      `${"Inline thread body.\n\n".repeat(20)}tail`;
+    const literalThread = runCli(fixture, [
+      "x", "draft", "--format", "thread", "--text", literalThreadSource, "--dry-run",
+    ]);
+    assert.equal(literalThread.status, 0, output(literalThread));
+    assert.match(literalThread.stdout, /---\ntitle: Literal inline thread\n---/);
+    assert.doesNotMatch(output(literalThread), /PLATFORM_IMPORT_BLOCKED/);
+
+    const literalReply = runCli(
+      fixture,
+      [
+        "x", "reply", "--to", "12345", "--text",
+        "---\ntitle: Literal inline reply\n---\nReply body", "--dry-run",
+      ],
+      undefined,
+      { allowReplyDryRunDatabase: true },
+    );
+    assert.equal(literalReply.status, 0, output(literalReply));
+    assert.match(literalReply.stdout, /---\ntitle: Literal inline reply\n---\nReply body/);
+    assert.doesNotMatch(output(literalReply), /PLATFORM_IMPORT_BLOCKED/);
+
+    const weighted = runCli(
+      fixture,
+      ["x", "draft", "--format", "tweet", "--from", "-", "--dry-run"],
+      `---\nignored: ${"z".repeat(600)}\n---\n${"汉".repeat(140)}`,
+    );
+    assert.equal(weighted.status, 0, output(weighted));
+    assert.match(weighted.stdout, /\[280 twitter-text weighted chars\]/);
+    assert.doesNotMatch(output(weighted), /ignored:|PLATFORM_IMPORT_BLOCKED/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("malformed X mapping frontmatter exits 2 before artifacts, state, profiles, or platform imports", () => {
+  const fixture = createFixture();
+  try {
+    const malformedPath = join(fixture.dir, "x-malformed.md");
+    const unterminatedPath = join(fixture.dir, "x-unterminated.md");
+    const weightedPath = join(fixture.dir, "x-weighted.md");
+    writeFileSync(
+      malformedPath,
+      "---\nprivate: workflow-secret\ntitle: [broken\n---\nVisible body",
+    );
+    writeFileSync(
+      unterminatedPath,
+      "---\nprivate: workflow-secret\ntitle: Hidden\nVisible body",
+    );
+    writeFileSync(
+      weightedPath,
+      `---\nprivate: ${"z".repeat(600)}\n---\n${"汉".repeat(141)}`,
+    );
+
+    for (const args of [
+      ["x", "draft", "--format", "tweet", "--from", malformedPath],
+      ["x", "draft", "--format", "thread", "--from", malformedPath],
+      ["x", "draft", "--format", "article", "--from", malformedPath],
+      ["x", "reply", "--to", "12345", "--from", malformedPath],
+    ]) {
+      for (const dryRun of [false, true]) {
+        const invalid = runCli(fixture, dryRun ? [...args, "--dry-run"] : args);
+        assert.equal(invalid.status, 2, output(invalid));
+        assert.equal(invalid.signal, null, output(invalid));
+        assert.match(
+          output(invalid),
+          /actual: malformed_yaml; expected: a valid YAML mapping between leading --- delimiters/,
+        );
+        assert.doesNotMatch(output(invalid), /workflow-secret|Visible body|PLATFORM_IMPORT_BLOCKED/);
+        assert.doesNotMatch(output(invalid), /format:/);
+      }
+    }
+
+    const malformedStdin = "\ufeff---\rprivate: stdin-secret\rtitle: [broken\r---\rBody";
+    for (const args of [
+      ["x", "draft", "--format", "tweet", "--from", "-"],
+      ["x", "draft", "--format", "thread", "--from", "-"],
+      ["x", "draft", "--format", "article", "--from", "-"],
+      ["x", "reply", "--to", "12345", "--from", "-"],
+    ]) {
+      for (const dryRun of [false, true]) {
+        const invalid = runCli(
+          fixture,
+          dryRun ? [...args, "--dry-run"] : args,
+          malformedStdin,
+        );
+        assert.equal(invalid.status, 2, output(invalid));
+        assert.equal(invalid.signal, null, output(invalid));
+        assert.match(output(invalid), /actual: malformed_yaml; expected: a valid YAML mapping/);
+        assert.doesNotMatch(output(invalid), /stdin-secret|Body|PLATFORM_IMPORT_BLOCKED/);
+        assert.doesNotMatch(output(invalid), /format:/);
+      }
+    }
+
+    const unterminated = runCli(fixture, [
+      "x", "reply", "--to", "12345", "--from", unterminatedPath, "--dry-run",
+    ]);
+    assert.equal(unterminated.status, 2, output(unterminated));
+    assert.equal(unterminated.signal, null, output(unterminated));
+    assert.match(
+      output(unterminated),
+      /actual: missing_closing_delimiter; expected: a closing --- delimiter for leading YAML frontmatter/,
+    );
+    assert.doesNotMatch(output(unterminated), /workflow-secret|Visible body|PLATFORM_IMPORT_BLOCKED/);
+
+    const unterminatedDraft = runCli(fixture, [
+      "x", "draft", "--format", "tweet", "--from", unterminatedPath, "--dry-run",
+    ]);
+    assert.equal(unterminatedDraft.status, 2, output(unterminatedDraft));
+    assert.equal(unterminatedDraft.signal, null, output(unterminatedDraft));
+    assert.match(
+      output(unterminatedDraft),
+      /actual: missing_closing_delimiter; expected: a closing --- delimiter for leading YAML frontmatter/,
+    );
+    assert.doesNotMatch(
+      output(unterminatedDraft),
+      /workflow-secret|Visible body|format:|PLATFORM_IMPORT_BLOCKED/,
+    );
+
+    const weighted = runCli(fixture, [
+      "x", "draft", "--format", "tweet", "--from", weightedPath, "--dry-run",
+    ]);
+    assert.equal(weighted.status, 2, output(weighted));
+    assert.match(output(weighted), /282 weighted chars.*limit is 280/s);
+    assert.equal(existsSync(join(fixture.dir, "x-weighted.x-tweet.txt")), false);
+
+    for (const artifact of [
+      "x-malformed.x-tweet.txt",
+      "x-malformed.x-thread.txt",
+      "x-malformed.x-article.md",
+      "x-unterminated.x-tweet.txt",
+    ]) {
+      assert.equal(existsSync(join(fixture.dir, artifact)), false, artifact);
     }
     assert.deepEqual(readdirSync(fixture.dataDir), []);
     assert.deepEqual(readdirSync(fixture.repoDir), []);

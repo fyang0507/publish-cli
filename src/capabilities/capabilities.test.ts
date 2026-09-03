@@ -130,8 +130,24 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /publish x draft --format article --from/);
   assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
   assert.match(x, /directory containing the `--from` Markdown/);
-  assert.match(x, /leading H1.*later heading lines.*image-only lines.*`Key: value`/s);
+  assert.match(
+    x,
+    /leading H1.*later heading lines.*image-only lines.*`Key: value`-shaped lines among the first eight lines of the normalized Markdown body/s,
+  );
+  assert.match(
+    x,
+    /when file\/stdin frontmatter is removed.*applies the removed-line offset.*points to the original input line/s,
+  );
+  assert.doesNotMatch(x, /first eight source lines/);
   assert.match(x, /exact source-line fidelity warning/);
+  assert.match(x, /closed empty or YAML mapping block is metadata only/);
+  assert.match(x, /tweet, thread, reply, reply-thread, or Article generation/);
+  assert.match(x, /every key is ignored/);
+  assert.match(x, /Article title is derived from the normalized Markdown body/);
+  assert.match(x, /scalar\/sequence blocks and thematic-break prose remain literal Markdown/);
+  assert.match(x, /leading transport BOM/);
+  assert.match(x, /actual\/expected evidence before artifacts, state, profiles, browser, or API imports or writes/);
+  assert.match(x, /Inline `--text` remains literal/);
   assert.match(x, /intended authenticated action with `--inspect`/);
   assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
   assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
@@ -516,6 +532,25 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   assert.equal(xDraftHelp.status, 0);
   assert.match(xDraftHelp.stdout, /Required: tweet \| thread \| article/);
   assert.match(xDraftHelp.stdout, /local 25,000-code-point guard/);
+  for (const evidence of [
+    /leading empty or YAML mapping block.*metadata only and is removed/s,
+    /Metadata keys are ignored; an Article title comes from the normalized Markdown body/,
+    /BOM and LF\/CRLF\/lone-CR delimiters are recognized/,
+    /mapping-intent malformed or unterminated metadata exits 2/,
+    /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
+    /Inline --text is always literal/,
+  ]) assert.match(xDraftHelp.stdout, evidence);
+
+  const xReplyHelp = spawnSync(process.execPath, [CLI_PATH, "x", "reply", "--help"], { encoding: "utf8" });
+  assert.equal(xReplyHelp.status, 0);
+  for (const evidence of [
+    /leading empty or YAML mapping block.*metadata only and is removed/s,
+    /Metadata keys are ignored; reply text comes only from the normalized Markdown body/,
+    /BOM and LF\/CRLF\/lone-CR delimiters are recognized/,
+    /mapping-intent malformed or unterminated metadata exits 2/,
+    /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
+    /Inline --text is always literal/,
+  ]) assert.match(xReplyHelp.stdout, evidence);
 
   const redditDraftHelp = spawnSync(process.execPath, [CLI_PATH, "reddit", "draft", "--help"], { encoding: "utf8" });
   assert.equal(redditDraftHelp.status, 0);

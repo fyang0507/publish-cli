@@ -8,7 +8,7 @@ import {
   extractTweetId,
   isLocalValidationError,
 } from "../capabilities/validation.js";
-import { resolveContentInput } from "./contentInput.js";
+import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
 
 /**
  * `publish x reply` — stage a NATIVE X REPLY draft targeted at an existing tweet
@@ -46,17 +46,39 @@ export function registerReplyCommand(x: Command): void {
     .description("Stage a NATIVE X reply draft targeted at a tweet — never posts")
     .requiredOption("--to <id|url>", "Target tweet: a status URL or a raw numeric id")
     .option("--text <content>", "Reply content inline (exactly one of --text / --from)")
-    .option("--from <base.md>", "Path to the canonical base markdown ('-' = stdin)")
+    .option("--from <base.md>", "Canonical markdown ('-' = stdin); strips leading mapping/empty YAML frontmatter")
     .option("--long", "Use the local 25,000-code-point guard for Premium long replies; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .option("--force", "Re-stage even if a reply to this tweet was already recorded in the ledger")
+    .addHelpText(
+      "after",
+      "\nFile/stdin frontmatter:\n" +
+        "  A leading empty or YAML mapping block between --- delimiters is metadata only and is removed.\n" +
+        "  Metadata keys are ignored; reply text comes only from the normalized Markdown body.\n" +
+        "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or unterminated metadata exits 2.\n" +
+        "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
+        "  Inline --text is always literal and is never interpreted as frontmatter.\n",
+    )
     .action(async (opts: ReplyXOptions) => {
       // Resolve content (inline --text or --from file/stdin) up front so a usage
       // error fails fast before we touch the browser or the ledger.
       let md: string;
+      let sourceLineOffset = 0;
       try {
-        md = resolveContentInput(opts);
+        const input = resolveContentInputDetails(opts);
+        md = input.markdown;
+        if (input.kind !== "text") {
+          const sourceName = input.kind === "stdin"
+            ? "stdin (--from -)"
+            : (input.sourcePath ?? "--from input");
+          const split = splitLeadingFrontmatter(md, sourceName, {
+            policy: "mapping-only",
+            preserveBodyLineEndings: true,
+          });
+          md = split.body;
+          sourceLineOffset = split.bodyLineOffset;
+        }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);
@@ -78,7 +100,11 @@ export function registerReplyCommand(x: Command): void {
       let content: GeneratedContent;
       let overflowed = false;
       try {
-        content = await generateContent(md, { format: "tweet", long: opts.long });
+        content = await generateContent(md, {
+          format: "tweet",
+          long: opts.long,
+          sourceLineOffset,
+        });
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         if (error.problem.code !== "x_text_too_long") {
@@ -87,7 +113,11 @@ export function registerReplyCommand(x: Command): void {
         }
         overflowed = true;
         try {
-          content = await generateContent(md, { format: "thread", long: opts.long });
+          content = await generateContent(md, {
+            format: "thread",
+            long: opts.long,
+            sourceLineOffset,
+          });
         } catch (threadError) {
           if (!isLocalValidationError(threadError)) throw threadError;
           console.error(threadError.message);
