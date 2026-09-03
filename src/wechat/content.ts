@@ -24,7 +24,8 @@
  * WeChat rules (WECHAT_DESIGN §4):
  *   - title: REQUIRED. --title → frontmatter `title` → leading Markdown H1.
  *     WeChat documents 32 字; exact measurement is server-authoritative.
- *   - author: --author → frontmatter `author` → WECHAT_AUTHOR env → "". WeChat
+ *   - author: --author → frontmatter `author` → injected WECHAT_AUTHOR fallback
+ *     → "". WeChat
  *     documents 16 字; exact measurement is server-authoritative.
  *   - digest (摘要): --digest → frontmatter `description`/`summary`. WeChat
  *     documents 120 字; exact measurement is server-authoritative. When omitted,
@@ -63,6 +64,8 @@ export interface GenerateArticleOptions {
   title?: string;
   /** --author → frontmatter `author` → env.WECHAT_AUTHOR → "". */
   author?: string;
+  /** Configured WECHAT_AUTHOR value injected by the command after input validation. */
+  authorFallback?: string;
   /** --digest → frontmatter `description`/`summary`; omission delegates derivation to WeChat. */
   digest?: string;
   /** --cover → frontmatter `coverImage`/`cover`/`image`. REQUIRED (throws if unresolved). */
@@ -474,7 +477,7 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   const coverValidation = assertWechatLocalImage(coverPath, "cover");
 
   // --- author ---
-  const author = (opts.author ?? data.author ?? "").trim();
+  const author = (opts.author ?? data.author ?? opts.authorFallback ?? "").trim();
 
   // --- body markdown (strip a leading H1 only when it was consumed as the title) ---
   const bodyMarkdown = trimBlankEdges(titleFromH1 ? stripLeadingH1(afterFm) : afterFm);

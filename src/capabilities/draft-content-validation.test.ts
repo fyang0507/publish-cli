@@ -7,6 +7,7 @@ import {
   resolveContentInputDetails,
   splitLeadingFrontmatter,
 } from "../commands/contentInput.js";
+import { resolveWechatDraftInput } from "../commands/wechat-draft.js";
 import { generatePost } from "../linkedin/content.js";
 import { generateArticle } from "../wechat/content.js";
 import {
@@ -687,6 +688,88 @@ test("WeChat required title and cover failures use structured local validation",
     actual: null,
     unit: null,
   });
+});
+
+test("WeChat classifies file frontmatter before invoking the injected author fallback", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-wechat-author-order-"));
+  try {
+    const malformed = join(dir, "malformed.md");
+    const valid = join(dir, "valid.md");
+    writeFileSync(malformed, "---\nauthor: [broken\n---\nBody");
+    writeFileSync(valid, "---\nauthor: Metadata Author\n---\nBody");
+    let calls = 0;
+    const resolveFallback = (): string => {
+      calls += 1;
+      return "ENV_AUTHOR_SECRET_SENTINEL_66";
+    };
+
+    expectLocalProblem(
+      () => resolveWechatDraftInput({ from: malformed }, resolveFallback),
+      { code: "malformed_frontmatter", actual: "malformed_yaml", unit: null },
+    );
+    assert.equal(calls, 0);
+
+    const resolved = resolveWechatDraftInput({ from: valid }, resolveFallback);
+    assert.equal(calls, 1);
+    assert.equal(resolved.markdown, "Body");
+    assert.deepEqual(resolved.frontmatter, { author: "Metadata Author" });
+    assert.equal(resolved.baseDir, dir);
+    assert.equal(resolved.authorFallback, "ENV_AUTHOR_SECRET_SENTINEL_66");
+
+    const inline = resolveWechatDraftInput(
+      { text: "---\nauthor: Literal Body Author\n---\nBody" },
+      resolveFallback,
+    );
+    assert.equal(calls, 2);
+    assert.equal(inline.markdown, "---\nauthor: Literal Body Author\n---\nBody");
+    assert.deepEqual(inline.frontmatter, {});
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("WeChat author resolution preserves explicit clears and ignores blank or non-string metadata", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-wechat-author-precedence-"));
+  try {
+    const cover = join(dir, "cover.png");
+    writeFileSync(cover, png(900, 900));
+    const article = (overrides: Parameters<typeof generateArticle>[1]) =>
+      generateArticle("Body", { title: "Title", cover, ...overrides });
+
+    assert.equal(article({ author: "  Flag Author  ", authorFallback: "Environment Author" }).author, "Flag Author");
+    assert.equal(
+      article({
+        author: "Flag Author",
+        authorFallback: "Environment Author",
+        frontmatter: { author: "Metadata Author" },
+      }).author,
+      "Flag Author",
+    );
+    for (const explicit of ["", "   "]) {
+      assert.equal(
+        article({
+          author: explicit,
+          authorFallback: "Environment Author",
+          frontmatter: { author: "Metadata Author" },
+        }).author,
+        "",
+      );
+    }
+    assert.equal(
+      article({ authorFallback: "Environment Author", frontmatter: { author: "  Metadata Author  " } }).author,
+      "Metadata Author",
+    );
+    for (const metadata of ["", "   ", 42, null, ["not", "an", "author"]]) {
+      assert.equal(
+        article({ authorFallback: "  Environment Author  ", frontmatter: { author: metadata } }).author,
+        "Environment Author",
+      );
+    }
+    assert.equal(article({ authorFallback: "   " }).author, "");
+    assert.equal(article({}).author, "");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("WeChat consumes shared mapping frontmatter without leaking metadata into HTML", () => {

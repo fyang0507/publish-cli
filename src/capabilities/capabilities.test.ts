@@ -207,6 +207,12 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(wechat, /Mapping-intent malformed or unterminated frontmatter exits 2 before `--out`, token exchange, uploads, or API access/);
   assert.match(wechat, /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown/);
   assert.match(wechat, /Inline `--text` is always literal/);
+  assert.match(
+    wechat,
+    /explicit `--author`.*nonblank string `author`.*validated file\/stdin frontmatter.*`WECHAT_AUTHOR`.*empty/s,
+  );
+  assert.match(wechat, /blank or whitespace-only `--author` intentionally clears/);
+  assert.match(wechat, /blank, whitespace-only, and non-string frontmatter authors are ignored/);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
   assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
@@ -533,6 +539,13 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   const wechatInfoHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "info", "--help"], { encoding: "utf8" });
   assert.equal(wechatInfoHelp.status, 0);
   assert.match(wechatInfoHelp.stdout, /token_refreshed/);
+
+  const wechatDraftHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "draft", "--help"], { encoding: "utf8" });
+  assert.equal(wechatDraftHelp.status, 0);
+  assert.match(
+    wechatDraftHelp.stdout,
+    /Explicit --author \(blank or whitespace intentionally clears\).*file\/stdin frontmatter author > trimmed WECHAT_AUTHOR > empty/s,
+  );
 
   const xDraftHelp = spawnSync(process.execPath, [CLI_PATH, "x", "draft", "--help"], { encoding: "utf8" });
   assert.equal(xDraftHelp.status, 0);

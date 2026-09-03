@@ -108,6 +108,16 @@ export const env: PublishEnv = {
 };
 
 /**
+ * Return the configured WeChat author fallback without exposing the broader
+ * credential-bearing environment object to the draft command. The command
+ * injects this resolver and calls it only after file/stdin frontmatter has been
+ * classified successfully.
+ */
+export function getWechatAuthorFallback(): string {
+  return env.WECHAT_AUTHOR;
+}
+
+/**
  * Runtime paths. Two homes with different lifetimes:
  *   - baseDir (PUBLISH_DATA_DIR, default ~/.publish-cli): MACHINE-LOCAL session
  *     artifacts — the browser profile + cookie cache. Off any synced drive; the
