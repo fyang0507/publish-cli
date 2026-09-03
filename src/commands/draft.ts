@@ -12,9 +12,9 @@ import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentIn
 import {
   isXDraftRowEvidenceCompatible,
   isXDraftReturnedSavePhase,
-  isXDraftStageError,
   snapshotXArticleDraftHandoff,
   snapshotXDraftRowEvidence,
+  snapshotXDraftStageError,
   X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
   type XArticleDraftHandoff,
   type XDraftRowEvidence,
@@ -22,6 +22,13 @@ import {
   type XDraftSavePhase,
 } from "../x/saveProgress.js";
 import type { StageDraftOptions, StageDraftResult } from "../x/draftPoster.js";
+import {
+  normalizeXArticleStageSnapshotFailure,
+  snapshotXArticleStageInput,
+  snapshotXContentFormat,
+  snapshotXNonArticleStageContent,
+  type XArticleStageSnapshotFailure,
+} from "../x/articleStageSnapshot.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -71,30 +78,55 @@ export interface XDraftRealRunDependencies {
 export interface XDraftRealRunOutcome {
   kind: "stage_runtime_failed" | "save_incomplete" | "staged";
   savePhase: XDraftSavePhase;
-  saveMechanism: XDraftSaveMechanism;
-  exitCode: 0 | 1;
+  /** Null only when an untrusted content discriminant cannot be classified safely. */
+  saveMechanism: XDraftSaveMechanism | null;
+  exitCode: 0 | 1 | 2;
   stream: "stdout" | "stderr";
   message: string;
   draftRowEvidence: XDraftRowEvidence | null;
   articleHandoff: XArticleDraftHandoff | null;
 }
 
+function unclassifiedSnapshotFailure(
+  reason: XArticleStageSnapshotFailure,
+): XDraftRealRunOutcome {
+  return {
+    kind: "save_incomplete",
+    savePhase: "save_not_attempted",
+    saveMechanism: null,
+    exitCode: 2,
+    stream: "stderr",
+    draftRowEvidence: null,
+    articleHandoff: null,
+    message:
+      "\n✗ X draft staging stopped before any native Save/Create action was invoked. NEVER posted.\n" +
+      `  Local X staging input snapshot validation failed closed before format/mechanism classification (reason=${reason}).\n` +
+      "  No saved-draft outcome is claimed. Correct the local input structure before a separate retry.",
+  };
+}
+
 function nativeDraftLocation(format: GeneratedContent["format"]): string {
   return format === "article" ? "X Articles → Drafts" : "X Unsent/Drafts";
 }
 
-function beforeSaveFailure(format: GeneratedContent["format"]): XDraftRealRunOutcome {
+function beforeSaveFailure(
+  format: GeneratedContent["format"],
+  snapshotFailure?: XArticleStageSnapshotFailure,
+): XDraftRealRunOutcome {
   const mechanism = format === "article" ? "Article Create/autosave" : "composer Save";
   return {
     kind: "save_incomplete",
     savePhase: "save_not_attempted",
     saveMechanism: format === "article" ? "article_create_autosave" : "composer_close_save",
-    exitCode: 1,
+    exitCode: snapshotFailure ? 2 : 1,
     stream: "stderr",
     draftRowEvidence: null,
     articleHandoff: null,
     message:
       `\n✗ X ${format} draft staging stopped before the native ${mechanism} action was invoked. NEVER posted.\n` +
+      (snapshotFailure
+        ? `  Local X staging input snapshot validation failed closed (reason=${snapshotFailure}).\n`
+        : "") +
       "  No saved-draft outcome is claimed. Verify the local runtime and browser flow before a separate retry.",
   };
 }
@@ -213,42 +245,58 @@ function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
   };
 }
 
-/** Stateful X draft boundary; dry-run returns before this seam is called. */
-function snapshotExpectedArticleCodeBlockCount(
-  content: GeneratedContent,
-): number | "many" | null {
-  if (content.format !== "article") return null;
-  try {
-    const article = content.article;
-    if (!article) return null;
-    const blocks = article.blocks;
-    const codeFlags = content.codeFlags;
-    if (!Array.isArray(blocks) || !Array.isArray(codeFlags)) {
-      return null;
-    }
-    const declared = article.codeBlockCount;
-    if (!Number.isSafeInteger(declared) || declared < 0) return null;
-    let structured = 0;
-    for (const block of blocks) {
-      if (typeof block !== "object" || block === null) return null;
-      if (block.kind === "code") structured += 1;
-    }
-    if (structured !== declared || codeFlags.length !== structured) return null;
-    return structured > X_ARTICLE_CODE_BLOCK_COUNT_LIMIT ? "many" : structured;
-  } catch {
-    return null;
-  }
-}
-
 export async function executeXDraftRealRun(
   input: XDraftRealRunInput,
   deps: XDraftRealRunDependencies,
 ): Promise<XDraftRealRunOutcome> {
-  const expectedArticleCodeBlockCount = input.content.format === "article"
-    ? snapshotExpectedArticleCodeBlockCount(input.content)
-    : null;
-  if (input.content.format === "article" && expectedArticleCodeBlockCount === null) {
-    return beforeSaveFailure(input.content.format);
+  let callerContent: GeneratedContent;
+  let format: GeneratedContent["format"];
+  try {
+    callerContent = input.content;
+  } catch {
+    return unclassifiedSnapshotFailure("property_read_failed");
+  }
+  try {
+    format = snapshotXContentFormat(callerContent);
+  } catch (error) {
+    return unclassifiedSnapshotFailure(normalizeXArticleStageSnapshotFailure(error));
+  }
+
+  let stageContent: GeneratedContent;
+  let expectedArticleCodeBlockCount: number | "many" | null = null;
+  try {
+    if (format === "article") {
+      const snapshot = snapshotXArticleStageInput(callerContent, format);
+      stageContent = snapshot.content;
+      expectedArticleCodeBlockCount = snapshot.receiptCodeBlockCount;
+    } else {
+      stageContent = snapshotXNonArticleStageContent(callerContent, format);
+    }
+  } catch (error) {
+    return beforeSaveFailure(
+      format,
+      normalizeXArticleStageSnapshotFailure(error),
+    );
+  }
+
+  // Primitives are copied before the awaited loader so later mutation of the
+  // caller-owned input object cannot change the staging request.
+  let inspect: boolean | undefined;
+  let basePath: string | undefined;
+  try {
+    inspect = input.inspect;
+    basePath = input.basePath;
+  } catch {
+    return format === "article"
+      ? beforeSaveFailure(format, "property_read_failed")
+      : beforeSaveFailure(format);
+  }
+  if (
+    format === "article" &&
+    ((inspect !== undefined && typeof inspect !== "boolean") ||
+      (basePath !== undefined && (typeof basePath !== "string" || basePath.length > 1_000_000)))
+  ) {
+    return beforeSaveFailure(format, "invalid_value");
   }
 
   let stageDraft: Awaited<ReturnType<XDraftRealRunDependencies["loadStageDraft"]>>;
@@ -258,7 +306,7 @@ export async function executeXDraftRealRun(
     return {
       kind: "stage_runtime_failed",
       savePhase: "save_not_attempted",
-      saveMechanism: input.content.format === "article"
+      saveMechanism: format === "article"
         ? "article_create_autosave"
         : "composer_close_save",
       exitCode: 1,
@@ -274,7 +322,7 @@ export async function executeXDraftRealRun(
     return {
       kind: "stage_runtime_failed",
       savePhase: "save_not_attempted",
-      saveMechanism: input.content.format === "article"
+      saveMechanism: format === "article"
         ? "article_create_autosave"
         : "composer_close_save",
       exitCode: 1,
@@ -287,14 +335,37 @@ export async function executeXDraftRealRun(
     };
   }
 
+  let returned: StageDraftResult;
+  try {
+    returned = await stageDraft(stageContent, {
+      inspect,
+      basePath,
+    });
+  } catch (error) {
+    // Only a rejection from the staging promise itself can carry typed phase
+    // evidence. Once the promise resolves, result inspection is a separate,
+    // untrusted boundary and can never downgrade uncertainty.
+    const stageError = snapshotXDraftStageError(error);
+    if (stageError) {
+      const expectedMechanism = format === "article"
+        ? "article_create_autosave"
+        : "composer_close_save";
+      if (stageError.saveMechanism !== expectedMechanism) {
+        return uncertainSaveOutcome(format, "save_delivery_unknown");
+      }
+      return stageError.savePhase === "save_not_attempted"
+        ? beforeSaveFailure(format)
+        : uncertainSaveOutcome(format, stageError.savePhase);
+    }
+    // Once the staging function was invoked, an untyped exception carries no
+    // reliable Save boundary. Conservatively assume delivery may have happened.
+    return uncertainSaveOutcome(format, "save_delivery_unknown");
+  }
+
   let result: StageDraftResult;
   try {
-    const returned = await stageDraft(input.content, {
-      inspect: input.inspect,
-      basePath: input.basePath,
-    });
     if (typeof returned !== "object" || returned === null) {
-      return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+      return uncertainSaveOutcome(format, "save_delivery_unknown");
     }
     // Snapshot each untrusted port field once while exceptions are guarded.
     // A proxy/stateful getter must not pass validation and later change the
@@ -310,11 +381,11 @@ export async function executeXDraftRealRun(
       ),
     };
     if (
-      candidate.format !== input.content.format ||
-      candidate.posts !== (input.content.format === "thread"
-        ? (input.content.thread?.length ?? 0)
+      candidate.format !== format ||
+      candidate.posts !== (format === "thread"
+        ? (stageContent.thread?.length ?? 0)
         : 1) ||
-      candidate.saveMechanism !== (input.content.format === "article"
+      candidate.saveMechanism !== (format === "article"
         ? "article_create_autosave"
         : "composer_close_save") ||
       !isXDraftReturnedSavePhase(candidate.savePhase) ||
@@ -329,24 +400,13 @@ export async function executeXDraftRealRun(
         candidate.draftRowEvidence,
       )
     ) {
-      return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+      return uncertainSaveOutcome(format, "save_delivery_unknown");
     }
     result = candidate as StageDraftResult;
-  } catch (error) {
-    if (isXDraftStageError(error)) {
-      const expectedMechanism = input.content.format === "article"
-        ? "article_create_autosave"
-        : "composer_close_save";
-      if (error.saveMechanism !== expectedMechanism) {
-        return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
-      }
-      return error.savePhase === "save_not_attempted"
-        ? beforeSaveFailure(input.content.format)
-        : uncertainSaveOutcome(input.content.format, error.savePhase);
-    }
-    // Once the staging function was invoked, an untyped exception carries no
-    // reliable Save boundary. Conservatively assume delivery may have happened.
-    return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
+  } catch {
+    // A resolved result is untrusted data, not phase-bearing control flow.
+    // Throwing top-level or nested getters therefore always mean uncertainty.
+    return uncertainSaveOutcome(format, "save_delivery_unknown");
   }
 
   return result.savePhase === "verified"
@@ -439,6 +499,10 @@ export function registerDraftCommand(x: Command): void {
         "  A valid top-level backtick/tilde fence with 0–3 leading spaces may close explicitly or at end of input. EOF-closed Article code preserves its LF-normalized payload, including trailing spaces and blank/whitespace-only lines, in article.blocks and the clean Markdown dry-run artifact.\n" +
         "  Every recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in verified and unverified handoff receipts for manual Insert → Code or screenshot review.\n" +
         "  File-backed Article dry-runs put the excluded-code count and advisories in a separate .x-article.inspection.txt receipt so inspection metadata cannot become EOF-fenced code payload.\n" +
+        "\nArticle staging snapshot:\n" +
+        "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/code-count snapshot and pre-renders its native HTML/plain inputs.\n" +
+        "  Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +
+        "  If the root format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism. Active inline hrefs require exact safe absolute HTTP(S); supported percent bytes remain exact and are not decoded by safety validation. URL-looking advisories from excluded code are bounded but never become active anchors.\n" +
         "\nNative-save outcome:\n" +
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +

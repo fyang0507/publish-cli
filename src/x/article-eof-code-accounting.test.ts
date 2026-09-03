@@ -394,7 +394,7 @@ test("every generated Article accounting invariant fails before loading the stag
     assert.equal(loaderCalls, 0, fixture.name);
     prepared.assertReads?.();
     assert.equal(outcome.kind, "save_incomplete", fixture.name);
-    assert.equal(outcome.exitCode, 1, fixture.name);
+    assert.equal(outcome.exitCode, 2, fixture.name);
     assert.equal(outcome.savePhase, "save_not_attempted", fixture.name);
     assert.equal(outcome.articleHandoff, null, fixture.name);
     assert.match(

@@ -1,3 +1,5 @@
+import { isProxy } from "node:util/types";
+
 /**
  * Closed evidence contract for X draft persistence progress (issue #82).
  *
@@ -314,31 +316,70 @@ export type XDraftReturnedSavePhase = Extract<
   "save_delivered_unverified" | "verified"
 >;
 
+const X_DRAFT_STAGE_ERROR_INSTANCES = new WeakSet<object>();
+
 export class XDraftStageError extends Error {
   readonly code = "x_draft_save_incomplete";
 
   constructor(
     readonly savePhase: XDraftSaveFailurePhase,
-    readonly saveMechanism: XDraftSaveMechanism,
+    /** Null only when validation cannot safely classify the native mechanism. */
+    readonly saveMechanism: XDraftSaveMechanism | null,
   ) {
     super(
-      savePhase === "save_not_attempted"
+      saveMechanism === null
+        ? "X draft staging input failed before a native save mechanism could be classified."
+        : savePhase === "save_not_attempted"
         ? "X draft staging stopped before the native Save/autosave action was invoked."
         : savePhase === "save_delivery_unknown"
           ? "The native X Save/autosave action was invoked, but its delivery is unknown."
           : "The native X Save/autosave action returned, but draft persistence was not verified.",
     );
     this.name = "XDraftStageError";
+    X_DRAFT_STAGE_ERROR_INSTANCES.add(this);
   }
 }
 
+export interface XDraftStageErrorSnapshot {
+  readonly savePhase: XDraftSaveFailurePhase;
+  readonly saveMechanism: XDraftSaveMechanism | null;
+}
+
+/** Snapshot hostile thrown values once; never branch on mutable accessors/proxies. */
+export function snapshotXDraftStageError(error: unknown): XDraftStageErrorSnapshot | null {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null) {
+    return null;
+  }
+  let phaseDescriptor: PropertyDescriptor | undefined;
+  let mechanismDescriptor: PropertyDescriptor | undefined;
+  try {
+    if (isProxy(error) || !X_DRAFT_STAGE_ERROR_INSTANCES.has(error)) return null;
+    phaseDescriptor = Object.getOwnPropertyDescriptor(error, "savePhase");
+    mechanismDescriptor = Object.getOwnPropertyDescriptor(error, "saveMechanism");
+  } catch {
+    return null;
+  }
+  if (
+    !phaseDescriptor || !("value" in phaseDescriptor) ||
+    !mechanismDescriptor || !("value" in mechanismDescriptor)
+  ) {
+    return null;
+  }
+  const savePhase = phaseDescriptor.value;
+  const saveMechanism = mechanismDescriptor.value;
+  const phaseValid = savePhase === "save_not_attempted" ||
+    savePhase === "save_delivery_unknown" ||
+    savePhase === "save_delivered_unverified";
+  const mechanismValid = saveMechanism === "composer_close_save" ||
+    saveMechanism === "article_create_autosave" ||
+    (saveMechanism === null && savePhase === "save_not_attempted");
+  return phaseValid && mechanismValid
+    ? Object.freeze({ savePhase, saveMechanism }) as XDraftStageErrorSnapshot
+    : null;
+}
+
 export function isXDraftStageError(error: unknown): error is XDraftStageError {
-  return error instanceof XDraftStageError &&
-    (error.savePhase === "save_not_attempted" ||
-      error.savePhase === "save_delivery_unknown" ||
-      error.savePhase === "save_delivered_unverified") &&
-    (error.saveMechanism === "composer_close_save" ||
-      error.saveMechanism === "article_create_autosave");
+  return snapshotXDraftStageError(error) !== null;
 }
 
 export function isXDraftReturnedSavePhase(
@@ -894,8 +935,9 @@ export function xDraftStageError(
   fallbackPhase: XDraftSaveFailurePhase,
   mechanism: XDraftSaveMechanism,
 ): XDraftStageError {
-  return isXDraftStageError(error)
-    ? error
+  const snapshot = snapshotXDraftStageError(error);
+  return snapshot !== null && snapshot.saveMechanism !== null
+    ? new XDraftStageError(snapshot.savePhase, snapshot.saveMechanism)
     : new XDraftStageError(fallbackPhase, mechanism);
 }
 
