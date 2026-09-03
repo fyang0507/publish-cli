@@ -333,10 +333,33 @@ test("verified and returned-unverified Article receipts preserve only closed han
     },
   ];
   for (const fixture of cases) {
+    const expectedCount = fixture.handoff.codeBlockCount === "many"
+      ? 10_001
+      : fixture.handoff.codeBlockCount;
+    const fixtureGenerated: GeneratedContent = {
+      ...generated,
+      codeFlags: Array.from({ length: expectedCount }, (_, index) => ({
+        index: index + 1,
+        preview: "",
+        sourceLine: index + 1,
+      })),
+      article: {
+        ...generated.article!,
+        blocks: [
+          ...generated.article!.blocks,
+          ...Array.from({ length: expectedCount }, (_, index) => ({
+            kind: "code" as const,
+            index: index + 1,
+            text: "",
+          })),
+        ],
+        codeBlockCount: expectedCount,
+      },
+    };
     for (const phase of ["verified", "save_delivered_unverified"] as const) {
       const outcome = await executeXDraftRealRun(
-        { content: generated },
-        dependencies(async () => async () => stageResult(generated, phase, {
+        { content: fixtureGenerated },
+        dependencies(async () => async () => stageResult(fixtureGenerated, phase, {
           articleHandoff: fixture.handoff,
           note: RAW_CANARY,
         })),

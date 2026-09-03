@@ -172,7 +172,13 @@ export interface GeneratedContent {
    *   - blocks:   STRUCTURED blocks with real formatting marks — the browser layer
    *               applies these as actual editor styles instead of literal chars.
    */
-  article?: { title: string; markdown: string; blocks: ArticleBlock[] };
+  article?: {
+    title: string;
+    markdown: string;
+    blocks: ArticleBlock[];
+    /** Exact structured blocks excluded from the native rich-HTML paste. */
+    codeBlockCount: number;
+  };
   /** Code blocks that must become screenshots on X. */
   codeFlags: CodeBlockFlag[];
   /** Links surfaced with placement notes. */
@@ -213,6 +219,11 @@ interface ParsedDoc {
   title: string;
   /** Body markdown with the leading title line removed. */
   body: string;
+  /**
+   * Article body with EOF-fenced payload bytes preserved after line-ending
+   * normalization. Other consumers retain the historical trimmed `body`.
+   */
+  articleBody?: string;
   /** Body with fenced code blocks and front-matter-ish metadata stripped, for prose splitting. */
   prose: string;
   codeFlags: CodeBlockFlag[];
@@ -347,9 +358,20 @@ export function parseBaseMarkdown(md: string, sourceLineOffset = 0): ParsedDoc {
   // Collect links from the (non-code) body.
   const linkFlags = collectLinkFlags(bodyLines.join("\n"));
 
+  const joinedBody = bodyLines.join("\n");
+  // `String.trim()` is correct for the historical prose consumers, but an
+  // unclosed CommonMark fence consumes through EOF. Trimming that body would
+  // silently delete trailing spaces and blank/whitespace-only code lines before
+  // the Article block parser sees them. Remove only structural blank lines
+  // surrounding the consumed title at the start; retain every byte through EOF.
+  const articleBody = inFence
+    ? joinedBody.replace(/^(?:[ \t]*\n)+/u, "")
+    : joinedBody.trim();
+
   return {
     title: title || "Untitled",
-    body: bodyLines.join("\n").trim(),
+    body: joinedBody.trim(),
+    articleBody,
     prose: proseLines.join("\n").trim(),
     codeFlags,
     linkFlags,
@@ -1110,7 +1132,11 @@ export async function generateContent(
   }
 
   // article
-  base.article = buildArticle(parsed.title, parsed.body);
+  base.article = buildArticle(
+    parsed.title,
+    parsed.articleBody ?? parsed.body,
+    parsed.codeFlags.length,
+  );
   return base;
 }
 
@@ -1307,7 +1333,7 @@ function mergeRuns(runs: InlineRun[]): InlineRun[] {
  * (flagged for screenshots, consistent with tweet/thread handling).
  */
 export function parseArticleBlocks(body: string): ArticleBlock[] {
-  const lines = body.replace(/\r\n/g, "\n").split("\n");
+  const lines = body.replace(/\r\n?/g, "\n").split("\n");
   const blocks: ArticleBlock[] = [];
 
   let inFence = false;
@@ -1397,18 +1423,51 @@ export function parseArticleBlocks(body: string): ArticleBlock[] {
     // Ordinary prose line — accumulate into the current paragraph.
     paraBuf.push(line.trim());
   }
+  // CommonMark closes a fenced code block at end of input. Preserve the exact
+  // LF-normalized payload collected after the opener, including trailing spaces
+  // and blank/whitespace-only lines, instead of silently dropping the block.
+  // Broader legacy Article fence classification is tracked separately in #96;
+  // this branch only flushes a block the existing top-level scan left open.
+  if (inFence) {
+    blocks.push({ kind: "code", index: codeIndex, lang: codeLang, text: codeBuf.join("\n") });
+  }
   flushPara();
   return blocks;
 }
 
-function buildArticle(title: string, body: string): { title: string; markdown: string; blocks: ArticleBlock[] } {
+function buildArticle(
+  title: string,
+  body: string,
+  advisoryCodeBlockCount: number,
+): {
+  title: string;
+  markdown: string;
+  blocks: ArticleBlock[];
+  codeBlockCount: number;
+} {
   // Article markdown is the long-form body as-is (title becomes the Article
   // headline). We keep the raw markdown for the --dry-run artifact / audit, and
   // ALSO parse it into structured blocks so the browser layer can apply REAL
   // editor formatting (headings/bold/lists/links) instead of literal characters.
   const markdown = body.startsWith("#") ? body : `# ${title}\n\n${body}`;
   const blocks = parseArticleBlocks(body);
-  return { title, markdown, blocks };
+  const codeBlockCount = blocks.reduce(
+    (count, block) => count + (block.kind === "code" ? 1 : 0),
+    0,
+  );
+  if (codeBlockCount !== advisoryCodeBlockCount) {
+    throw new LocalValidationError(
+      "X Article fenced-code parsing produced inconsistent advisory and structured-block counts. No artifact or native draft was created.",
+      {
+        code: "x_article_code_block_accounting_mismatch",
+        field: "body",
+        actual: `${advisoryCodeBlockCount} advisories; ${codeBlockCount} structured code blocks`,
+        expected: "one structured Article code block for every fenced-code advisory",
+        unit: "code_blocks",
+      },
+    );
+  }
+  return { title, markdown, blocks, codeBlockCount };
 }
 
 /**
@@ -1433,7 +1492,12 @@ export function renderForInspection(c: GeneratedContent): string {
     }
   }
   if (c.article) {
-    out.push("", `── article: ${c.article.title} ──`, c.article.markdown);
+    out.push(
+      "",
+      `── article: ${c.article.title} ──`,
+      c.article.markdown,
+      `[native rich-HTML excluded code blocks: ${c.article.codeBlockCount}]`,
+    );
   }
 
   if (c.codeFlags.length) {
