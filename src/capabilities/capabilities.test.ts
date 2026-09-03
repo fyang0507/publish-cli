@@ -148,6 +148,19 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /leading transport BOM/);
   assert.match(x, /actual\/expected evidence before artifacts, state, profiles, browser, or API imports or writes/);
   assert.match(x, /Inline `--text` remains literal/);
+  assert.match(x, /reply --to` uses a closed local target allowlist/);
+  assert.match(x, /input is exact: whitespace, BOM\/control characters, and backslashes are rejected/);
+  assert.match(x, /raw ID is 5–25 ASCII digits matching `\[1-9\]\[0-9\]\{4,24\}`; leading zeroes are rejected/);
+  assert.match(x, /URL must use HTTPS with the exact apex host `x\.com` or `twitter\.com`/);
+  assert.match(x, /without credentials, an explicit port \(including `:443`\), a trailing-dot host, or any subdomain/);
+  assert.match(x, /Scheme and host are case-insensitive/);
+  assert.match(
+    x,
+    /exact case-sensitive paths are `\/<handle>\/status\/<id>`, `\/<handle>\/statuses\/<id>`, `\/i\/status\/<id>`, or `\/i\/web\/status\/<id>`/,
+  );
+  assert.match(x, /`<handle>` is 1–15 ASCII letters, digits, or underscores, and one trailing slash is allowed/);
+  assert.match(x, /Percent encoding in the status path, dot\/extra path segments, and URL-normalized path forms are rejected/);
+  assert.match(x, /query and fragment are allowed and ignored only after the path validates; the reply ID always comes from the path/);
   assert.match(
     x,
     /reply --dry-run` validates the reply content and target ID\/URL syntax, then generates and renders a tweet or a reply thread that losslessly splits the normalized reply prose/,
@@ -601,6 +614,16 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /mapping-intent malformed or unterminated metadata exits 2/,
     /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM/,
     /Inline --text is always literal/,
+    /--to is exact: whitespace, BOM\/control characters, and backslashes are rejected/,
+    /raw ID is 5–25 ASCII digits matching \[1-9\]\[0-9\]\{4,24\}; leading zeroes are rejected/,
+    /URL must use HTTPS with the exact apex host x\.com or twitter\.com/,
+    /without credentials, an explicit port \(including :443\), a trailing-dot host, or subdomain such as www\/mobile/,
+    /Scheme and host are case-insensitive/,
+    /exact case-sensitive paths are \/<handle>\/status\/<id>, \/<handle>\/statuses\/<id>, \/i\/status\/<id>, or \/i\/web\/status\/<id>/,
+    /<handle> is 1–15 ASCII letters, digits, or underscores/,
+    /One trailing slash is allowed/,
+    /Percent encoding in the status path, dot\/extra path segments, or URL-normalized path forms are rejected/,
+    /query and fragment are allowed and ignored only after the path validates; the reply ID always comes from the path/,
     /--dry-run skips the reply ledger\/reservations and all browser\/profile\/database state/,
     /Target ID\/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X/,
     /real run first claims the normalized target, then may refuse finalized history unless --force/,

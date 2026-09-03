@@ -568,7 +568,10 @@ registerHooks({ resolve(specifier, context, nextResolve) {
       assert.ok(reservationRow(dbFile, TARGET_A), `reservation changed for ${conflict[0]}`);
     }
 
-    const recovered = run(["x", "reply", "--to", TARGET_A, RECOVERY_FLAG]);
+    const recovered = run([
+      "x", "reply", "--to", `https://twitter.com/i/web/status/${TARGET_A}?s=20#reviewed`,
+      RECOVERY_FLAG,
+    ]);
     assert.equal(recovered.status, 0, combined(recovered));
     assert.match(recovered.stdout, /Cleared the stale X reply reservation/);
     assert.match(recovered.stdout, /exact CLI-owned profile used by that run/);

@@ -191,6 +191,70 @@ test("invalid draft inputs exit 2 before importing platform/browser/API stacks",
   }
 });
 
+test("invalid X reply targets are zero-state before content, ledger, or platform access", () => {
+  const fixture = createFixture();
+  const recoveryFlag = "--recover-stale-reservation-after-confirming-no-draft";
+  const invalidTargets = [
+    "invoice-1234567890-reference",
+    "0000012345",
+    " 12345",
+    "http://x.com/user/status/12345",
+    "https://www.x.com/user/status/12345",
+    "https://x.com.evil.example/user/status/12345",
+    "https://user:s3cr3t@x.com/user/status/12345",
+    "https://x.com:443/user/status/12345",
+    "https://%78.com/user/status/12345",
+    "https://x\u3002com/user/status/12345",
+    "https://x.com/user/STATUS/12345",
+    "https://x.com/a/../user/status/12345",
+    "https://x.com\\user/status/12345",
+    "https://x.com/user/status%2f12345",
+    "https://x.com/user/status/12345/extra",
+    "https://x.com/not-a-status?next=/user/status/12345",
+  ];
+
+  try {
+    for (const [index, target] of invalidTargets.entries()) {
+      for (const mode of ["real", "dry-run", "recovery"] as const) {
+        const dataDir = join(fixture.dir, `invalid-target-${index}-${mode}-data`);
+        const repoDir = join(fixture.dir, `invalid-target-${index}-${mode}-repo`);
+        const args = mode === "recovery"
+          ? ["x", "reply", "--to", target, recoveryFlag]
+          : [
+            "x", "reply", "--to", target, "--text", "reply body",
+            ...(mode === "dry-run" ? ["--dry-run"] : []),
+          ];
+        const result = runCli(fixture, args, undefined, { dataDir, repoDir });
+
+        assert.equal(result.status, 2, `${mode}: ${target}\n${output(result)}`);
+        assert.equal(result.signal, null, `${mode}: ${target}\n${output(result)}`);
+        assert.match(output(result), /Invalid --to: Expected \[1-9\]\[0-9\]\{4,24\}/);
+        assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED|s3cr3t/);
+        assert.ok(output(result).length < 1_000, `${mode}: unbounded error output`);
+        assert.equal(existsSync(dataDir), false, `${mode}: data dir was created`);
+        assert.equal(existsSync(repoDir), false, `${mode}: data repo was created`);
+      }
+    }
+
+    const absentSource = join(fixture.dir, "must-not-be-read.md");
+    const dataDir = join(fixture.dir, "invalid-target-missing-source-data");
+    const repoDir = join(fixture.dir, "invalid-target-missing-source-repo");
+    const beforeContent = runCli(
+      fixture,
+      ["x", "reply", "--to", "https://example.com/user/status/12345", "--from", absentSource],
+      undefined,
+      { dataDir, repoDir },
+    );
+    assert.equal(beforeContent.status, 2, output(beforeContent));
+    assert.match(output(beforeContent), /Invalid --to:/);
+    assert.doesNotMatch(output(beforeContent), /ENOENT|must-not-be-read|PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(existsSync(dataDir), false);
+    assert.equal(existsSync(repoDir), false);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
 test("valid X reply dry-runs render tweet and lossless thread previews without runtime state", () => {
   const fixture = createFixture();
   try {
@@ -206,7 +270,8 @@ test("valid X reply dry-runs render tweet and lossless thread previews without r
       {
         name: "tweet",
         args: [
-          "x", "reply", "--to", unverifiedTargetId, "--text",
+          "x", "reply", "--to",
+          `HTTPS://X.COM/Operator_1/status/${unverifiedTargetId}/?s=20#fragment`, "--text",
           "State-free single reply preview.", "--dry-run",
         ],
         format: /format: tweet/,

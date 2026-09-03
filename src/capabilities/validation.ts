@@ -114,25 +114,115 @@ export function isLivePositiveXArticleCoverPath(localPath: string): boolean {
   );
 }
 
-/** Parse a raw X status id or status URL without importing any browser module. */
-export function extractTweetId(input: string): string {
-  const trimmed = input.trim();
-  if (/^\d{5,25}$/.test(trimmed)) return trimmed;
-  const match = trimmed.match(/status(?:es)?\/(\d{5,25})/);
-  if (match) return match[1];
-  const legacyDigitRun = trimmed.match(/(\d{10,25})/);
-  if (legacyDigitRun) return legacyDigitRun[1];
+const X_REPLY_ID_PATTERN = "[1-9][0-9]{4,24}";
+const X_REPLY_ID_RE = new RegExp(`^${X_REPLY_ID_PATTERN}$`);
+const X_REPLY_STATUS_PATH_RE = new RegExp(
+  `^/([A-Za-z0-9_]{1,15})/(status|statuses)/(${X_REPLY_ID_PATTERN})/?$`,
+);
+const X_REPLY_INTERNAL_STATUS_PATH_RE = new RegExp(
+  `^/i/status/(${X_REPLY_ID_PATTERN})/?$`,
+);
+const X_REPLY_WEB_STATUS_PATH_RE = new RegExp(
+  `^/i/web/status/(${X_REPLY_ID_PATTERN})/?$`,
+);
+const X_REPLY_TARGET_EXPECTED =
+  "[1-9][0-9]{4,24}, or an HTTPS x.com/twitter.com URL with " +
+  "/<handle>/status/<id>, /<handle>/statuses/<id>, /i/status/<id>, or /i/web/status/<id>";
+
+function invalidXReplyTarget(input: string, reason: string): never {
   throw new LocalValidationError(
-    `Expected a numeric tweet id or an X status URL, got "${trimmed}".`,
+    `Expected ${X_REPLY_TARGET_EXPECTED}; ${reason}.`,
     {
       code: "x_invalid_reply_target",
       phase: "local",
       field: "target",
-      actual: trimmed || null,
-      expected: "numeric tweet id or https://x.com/<user>/status/<id>",
+      // Never echo a caller-supplied URL: rejected userinfo/query text may
+      // contain credentials or other private values. Length + category are
+      // bounded evidence for the structured local-input failure.
+      actual: input.length === 0
+        ? null
+        : `rejected_${reason.replace(/[^a-z]+/gi, "_").toLowerCase().slice(0, 48)} (${input.length} code units)`,
+      expected: X_REPLY_TARGET_EXPECTED,
       unit: null,
     },
   );
+}
+
+/**
+ * Parse one exact, trusted X reply target without importing browser or state
+ * modules. The allowlist is deliberately closed: expanding hosts or path forms
+ * requires evidence that the native X surface emits and accepts them.
+ */
+export function extractTweetId(input: string): string {
+  if (input.length === 0) invalidXReplyTarget(input, "the target is empty");
+  if (/\s|\uFEFF/u.test(input)) {
+    invalidXReplyTarget(input, "whitespace or a byte-order mark is not allowed");
+  }
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(input)) {
+    invalidXReplyTarget(input, "control characters are not allowed");
+  }
+  if (input.includes("\\")) {
+    invalidXReplyTarget(input, "backslashes are not allowed");
+  }
+
+  if (X_REPLY_ID_RE.test(input)) return input;
+
+  const schemeMatch = input.match(/^https:\/\//i);
+  if (!schemeMatch) {
+    invalidXReplyTarget(input, "use an exact canonical ID or supported HTTPS URL");
+  }
+
+  const authorityStart = schemeMatch[0].length;
+  const authorityEndOffset = input.slice(authorityStart).search(/[/?#]/u);
+  const authorityEnd = authorityEndOffset === -1
+    ? input.length
+    : authorityStart + authorityEndOffset;
+  const rawAuthority = input.slice(authorityStart, authorityEnd);
+  if (!/^(?:x\.com|twitter\.com)$/i.test(rawAuthority)) {
+    invalidXReplyTarget(
+      input,
+      "the URL authority must be the exact apex host x.com or twitter.com without credentials or a port",
+    );
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(input);
+  } catch {
+    invalidXReplyTarget(input, "the URL is malformed");
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.port !== "" ||
+    (hostname !== "x.com" && hostname !== "twitter.com")
+  ) {
+    invalidXReplyTarget(input, "the parsed URL does not match the trusted HTTPS authority");
+  }
+
+  const rawPathAndSuffix = input.slice(authorityEnd);
+  const suffixOffset = rawPathAndSuffix.search(/[?#]/u);
+  const rawPath = suffixOffset === -1
+    ? rawPathAndSuffix
+    : rawPathAndSuffix.slice(0, suffixOffset);
+  if (rawPath.includes("%")) {
+    invalidXReplyTarget(input, "percent encoding is not allowed in the status path");
+  }
+  if (parsed.pathname !== rawPath) {
+    invalidXReplyTarget(input, "the status path must not rely on URL normalization");
+  }
+
+  const internalMatch = rawPath.match(X_REPLY_INTERNAL_STATUS_PATH_RE) ??
+    rawPath.match(X_REPLY_WEB_STATUS_PATH_RE);
+  if (internalMatch) return internalMatch[1];
+
+  const handleMatch = rawPath.match(X_REPLY_STATUS_PATH_RE);
+  if (!handleMatch) {
+    invalidXReplyTarget(input, "the URL path is not an allowed status path");
+  }
+  return handleMatch[3];
 }
 
 export type LocalImageContentType =
