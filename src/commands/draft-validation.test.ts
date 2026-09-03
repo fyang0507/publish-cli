@@ -349,6 +349,206 @@ test("LinkedIn file/stdin frontmatter is stripped, inline text stays literal, an
   }
 });
 
+test("Reddit file/stdin frontmatter is exact, literal input stays literal, and failures are zero-touch", () => {
+  const fixture = createFixture();
+  try {
+    for (const [index, newline] of ["\n", "\r\n", "\r"].entries()) {
+      const postPath = join(fixture.dir, `reddit-${index}.md`);
+      writeFileSync(
+        postPath,
+        `\ufeff---${newline}subreddit: from-file${newline}title: From file${newline}` +
+          `flair: Discussion${newline}---${newline}Visible body${newline}`,
+      );
+      const fromFile = runCli(fixture, ["reddit", "draft", "--from", postPath, "--dry-run"]);
+      assert.equal(fromFile.status, 0, output(fromFile));
+      assert.match(fromFile.stdout, /subreddit: r\/from-file/);
+      assert.match(fromFile.stdout, /flair \(requested\): Discussion/);
+      assert.match(fromFile.stdout, /\nFrom file\n/);
+      assert.match(fromFile.stdout, /Visible body/);
+      assert.doesNotMatch(fromFile.stdout, /title: From file|subreddit: from-file|PLATFORM_IMPORT_BLOCKED/);
+    }
+
+    const precedencePath = join(fixture.dir, "reddit-precedence.md");
+    writeFileSync(
+      precedencePath,
+      "---\nsubreddit: metadata-sub\ntitle: Metadata title\nflair: Metadata flair\n---\nBody\n",
+    );
+    const precedence = runCli(fixture, [
+      "reddit", "draft", "--from", precedencePath,
+      "--subreddit", "flag-sub", "--title", "Flag title", "--flair", "Flag flair",
+      "--nsfw", "--spoiler", "--dry-run",
+    ]);
+    assert.equal(precedence.status, 0, output(precedence));
+    assert.match(precedence.stdout, /subreddit: r\/flag-sub/);
+    assert.match(precedence.stdout, /flair \(requested\): Flag flair/);
+    assert.match(precedence.stdout, /\nFlag title\n/);
+    assert.match(precedence.stdout, /flags: NSFW, spoiler/);
+    assert.doesNotMatch(precedence.stdout, /metadata-sub|Metadata title|Metadata flair/);
+
+    for (const [flag, evidence] of [
+      ["--subreddit", /--subreddit was provided but empty/],
+      ["--title", /--title was provided but empty/],
+    ] as const) {
+      const explicitlyEmpty = runCli(fixture, [
+        "reddit", "draft", "--from", precedencePath, flag, "", "--dry-run",
+      ]);
+      assert.equal(explicitlyEmpty.status, 2, output(explicitlyEmpty));
+      assert.match(output(explicitlyEmpty), evidence);
+      assert.doesNotMatch(output(explicitlyEmpty), /PLATFORM_IMPORT_BLOCKED/);
+    }
+    const clearFlair = runCli(fixture, [
+      "reddit", "draft", "--from", precedencePath, "--flair", "", "--dry-run",
+    ]);
+    assert.equal(clearFlair.status, 0, output(clearFlair));
+    assert.doesNotMatch(clearFlair.stdout, /flair \(requested\): Metadata flair/);
+    assert.doesNotMatch(clearFlair.stdout, /PLATFORM_IMPORT_BLOCKED/);
+
+    const fromStdin = runCli(
+      fixture,
+      ["reddit", "draft", "--from", "-", "--dry-run"],
+      "\ufeff---\rsubreddit: stdin-sub\rtitle: Stdin title\r---\rStdin body\r",
+    );
+    assert.equal(fromStdin.status, 0, output(fromStdin));
+    assert.match(fromStdin.stdout, /subreddit: r\/stdin-sub/);
+    assert.match(fromStdin.stdout, /Stdin title/);
+    assert.match(fromStdin.stdout, /Stdin body/);
+    assert.doesNotMatch(fromStdin.stdout, /subreddit: stdin-sub|PLATFORM_IMPORT_BLOCKED/);
+
+    const commentMapH1Path = join(fixture.dir, "reddit-comment-map-h1.md");
+    writeFileSync(
+      commentMapH1Path,
+      "\ufeff---\r# empty metadata comment\r---\r  # Lone CR H1 title\rLone CR body\r",
+    );
+    const commentMapH1 = runCli(fixture, [
+      "reddit", "draft", "--from", commentMapH1Path,
+      "--subreddit", "test", "--dry-run",
+    ]);
+    assert.equal(commentMapH1.status, 0, output(commentMapH1));
+    assert.match(commentMapH1.stdout, /\nLone CR H1 title\n/);
+    assert.match(commentMapH1.stdout, /Lone CR body/);
+    assert.doesNotMatch(commentMapH1.stdout, /empty metadata comment|PLATFORM_IMPORT_BLOCKED/);
+
+    const emptyPath = join(fixture.dir, "reddit-empty-map.md");
+    writeFileSync(emptyPath, "---\n{}\n---\nEmpty-map body\n");
+    const empty = runCli(fixture, [
+      "reddit", "draft", "--from", emptyPath, "--subreddit", "test", "--title", "Title", "--dry-run",
+    ]);
+    assert.equal(empty.status, 0, output(empty));
+    assert.match(empty.stdout, /Empty-map body/);
+
+    const lateMappingPath = join(fixture.dir, "reddit-late-mapping-prose.md");
+    writeFileSync(lateMappingPath, "---\n\nBody\n\nEdit: text\n");
+    const lateMapping = runCli(fixture, [
+      "reddit", "draft", "--from", lateMappingPath,
+      "--subreddit", "test", "--title", "Title", "--dry-run",
+    ]);
+    assert.equal(lateMapping.status, 0, output(lateMapping));
+    assert.match(lateMapping.stdout, /---\n\nBody\n\nEdit: text/);
+    assert.doesNotMatch(lateMapping.stdout, /PLATFORM_IMPORT_BLOCKED/);
+
+    const offsetPath = join(fixture.dir, "reddit-code-offset.md");
+    writeFileSync(
+      offsetPath,
+      "\ufeff---\rsubreddit: test\r---\r# Title\r\r```js\rrun()\r```\r",
+    );
+    const offset = runCli(fixture, ["reddit", "draft", "--from", offsetPath, "--dry-run"]);
+    assert.equal(offset.status, 0, output(offset));
+    assert.match(offset.stdout, /\[js\] line 6: run\(\)/);
+    assert.doesNotMatch(offset.stdout, /\[js\] line 3:/);
+
+    for (const [name, content, evidence] of [
+      ["malformed", "---\nsubreddit: test\ntitle: [broken\n---\nBody\n", /frontmatter is malformed YAML/],
+      ["unterminated", "---\rsubreddit: test\rtitle: Hidden\rBody\r", /no closing --- delimiter/],
+      ["unknown", "---\nsubreddit: test\ntitle: Title\nowner: operator\n---\nBody\n", /unsupported Reddit frontmatter key\(s\): owner/],
+      ["flag-only", "---\nsubreddit: test\ntitle: Title\nnsfw: true\n---\nBody\n", /frontmatter cannot set nsfw.*--nsfw and --spoiler flags/s],
+      ["wrong-type", "---\nsubreddit: test\ntitle: 42\n---\nBody\n", /frontmatter title must be a string/],
+    ] as const) {
+      const badPath = join(fixture.dir, `reddit-${name}.md`);
+      writeFileSync(badPath, content);
+      for (const dryRun of [false, true]) {
+        const invalid = runCli(fixture, [
+          "reddit", "draft", "--from", badPath, ...(dryRun ? ["--dry-run"] : []),
+        ]);
+        assert.equal(invalid.status, 2, output(invalid));
+        assert.match(output(invalid), evidence);
+        assert.doesNotMatch(output(invalid), /PLATFORM_IMPORT_BLOCKED/);
+      }
+    }
+
+    for (const source of [
+      "---\n- ordinary\n- list\n---\nBody\n",
+      "---\nKey:value prose\n---\nBody\n",
+    ]) {
+      const thematic = runCli(fixture, [
+        "reddit", "draft", "--subreddit", "test", "--title", "Title",
+        "--text", source, "--dry-run",
+      ]);
+      assert.equal(thematic.status, 0, output(thematic));
+      assert.match(thematic.stdout, /---/);
+      assert.match(thematic.stdout, /Body/);
+    }
+
+    const scalarPath = join(fixture.dir, "reddit-scalar.md");
+    const scalarSource = "\ufeff---\nfalse\n---\nScalar body\n";
+    writeFileSync(scalarPath, scalarSource);
+    const scalar = runCli(fixture, [
+      "reddit", "draft", "--from", scalarPath,
+      "--subreddit", "test", "--title", "Title", "--dry-run",
+    ]);
+    assert.equal(scalar.status, 0, output(scalar));
+    assert.match(scalar.stdout, /---\nfalse\n---\nScalar body/);
+    assert.doesNotMatch(scalar.stdout, /\ufeff/);
+
+    for (const [name, source, evidence] of [
+      ["sequence", "---\n- ordinary\n- list\n---\nSequence body\n", /---\n- ordinary\n- list\n---\nSequence body/],
+      ["colon-scalar", "---\nKey:value prose\n---\nColon body\n", /---\nKey:value prose\n---\nColon body/],
+    ] as const) {
+      const ambiguousPath = join(fixture.dir, `reddit-${name}.md`);
+      writeFileSync(ambiguousPath, source);
+      const ambiguous = runCli(fixture, [
+        "reddit", "draft", "--from", ambiguousPath,
+        "--subreddit", "test", "--title", "Title", "--dry-run",
+      ]);
+      assert.equal(ambiguous.status, 0, output(ambiguous));
+      assert.match(ambiguous.stdout, evidence);
+    }
+
+    const literalMapping = runCli(fixture, [
+      "reddit", "draft", "--subreddit", "flag-sub", "--title", "Flag title", "--text",
+      "---\nsubreddit: literal-sub\ntitle: Literal title\n---\nLiteral body\n", "--dry-run",
+    ]);
+    assert.equal(literalMapping.status, 0, output(literalMapping));
+    assert.match(literalMapping.stdout, /---\nsubreddit: literal-sub\ntitle: Literal title\n---\nLiteral body/);
+    assert.match(literalMapping.stdout, /subreddit: r\/flag-sub/);
+
+    const guidance = runCli(fixture, [
+      "reddit", "draft", "--subreddit", "test", "--title", "Formatting", "--text",
+      "```ts\nrun()\n```\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\n![shot](shot.png)",
+      "--dry-run",
+    ]);
+    assert.equal(guidance.status, 0, output(guidance));
+    assert.match(guidance.stdout, /4-space-indented code/);
+    assert.match(guidance.stdout, /tables render through old and new Reddit parsers/i);
+    assert.match(guidance.stdout, /does not upload inline body images/);
+    assert.doesNotMatch(output(guidance), /PLATFORM_IMPORT_BLOCKED/);
+
+    const guidanceControls = runCli(fixture, [
+      "reddit", "draft", "--subreddit", "test", "--title", "Controls", "--text",
+      "    ```ts\n    literal fence text\n    ```\n\nnot a header\n\n--- | ---\n\n    ![code](no.png)",
+      "--dry-run",
+    ]);
+    assert.equal(guidanceControls.status, 0, output(guidanceControls));
+    assert.doesNotMatch(guidanceControls.stdout, /old\.reddit won't render fenced code/);
+    assert.doesNotMatch(guidanceControls.stdout, /tables render through old and new Reddit parsers/i);
+    assert.doesNotMatch(guidanceControls.stdout, /does not upload inline body images/);
+
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
 test("invalid file-backed X text writes no artifact and LinkedIn reports media in caller order", () => {
   const fixture = createFixture();
   try {

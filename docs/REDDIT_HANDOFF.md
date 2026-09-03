@@ -143,7 +143,7 @@ VPN / hotspot**). No 2FA on the operator's account (confirmed).
    auto-fill misbehaves (selectors are best-effort; see REDDIT_DESIGN §9).
 5. **Verify draft (now logged-in):**
    ```
-   node dist/cli.js reddit draft --subreddit codex --title "test" --text "hello from publish-cli" --dry-run   # preflight w/ real contract
+   node dist/cli.js reddit draft --subreddit codex --title "test" --text "hello from publish-cli" --dry-run   # local-only validation; no browser/live contract
    node dist/cli.js reddit draft --subreddit codex --title "test" --text "hello from publish-cli"              # stages a native DRAFT (never posts)
    ```
    Then confirm on reddit.com that a **private draft** was created and nothing was

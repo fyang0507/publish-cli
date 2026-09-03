@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
-import { parse as parseYaml } from "yaml";
+import { isMap, parse as parseYaml, parseDocument as parseYamlDocument } from "yaml";
+import { marked } from "marked";
 import { LocalValidationError } from "../capabilities/validation.js";
 
 /**
@@ -35,25 +36,116 @@ export interface FrontmatterSplit {
   bodyLineOffset: number;
 }
 
+export interface FrontmatterSplitOptions {
+  /**
+   * `reserved` keeps the A1/LinkedIn contract: any leading delimiter is owned by
+   * frontmatter and non-mapping input is rejected. `mapping-only` recognizes
+   * only an empty document or YAML mapping as metadata; valid scalar/sequence
+   * documents and ambiguous thematic-break prose stay ordinary Markdown.
+   */
+  policy?: "reserved" | "mapping-only";
+  /** Preserve the original body newline bytes after a recognized block. */
+  preserveBodyLineEndings?: boolean;
+}
+
 const FRONTMATTER_RE = /^﻿?---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)?---[ \t]*(?:\r?\n|$)/;
 const FRONTMATTER_OPEN_RE = /^﻿?---[ \t]*\r?\n/;
 
 /**
- * Remove well-formed leading YAML frontmatter from canonical file/stdin input.
- * An empty frontmatter block is valid. A leading `---` is deliberately reserved
- * for frontmatter on file-backed input: malformed, unterminated, sequence, and
- * scalar documents are rejected so metadata can never leak into transport text.
- * Inline --text never calls this helper, so a literal thematic break stays
- * literal there.
+ * A malformed YAML document is unambiguously frontmatter only when its eligible
+ * top-level Markdown block has a YAML mapping root. The YAML document AST covers
+ * implicit, explicit, numeric, dashed, tagged, and flow keys while keeping prose
+ * such as `Key:value` scalar on the ordinary-Markdown side of the boundary.
  */
-export function splitLeadingFrontmatter(markdown: string, sourceName: string): FrontmatterSplit {
+function hasMappingIntent(source: string): boolean {
+  const tokens = marked.lexer(source.replace(/\r\n?/g, "\n"));
+  for (const token of tokens) {
+    // A top-level YAML mapping cannot be a parser-confirmed Markdown code/HTML
+    // block, list, quote, or link-reference definition. Ignoring those blocks
+    // prevents their `key:`-like text from being mistaken for metadata intent.
+    if (
+      token.type === "code" ||
+      token.type === "def" ||
+      token.type === "html" ||
+      token.type === "list" ||
+      token.type === "blockquote"
+    ) {
+      continue;
+    }
+    const document = parseYamlDocument(token.raw);
+    if (isMap(document.contents)) return true;
+  }
+  return false;
+}
+
+/**
+ * For an unterminated opener, only the first substantive block (after optional
+ * YAML-style comments/blank lines) can establish metadata intent. Looking
+ * through the entire later document would turn ordinary prose such as
+ * `Edit: text` into frontmatter retroactively.
+ */
+function immediateFrontmatterCandidate(source: string): string {
+  const lines = source.split("\n");
+  let firstSubstantive = 0;
+  while (
+    firstSubstantive < lines.length &&
+    (lines[firstSubstantive].trim() === "" || lines[firstSubstantive].trimStart().startsWith("#"))
+  ) {
+    firstSubstantive += 1;
+  }
+  const remainder = lines.slice(firstSubstantive).join("\n");
+  // One parser-confirmed block is the ambiguity boundary. A later paragraph
+  // cannot retroactively turn an opening thematic break into metadata merely
+  // because it happens to follow a closed fenced/indented code block without a
+  // blank separator.
+  return marked.lexer(remainder)[0]?.raw ?? "";
+}
+
+/** Remove only a transport BOM; every following byte remains caller-owned. */
+function stripLeadingBom(source: string): string {
+  return source.replace(/^﻿/, "");
+}
+
+/** Map a normalized (`\r\n?` -> `\n`) prefix length back to the source offset. */
+function sourceOffsetForNormalizedPrefix(source: string, normalizedLength: number): number {
+  let sourceOffset = 0;
+  let normalizedOffset = 0;
+  while (sourceOffset < source.length && normalizedOffset < normalizedLength) {
+    if (source[sourceOffset] === "\r" && source[sourceOffset + 1] === "\n") {
+      sourceOffset += 2;
+    } else {
+      sourceOffset += 1;
+    }
+    normalizedOffset += 1;
+  }
+  return sourceOffset;
+}
+
+/**
+ * Remove well-formed leading YAML frontmatter from canonical file/stdin input.
+ * An empty frontmatter block is valid. The default `reserved` policy retains the
+ * A1/LinkedIn rule: a leading `---` belongs to frontmatter, so malformed,
+ * unterminated, sequence, and scalar documents reject. The opt-in `mapping-only`
+ * policy preserves ambiguous/thematic-break Markdown and rejects only malformed
+ * input with mapping intent. Inline --text never calls this helper.
+ */
+export function splitLeadingFrontmatter(
+  markdown: string,
+  sourceName: string,
+  options: FrontmatterSplitOptions = {},
+): FrontmatterSplit {
+  const policy = options.policy ?? "reserved";
   // Marked and the channel renderers treat CRLF and lone CR as line endings.
   // Normalize for delimiter recognition too, or a CR-only metadata block would
   // bypass stripping and leak verbatim into the staged draft.
   const normalized = markdown.replace(/\r\n?/g, "\n");
   const match = normalized.match(FRONTMATTER_RE);
   if (!match) {
-    if (FRONTMATTER_OPEN_RE.test(normalized)) {
+    const opener = normalized.match(FRONTMATTER_OPEN_RE);
+    const candidate = opener
+      ? immediateFrontmatterCandidate(normalized.slice(opener[0].length))
+      : "";
+    if (opener && (policy === "reserved" || hasMappingIntent(candidate))) {
       throw new LocalValidationError(
         `${sourceName}: leading frontmatter opener has no closing --- delimiter.`,
         {
@@ -65,13 +157,19 @@ export function splitLeadingFrontmatter(markdown: string, sourceName: string): F
         },
       );
     }
-    return { body: markdown.replace(/^﻿/, ""), data: {}, present: false, bodyLineOffset: 0 };
+    if (opener && policy === "mapping-only") {
+      return { body: stripLeadingBom(markdown), data: {}, present: false, bodyLineOffset: 0 };
+    }
+    return { body: stripLeadingBom(markdown), data: {}, present: false, bodyLineOffset: 0 };
   }
 
   let parsed: unknown;
   try {
     parsed = parseYaml(match[1] ?? "");
   } catch (error) {
+    if (policy === "mapping-only" && !hasMappingIntent(match[1] ?? "")) {
+      return { body: stripLeadingBom(markdown), data: {}, present: false, bodyLineOffset: 0 };
+    }
     throw new LocalValidationError(
       `${sourceName}: leading frontmatter is malformed YAML: ${(error as Error).message}`,
       {
@@ -88,6 +186,9 @@ export function splitLeadingFrontmatter(markdown: string, sourceName: string): F
     .split("\n")
     .every((line) => line.trim() === "" || line.trimStart().startsWith("#"));
   if (!emptyDocument && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))) {
+    if (policy === "mapping-only") {
+      return { body: stripLeadingBom(markdown), data: {}, present: false, bodyLineOffset: 0 };
+    }
     const actual = parsed === null
       ? "null"
       : Array.isArray(parsed)
@@ -105,7 +206,9 @@ export function splitLeadingFrontmatter(markdown: string, sourceName: string): F
     );
   }
   return {
-    body: normalized.slice(match[0].length),
+    body: options.preserveBodyLineEndings
+      ? markdown.slice(sourceOffsetForNormalizedPrefix(markdown, match[0].length))
+      : normalized.slice(match[0].length),
     data: (parsed ?? {}) as Record<string, unknown>,
     present: true,
     bodyLineOffset: (match[0].match(/\n/g) ?? []).length,

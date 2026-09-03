@@ -12,36 +12,37 @@
  * flatten it to plain text the way LinkedIn does. The only structural edit is
  * stripping a leading H1 when it was consumed as the post title.
  *
- * REUSE: parseBaseMarkdown() + countChars() are imported from ../x/content.js
- * (the shared, deterministic markdown parser). We use parseBaseMarkdown to derive
- * the H1 title, the code-block advisory flags (codeFlags) and link flags
- * (linkFlags), and countChars for the conservative code-point count.
+ * REUSE: the shared X advisory shapes are imported from ../x/content.js, while
+ * marked supplies CommonMark/GFM token classification. countChars provides the
+ * conservative code-point count.
  *
  * This module also hosts the deterministic subreddit-rules PREFLIGHT validator
  * (REDDIT_DESIGN.md §4). It type-only-imports the reader's contract shapes from
  * ./reader.js so it stays free of any runtime dependency on the browser reader —
  * preflight is pure validation of an already-generated post against an
- * already-fetched contract, reused by both --dry-run and the real draft path so
- * violations surface identically.
+ * already-fetched contract. The real draft path supplies that live contract;
+ * browser-free --dry-run intentionally stops before this validator.
  *
  * Reddit rules (REDDIT_DESIGN.md §4):
- *   - Title: REQUIRED. From --title, else frontmatter `title`, else the leading
+ *   - Title: REQUIRED. From --title, else validated file/stdin frontmatter
+ *     `title`, else the leading
  *     Markdown H1. Cap 300 code points; over cap => ERROR, never truncation.
  *   - Body: Markdown kept verbatim (leading H1 stripped only if consumed as the
  *     title). The 40,000-code-point local guard rejects before browser access;
  *     caller content is never shortened.
- *   - Old-vs-new render advisory: on old.reddit, fenced code blocks and tables
- *     don't render; surface via codeFlags + a warning (advise 4-space-indented
- *     code / caution on tables).
+ *   - Old-vs-new render advisory: fenced code does not work on old Reddit, so
+ *     advise 4-space-indented code. Tables render through both parsers but need
+ *     explicit outer pipes for the most portable form. Inline body images are
+ *     unsupported by this text-only staging path.
  *   - Link advisory: reuse linkFlags (informational; Reddit has no LinkedIn-style
  *     body-link reach penalty, but flag bare/duplicated URLs).
  */
 
-import { parseBaseMarkdown, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
+import type { CodeBlockFlag, LinkFlag } from "../x/content.js";
 import { countUnicodeCodePoints as countChars } from "../capabilities/measurements.js";
 import { LocalValidationError } from "../capabilities/validation.js";
 import type { SubredditAbout, PostRequirements, FlairTemplate } from "./reader.js";
-import { parse } from "yaml";
+import { marked, type Token, type Tokens } from "marked";
 
 /** Reddit title cap, in Unicode code points. */
 export const REDDIT_TITLE_LIMIT = 300;
@@ -52,8 +53,8 @@ export const REDDIT_BODY_LIMIT = 40000;
 
 /**
  * Flag overrides for generateSelfPost. Each of subreddit/title/flair falls back
- * to a markdown frontmatter field of the same name; title further falls back to
- * the leading Markdown H1 (via parseBaseMarkdown).
+ * to validated file/stdin frontmatter passed by the command; title further falls
+ * back to the leading CommonMark ATX H1.
  */
 export interface GenerateSelfPostOptions {
   subreddit?: string;
@@ -61,6 +62,10 @@ export interface GenerateSelfPostOptions {
   flair?: string;
   nsfw?: boolean;
   spoiler?: boolean;
+  /** Validated metadata from a file/stdin frontmatter block. Inline text omits this. */
+  frontmatter?: RedditFrontmatter;
+  /** Original file/stdin lines removed with frontmatter, for advisory evidence. */
+  bodyLineOffset?: number;
 }
 
 /** Result of a Reddit self-post generation run. */
@@ -97,45 +102,205 @@ export interface GeneratedSelfPost {
 const MD_LINK_RE = /\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
 // Bare URL not already inside a markdown-link's () or a ("...) attribute.
 const BARE_URL_RE = /(?<![("])\bhttps?:\/\/[^\s)]+/g;
-// A leading YAML frontmatter block: `---` ... `---` at the very start of the doc.
-const FRONTMATTER_RE = /^﻿?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/;
-// A GFM table separator row (`| --- | :---: |`), enough to detect a table.
-const TABLE_SEPARATOR_RE = /^[ \t]*\|?[ \t]*:?-{2,}:?[ \t]*(\|[ \t]*:?-{2,}:?[ \t]*)+\|?[ \t]*$/m;
-
 /** The informational placement note attached to every Reddit link flag. */
 const LINK_NOTE =
   "Informational: Reddit does not penalize body links, but confirm the URL is correct and not duplicated.";
 
-interface Frontmatter {
+export interface RedditFrontmatter {
   subreddit?: string;
   title?: string;
   flair?: string;
 }
 
 /**
- * Split an optional leading `---` YAML frontmatter block off the top of the
- * markdown. Returns the parsed (subreddit/title/flair) fields and the remaining
- * body. Malformed YAML is ignored (treated as no frontmatter fields, block
- * stripped).
+ * Validate a mapping already classified by the shared file-input/frontmatter
+ * seam. Reddit accepts exactly these three string keys. State remains flag-only
+ * so a canonical file cannot silently opt the operator into NSFW/spoiler state.
  */
-function splitFrontmatter(md: string): { data: Frontmatter; body: string } {
-  const m = md.match(FRONTMATTER_RE);
-  if (!m) return { data: {}, body: md };
-  let data: Frontmatter = {};
-  try {
-    const parsed = parse(m[1]);
-    if (parsed && typeof parsed === "object") {
-      const rec = parsed as Record<string, unknown>;
-      data = {
-        subreddit: typeof rec.subreddit === "string" ? rec.subreddit : undefined,
-        title: typeof rec.title === "string" ? rec.title : undefined,
-        flair: typeof rec.flair === "string" ? rec.flair : undefined,
-      };
-    }
-  } catch {
-    // Malformed frontmatter — strip the block, keep no fields.
+export function validateRedditFrontmatter(
+  data: Record<string, unknown>,
+  sourceName: string,
+): RedditFrontmatter {
+  const keys = Object.keys(data);
+  const flagOnly = keys.filter((key) => key === "nsfw" || key === "spoiler").sort();
+  if (flagOnly.length) {
+    throw new LocalValidationError(
+      `${sourceName}: Reddit frontmatter cannot set ${flagOnly.join(", ")}; ` +
+        "use the --nsfw and --spoiler flags explicitly.",
+      {
+        code: "reddit_frontmatter_flag_only",
+        field: "source",
+        actual: flagOnly.join(", "),
+        expected: "subreddit, title, or flair metadata; --nsfw/--spoiler for state",
+        unit: null,
+      },
+    );
   }
-  return { data, body: md.slice(m[0].length) };
+
+  const allowed = new Set(["subreddit", "title", "flair"]);
+  const unsupported = keys.filter((key) => !allowed.has(key)).sort();
+  if (unsupported.length) {
+    throw new LocalValidationError(
+      `${sourceName}: unsupported Reddit frontmatter key(s): ${unsupported.join(", ")}. ` +
+        "Accepted keys are subreddit, title, and flair.",
+      {
+        code: "reddit_frontmatter_key_unsupported",
+        field: "source",
+        actual: unsupported.join(", "),
+        expected: "subreddit, title, or flair",
+        unit: null,
+      },
+    );
+  }
+
+  for (const key of ["subreddit", "title", "flair"] as const) {
+    const value = data[key];
+    if (value !== undefined && typeof value !== "string") {
+      throw new LocalValidationError(
+        `${sourceName}: Reddit frontmatter ${key} must be a string.`,
+        {
+          code: "reddit_frontmatter_value_invalid",
+          field: "source",
+          actual: value === null ? "null" : Array.isArray(value) ? "sequence" : typeof value,
+          expected: "string",
+          unit: null,
+        },
+      );
+    }
+  }
+
+  return {
+    subreddit: data.subreddit as string | undefined,
+    title: data.title as string | undefined,
+    flair: data.flair as string | undefined,
+  };
+}
+
+interface RedditMarkdownFacts {
+  codeFlags: CodeBlockFlag[];
+  tableCount: number;
+  imageCount: number;
+}
+
+interface PositionedCode {
+  token: Tokens.Code;
+  sourceLine: number;
+}
+
+/** Return the zero-based line containing `offset`. */
+function lineIndexAt(text: string, offset: number): number {
+  return (text.slice(0, offset).match(/\n/g) ?? []).length;
+}
+
+/**
+ * Marked removes list/blockquote prefixes without removing logical lines. Carry
+ * each transformed line's original source line into the nested token stream.
+ */
+function transformedLineMap(
+  transformed: string,
+  sourceMap: readonly number[],
+): number[] {
+  const lineCount = transformed.split("\n").length;
+  const fallback = sourceMap.at(-1) ?? 1;
+  return Array.from(
+    { length: lineCount },
+    (_, index) => sourceMap[index] ?? fallback,
+  );
+}
+
+/**
+ * Collect parser-confirmed fenced blocks and their source lines by walking the
+ * exact raw token stream. Positions are resolved inside each list/blockquote's
+ * own de-prefixed text, so fence-looking text in nested HTML or indented code is
+ * never searched as a global candidate and cannot steal a real fence's line.
+ */
+function collectPositionedFences(
+  tokens: readonly Token[],
+  context: string,
+  sourceMap: readonly number[],
+  out: PositionedCode[],
+): void {
+  let cursor = 0;
+  for (const token of tokens) {
+    const start = context.indexOf(token.raw, cursor);
+    if (start < 0) continue;
+    cursor = start + token.raw.length;
+
+    const localStartLine = lineIndexAt(context, start);
+    const tokenLineCount = token.raw.split("\n").length;
+    const tokenSourceMap = Array.from(
+      { length: tokenLineCount },
+      (_, index) => sourceMap[localStartLine + index] ?? sourceMap.at(-1) ?? 1,
+    );
+
+    if (token.type === "code") {
+      const code = token as Tokens.Code;
+      if (code.codeBlockStyle !== "indented") {
+        out.push({ token: code, sourceLine: tokenSourceMap[0] ?? 1 });
+      }
+      continue;
+    }
+
+    if (token.type === "blockquote") {
+      const quote = token as Tokens.Blockquote;
+      collectPositionedFences(
+        quote.tokens,
+        quote.text,
+        transformedLineMap(quote.text, tokenSourceMap),
+        out,
+      );
+      continue;
+    }
+
+    if (token.type === "list") {
+      const list = token as Tokens.List;
+      let itemCursor = 0;
+      for (const item of list.items) {
+        const itemStart = token.raw.indexOf(item.raw, itemCursor);
+        if (itemStart < 0) continue;
+        itemCursor = itemStart + item.raw.length;
+        const itemStartLine = lineIndexAt(token.raw, itemStart);
+        const itemLineCount = item.raw.split("\n").length;
+        const itemSourceMap = Array.from(
+          { length: itemLineCount },
+          (_, index) => tokenSourceMap[itemStartLine + index] ?? tokenSourceMap.at(-1) ?? 1,
+        );
+        collectPositionedFences(
+          item.tokens,
+          item.text,
+          transformedLineMap(item.text, itemSourceMap),
+          out,
+        );
+      }
+    }
+  }
+}
+
+/** Parser-backed facts avoid warnings for code-like text and orphan separators. */
+function analyzeRedditMarkdown(markdown: string): RedditMarkdownFacts {
+  const normalized = markdown.replace(/\r\n?/g, "\n");
+  const tokens = marked.lexer(normalized);
+  const positionedCodes: PositionedCode[] = [];
+  let tableCount = 0;
+  let imageCount = 0;
+  marked.walkTokens(tokens, (token) => {
+    if (token.type === "image") imageCount += 1;
+    else if (token.type === "table") tableCount += 1;
+  });
+  collectPositionedFences(
+    tokens,
+    normalized,
+    normalized.split("\n").map((_, index) => index + 1),
+    positionedCodes,
+  );
+
+  const codeFlags = positionedCodes.map(({ token, sourceLine }, index) => ({
+    index: index + 1,
+    lang: token.lang?.trim() || undefined,
+    preview: token.text.split("\n")[0]?.trim() ?? "",
+    sourceLine,
+  }));
+  return { codeFlags, tableCount, imageCount };
 }
 
 /** Normalize a subreddit reference to a bare name (strip a leading `/r/` or `r/`). */
@@ -145,23 +310,63 @@ function normalizeSubreddit(s: string | undefined): string | undefined {
   return trimmed.replace(/^\/?r\//i, "").replace(/^\/+/, "").trim() || undefined;
 }
 
-/** Return the first non-blank line of the body, if any. */
-function firstNonBlankLine(body: string): string | undefined {
-  return body.replace(/\r\n/g, "\n").split("\n").find((l) => l.trim());
-}
-
-/** Strip the first leading H1 line (`# ...`), skipping any leading blank lines. */
-function stripLeadingH1(body: string): string {
-  const lines = body.replace(/\r\n/g, "\n").split("\n");
-  let i = 0;
-  while (i < lines.length && !lines[i].trim()) i++;
-  if (i < lines.length && /^\s*#\s+.+$/.test(lines[i])) lines.splice(i, 1);
-  return lines.join("\n");
-}
-
-/** Trim leading/trailing blank lines but keep the internal markdown verbatim. */
+/** Trim edge line endings while preserving every internal caller newline byte. */
 function trimBlankEdges(text: string): string {
-  return text.replace(/^\n+/, "").replace(/\n+$/, "");
+  return text
+    .replace(/^(?:\r\n|\r|\n)+/, "")
+    .replace(/(?:\r\n|\r|\n)+$/, "");
+}
+
+/** Map a normalized (`\r\n?` -> `\n`) prefix length back to source bytes. */
+function sourceOffsetForNormalizedPrefix(source: string, normalizedLength: number): number {
+  let sourceOffset = 0;
+  let normalizedOffset = 0;
+  while (sourceOffset < source.length && normalizedOffset < normalizedLength) {
+    if (source[sourceOffset] === "\r" && source[sourceOffset + 1] === "\n") {
+      sourceOffset += 2;
+    } else {
+      sourceOffset += 1;
+    }
+    normalizedOffset += 1;
+  }
+  return sourceOffset;
+}
+
+interface LeadingH1 {
+  title: string;
+  bodyWithoutTitle: string;
+}
+
+/**
+ * Consume only a parser-confirmed leading ATX H1. Marked enforces CommonMark's
+ * column <=3 rule, so four-space-indented `# ...` remains code. The same token
+ * supplies classification, title extraction, and the exact line span removed.
+ */
+function consumeLeadingH1(markdown: string): LeadingH1 | undefined {
+  const normalized = markdown.replace(/\r\n?/g, "\n");
+  const tokens = marked.lexer(normalized);
+  let offset = 0;
+  for (const token of tokens) {
+    if (token.type === "space") {
+      offset += token.raw.length;
+      continue;
+    }
+    if (
+      token.type === "heading" &&
+      (token as Tokens.Heading).depth === 1 &&
+      /^ {0,3}#(?:[ \t]+|$)/.test(token.raw) &&
+      (token as Tokens.Heading).text.trim()
+    ) {
+      return {
+        title: (token as Tokens.Heading).text.trim(),
+        bodyWithoutTitle: trimBlankEdges(
+          markdown.slice(sourceOffsetForNormalizedPrefix(markdown, offset + token.raw.length)),
+        ),
+      };
+    }
+    return undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -200,27 +405,45 @@ function collectLinkFlags(body: string): LinkFlag[] {
 /**
  * Generate a Reddit self-post from canonical markdown. Deterministic (no LLM).
  *
- * Parses a leading `---` YAML frontmatter block (subreddit/title/flair), then
- * applies opts overrides. THROWS on a missing title or a title over
+ * Consumes Markdown whose optional file/stdin frontmatter was already classified
+ * by the command, then applies flag overrides over opts.frontmatter. THROWS on a
+ * missing title or a title over
  * REDDIT_TITLE_LIMIT (never silent). Body over REDDIT_BODY_LIMIT also throws.
  * The body is Markdown kept verbatim (a leading H1 is stripped only when it was
  * consumed as the title).
  */
 export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {}): GeneratedSelfPost {
   const warnings: string[] = [];
+  const data = opts.frontmatter ?? {};
+  const afterFm = md;
 
-  const { data, body: afterFm } = splitFrontmatter(md);
+  if (opts.title !== undefined && !opts.title.trim()) {
+    throw new LocalValidationError(
+      "Reddit --title was provided but empty; supply a non-empty title or omit the flag to use file metadata/H1 fallback.",
+      {
+        code: "reddit_title_empty",
+        field: "title",
+        actual: "empty --title",
+        expected: "non-empty --title, or omit it to allow frontmatter/H1 fallback",
+        unit: null,
+      },
+    );
+  }
+  if (opts.subreddit !== undefined && !normalizeSubreddit(opts.subreddit)) {
+    throw new LocalValidationError(
+      "Reddit --subreddit was provided but empty; supply a destination or omit the flag to use file metadata.",
+      {
+        code: "reddit_subreddit_empty",
+        field: "target",
+        actual: "empty --subreddit",
+        expected: "non-empty --subreddit, or omit it to allow frontmatter fallback",
+        unit: null,
+      },
+    );
+  }
 
-  // Reuse the shared parser for code/link flags and the H1 title derivation. Its
-  // fence scan is source-wide (correct for a full markdown body).
-  const parsed = parseBaseMarkdown(afterFm);
-
-  // Determine whether the doc opens with a real H1 (so we know both the H1 title
-  // and whether to strip that line from the body).
-  const first = firstNonBlankLine(afterFm);
-  const leadingH1 = first ? /^\s*#\s+(.+)$/.exec(first) : null;
-  // parsed.title equals the leading H1 text iff the first non-blank line is that H1.
-  const h1Title = leadingH1 ? parsed.title : undefined;
+  const leadingH1 = consumeLeadingH1(afterFm);
+  const h1Title = leadingH1?.title;
 
   const optTitle = opts.title?.trim();
   const fmTitle = data.title?.trim();
@@ -257,7 +480,7 @@ export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {})
   }
 
   // Body: keep the markdown verbatim; strip only a leading H1 consumed as title.
-  const body = trimBlankEdges(titleFromH1 ? stripLeadingH1(afterFm) : afterFm);
+  const body = titleFromH1 ? leadingH1!.bodyWithoutTitle : afterFm;
   const totalBodyChars = countChars(body);
   if (totalBodyChars > REDDIT_BODY_LIMIT) {
     throw new LocalValidationError(
@@ -278,10 +501,22 @@ export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {})
   const nsfw = !!opts.nsfw;
   const spoiler = !!opts.spoiler;
 
-  const codeFlags = parsed.codeFlags;
+  const markdownFacts = analyzeRedditMarkdown(body);
+  // When a leading H1 became the title, retain code source lines from the
+  // pre-strip source while keeping table/image facts scoped to transported body.
+  const localCodeFlags = titleFromH1
+    ? analyzeRedditMarkdown(afterFm).codeFlags
+    : markdownFacts.codeFlags;
+  const bodyLineOffset = Math.max(0, opts.bodyLineOffset ?? 0);
+  const codeFlags = bodyLineOffset
+    ? localCodeFlags.map((flag) => ({
+      ...flag,
+      sourceLine: flag.sourceLine + bodyLineOffset,
+    }))
+    : localCodeFlags;
   const linkFlags = collectLinkFlags(body);
 
-  // Old-reddit render advisories (fenced code + tables don't render there).
+  // Old/new editor portability advisories.
   if (codeFlags.length) {
     warnings.push(
       `Old Reddit (old.reddit.com) does not render fenced \`\`\` code blocks — for maximum ` +
@@ -289,10 +524,19 @@ export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {})
         `New Reddit renders them; the composer is driven in Markdown mode.`,
     );
   }
-  if (TABLE_SEPARATOR_RE.test(body)) {
+  if (markdownFacts.tableCount) {
     warnings.push(
-      "Old Reddit (old.reddit.com) does not render Markdown tables — they appear as raw pipes. " +
-        "Consider a list or an image if old-reddit readers matter.",
+      "Markdown tables render through old and new Reddit parsers, but their edge parsing differs. " +
+        "For portability, include leading and trailing pipes on every row and inspect the saved draft; " +
+        "use a list when exact cross-editor fidelity matters.",
+    );
+  }
+  const markdownImageCount = markdownFacts.imageCount;
+  if (markdownImageCount) {
+    warnings.push(
+      `This text-only self-post path does not upload inline body images. ` +
+        `${markdownImageCount} Markdown image reference(s) remain in the body, but no embedded image is ` +
+        "created or verified; replace them with ordinary links/text or add media manually during review.",
     );
   }
 
@@ -314,8 +558,10 @@ export function generateSelfPost(md: string, opts: GenerateSelfPostOptions = {})
 
 /** Resolve the requested flair: opts override, else frontmatter, else undefined. */
 function resolveRequestedFlair(optValue: string | undefined, fmValue: string | undefined): string | undefined {
-  const o = optValue?.trim();
-  if (o) return o;
+  // An explicitly empty flag is an intentional no-flair override. This lets a
+  // caller clear canonical-file metadata; live preflight will still reject when
+  // the destination requires flair.
+  if (optValue !== undefined) return optValue.trim() || undefined;
   const f = fmValue?.trim();
   return f || undefined;
 }
@@ -347,10 +593,10 @@ export interface PreflightResult {
 
 /**
  * Deterministically validate a generated self-post against the target's declared
- * contract (about + post_requirements + flair templates). Reused by both
- * --dry-run and the real draft path so violations surface identically. Catches
- * the DECLARED contract only — AutoMod filters and karma/age gates are not
- * machine-declared (§4.1) and surface later at the composer.
+ * contract (about + post_requirements + flair templates). The real command calls
+ * it after live reads; local-only --dry-run does not have a contract to supply.
+ * Catches the DECLARED contract only — AutoMod filters and karma/age gates are
+ * not machine-declared (§4.1) and surface later at the composer.
  */
 export function preflightSelfPost(post: GeneratedSelfPost, contract: SelfPostContract): PreflightResult {
   const violations: string[] = [];

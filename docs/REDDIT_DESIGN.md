@@ -142,7 +142,7 @@ publish reddit draft --subreddit <name>            # target community (or from -
                      (--text "<body>" | --from <base.md> | --from -)
                      [--flair <id|text>]           # flair template id, or text matched to a template
                      [--nsfw] [--spoiler]
-                     [--dry-run]                   # generate + preflight-validate only; no browser
+                     [--dry-run]                   # local generation/validation only; no browser
                      [--inspect]                   # headful (first login / selector calibration)
 ```
 
@@ -162,8 +162,23 @@ long-form, `--from <base.md>` is the primary path (an inline `--text` still work
 for short posts), the opposite emphasis from LinkedIn but the same code.
 
 **`--subreddit`, `--title`, and `--flair` may also come from Markdown frontmatter**
-in the `--from` file (canonical-content metadata), with the flags overriding.
-This keeps a self-post fully described by one canonical `.md`:
+in a `--from` file or stdin (canonical-content metadata), with flags overriding
+metadata and a leading H1 supplying the final title fallback. These are the only
+accepted keys and their values must be strings; `nsfw` and `spoiler` remain
+explicit flag-only state. Empty mappings are accepted. BOM plus LF, CRLF, and
+lone-CR delimiters are recognized. Unsupported keys and mapping-intent malformed
+or unterminated YAML reject locally with exit 2 instead of being stripped or
+leaking into transport text. For an opener without a closer, mapping intent is
+scoped to the first substantive block after optional comments/blank lines, so a
+later `Key: value` prose line cannot retroactively claim a thematic break. Valid
+scalar/sequence delimiter blocks are treated as ordinary thematic-break Markdown;
+only their leading transport BOM is removed,
+while every following byte and line ending is retained. Explicit empty
+`--subreddit`/`--title` flags reject instead of falling back; an empty `--flair`
+intentionally clears file metadata, subject to the live destination's flair
+requirements. Inline `--text` is always literal and never interpreted as
+frontmatter. This keeps a self-post fully described by one canonical `.md`
+without silently accepting metadata typos:
 
 ```markdown
 ---
@@ -176,8 +191,9 @@ flair: "Discussion"
 
 There is **no `--media`** (self-post only, §8). `--inspect` replaces the old
 `--login`: like X/LinkedIn, first login is headful and unattended thereafter.
-`--dry-run` renders the post *and* runs the subreddit preflight (§4) without
-touching the composer.
+`--dry-run` renders and validates locally without importing a browser stack. It
+does **not** run the live subreddit preflight; the real command performs that
+read immediately before staging.
 
 ## 3. Architecture — browser-driven (mirror X / LinkedIn)
 
@@ -251,33 +267,40 @@ first attempt (leave unset on headless-server / good-fingerprint hosts). This is
 distinct from the one-time first **login**, which still needs headful `--inspect`
 (captcha); draft **staging** still runs headless on the persisted session cookie.
 
-### 3.4 Content generation — reuse X's parser, keep the Markdown
+### 3.4 Content generation — share advisory shapes, keep the Markdown
 
 Reddit is Markdown-native, so `src/reddit/content.ts` is closer to passthrough
-than LinkedIn's flattener. It imports the channel-agnostic primitives from
-`../x/content.ts` — `parseBaseMarkdown` (for the H1→title derivation, `codeFlags`,
-`linkFlags`) and `countChars` (for the title/body caps) — and emits a
-`GeneratedSelfPost` that carries the body **as Markdown** (§4). This honors the
-"Reddit ≈ X" framing at the content layer.
+than LinkedIn's flattener. It reuses the channel-agnostic advisory shapes from
+`../x/content.ts`, uses `marked` for parser-confirmed Markdown structure, and
+uses the shared code-point counter for title/body caps. It emits a
+`GeneratedSelfPost` that carries the body **as Markdown** (§4).
 
 ## 4. Content generation + subreddit-rules preflight (deterministic, no LLM)
 
 `generateSelfPost(md, opts) -> GeneratedSelfPost` — same discipline as X/LinkedIn:
-plain code, reproducible, verifiable, no LLM deciding content.
+plain code, reproducible, verifiable, no LLM deciding content. The command first
+uses the shared content-input seam to classify file/stdin frontmatter and passes
+only validated Reddit metadata into the generator; the generator never treats
+inline `--text` as metadata.
 
 - **Title.** Required. From `--title`, else frontmatter `title`, else the Markdown
-  H1 (via `parseBaseMarkdown`). Cap **300** code points (`countChars`); over cap →
-  error, never silent truncation.
+  leading CommonMark ATX H1. Heading indentation of zero through three columns is
+  accepted; a four-space-indented `#` line remains code. One parser-confirmed
+  token drives classification, title extraction, and body stripping. Cap **300**
+  code points (`countChars`); over cap → error, never silent truncation.
 - **Body → Markdown, kept verbatim.** Reddit renders GFM-ish Markdown, so we do
   **not** flatten (the key divergence from LinkedIn). Strip only a leading H1 if
   it was consumed as the title. The local transport guard is **40 000 Unicode
   code points**; over cap → reject with exit 2 before browser access. Never
   shorten caller content.
 - **Old-vs-new render advisory.** `publish reddit info --json` is the current
-  channel contract. The generator still advises 4-space-indented code and
-  cautions on tables for old.reddit. Reuse `codeFlags` to surface this. The
-  composer is switched to **Markdown mode** so syntax is taken literally, not as
-  rich text.
+  channel contract. Fenced code is unsupported on old Reddit, so the generator
+  advises 4-space-indented code as the portable form. Tables work through both
+  parsers, but old/new parsing quirks make explicit leading and trailing pipes on
+  every row the safer form; inspect the native draft. Parser-confirmed Markdown
+  images warn because this text-only path does not upload or verify inline body
+  images. The composer is switched to **Markdown mode** so syntax is taken
+  literally, not as rich text.
 - **Link advisory.** Reuse `linkFlags` (informational; Reddit has no
   LinkedIn-style reach penalty, but flags bare/duplicated URLs).
 
@@ -289,9 +312,9 @@ post and **fail early with an actionable message** — e.g. *"r/MachineLearning
 requires a flair; valid: Discussion, Research, Project…"* or *"title must match
 `^\[D\]|\[R\]|\[P\]`"* — rather than staging a draft the subreddit would reject.
 This is the browser analog of X's `watch.yaml` behavior layer: a per-target rules
-gate. `--dry-run` runs the full preflight so the operator sees violations without
-touching the composer. (Caveat: AutoMod rules aren't exposed — preflight catches
-the declared contract, not every mod filter; §9.)
+gate. The live preflight runs only on the real path because it needs the browser
+session; `--dry-run` is deliberately local-only. (Caveat: AutoMod rules aren't
+exposed — preflight catches the declared contract, not every mod filter; §9.)
 
 ### 4.1 Eligibility gates (karma / account age)
 
@@ -309,7 +332,7 @@ they don't appear in `post_requirements` or `about.json`. The honest split:
   that composer/gateway error and returns a plain message** (e.g. *"can't post to
   r/foo: insufficient karma"*) instead of a silent failure — the browser-driven
   advantage of seeing exactly what a human sees. It never degrades into clicking
-  Post. `--dry-run` surfaces this too where the block is detectable pre-submit.
+  Post. A local-only `--dry-run` cannot surface composer eligibility blocks.
 
 ## 5. Composer automation + the never-publish boundary
 
@@ -333,13 +356,23 @@ mirroring X's/LinkedIn's `stagePost` and reusing their shared primitives
    documented forbidden selector (mirrors X's `tweetButton` and LinkedIn's Post).
    Same safeguard as LinkedIn: if the Save-Draft affordance doesn't resolve, bail
    — never fall through to another button.
-8. **Verify:** capture Reddit's transient **"Draft saved" toast** right after the
-   Save-Draft click (reopening the drafts list shows a *stale* list — the just-saved
-   draft hasn't propagated — so a toast match, not a drafts-list match, is the
-   reliable signal; still the X/LinkedIn "match the staged item, don't trust a blind
-   success" hardening).
-9. Return `{ kind: "self", verified, subreddit, flair, note }` with the
-   old-reddit/link advisories folded into `note`.
+8. **Verify:** first confirm Reddit's transient **"Draft saved" toast** is absent,
+   then capture it right after the single Save-Draft click. A node already visible
+   before the click is stale/ambiguous and cannot confirm this attempt; a failed
+   or inconclusive absence probe also fails closed. Reopening
+   the drafts list can also show a *stale* list — the
+   just-saved draft hasn't propagated — so a toast match is the immediate
+   acceptance signal, though not reopen-persistence proof. The poster never
+   clicks Save Draft a second time.
+9. Return `saveStatus: not_attempted | unconfirmed | toast_confirmed` alongside
+   the existing booleans. A missing save control is `not_attempted` and means only
+   that no native draft was confirmed, without claiming the platform's native
+   state. A stale or missing post-click toast is `unconfirmed`. Both exit 1 and
+   require manual comparison in Reddit DRAFTS in the same CLI-owned profile. Never retry
+   automatically or blindly: there is no Reddit draft idempotency ledger, so
+   another attempt may duplicate an existing draft. Only `toast_confirmed` is
+   command success. This small internal state is not the versioned cross-channel
+   receipt reserved for issue #34.
 
 Every selector lives in one `REDDIT_COMPOSER_SELECTORS` block, commented
 **best-effort / needs live calibration**. Per AGENTS.md "Verify live," none of it
