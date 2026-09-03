@@ -93,11 +93,12 @@ function runCli(
   fixture: CliFixture,
   args: string[],
   input?: string,
-  options: { allowReplyDryRunDatabase?: boolean } = {},
+  options: { allowReplyDryRunDatabase?: boolean; cwd?: string } = {},
 ): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, ["--import", fixture.loaderPath, CLI_PATH, ...args], {
     encoding: "utf8",
     input,
+    cwd: options.cwd,
     env: {
       ...process.env,
       PUBLISH_DATA_DIR: fixture.dataDir,
@@ -481,6 +482,233 @@ test("malformed X mapping frontmatter exits 2 before artifacts, state, profiles,
     ]) {
       assert.equal(existsSync(join(fixture.dir, artifact)), false, artifact);
     }
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("WeChat file/stdin frontmatter is normalized while inline text remains literal", () => {
+  const fixture = createFixture();
+  try {
+    const cover = join(fixture.dir, "wechat-cover.png");
+    const flagCover = join(fixture.dir, "wechat-flag-cover.png");
+    const bodyImage = join(fixture.dir, "wechat-body.png");
+    writeFileSync(cover, png(900, 900));
+    writeFileSync(flagCover, png(940, 400));
+    writeFileSync(bodyImage, png(640, 480));
+
+    for (const [index, newline] of ["\n", "\r\n", "\r"].entries()) {
+      const sourcePath = join(fixture.dir, `wechat-mapping-${index}.md`);
+      const outPath = join(fixture.dir, `wechat-mapping-${index}.html`);
+      writeFileSync(
+        sourcePath,
+        `\ufeff---${newline}` +
+          `title: Metadata title ${index}${newline}` +
+          `author: Metadata author ${index}${newline}` +
+          `description: Metadata digest ${index}${newline}` +
+          `coverImage: ./wechat-cover.png${newline}` +
+          `sourceUrl: https://example.com/source-${index}${newline}` +
+          `private: workflow-secret-${index}${newline}` +
+          `---${newline}` +
+          `Visible body ${index}${newline}${newline}` +
+          `![body](./wechat-body.png)${newline}`,
+      );
+      const result = runCli(fixture, [
+        "wechat", "draft", "--from", sourcePath, "--out", outPath, "--dry-run",
+      ]);
+      assert.equal(result.status, 0, output(result));
+      assert.match(result.stdout, new RegExp(`title .*: Metadata title ${index}`));
+      assert.match(result.stdout, new RegExp(`author: Metadata author ${index}`));
+      assert.match(result.stdout, new RegExp(`digest .*: Metadata digest ${index}`));
+      assert.match(result.stdout, new RegExp(`source-${index}`));
+      assert.match(result.stdout, new RegExp(`Visible body ${index}`));
+      assert.match(result.stdout, new RegExp(`${bodyImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.doesNotMatch(output(result), new RegExp(`workflow-secret-${index}|private:|PLATFORM_IMPORT_BLOCKED`));
+      const html = readFileSync(outPath, "utf8");
+      assert.match(html, new RegExp(`Visible body ${index}`));
+      assert.doesNotMatch(
+        html,
+        new RegExp(`Metadata title ${index}|Metadata author ${index}|Metadata digest ${index}|workflow-secret-${index}|coverImage|sourceUrl|private:`),
+      );
+    }
+
+    const stdinOut = join(fixture.dir, "wechat-stdin.html");
+    const stdin = runCli(
+      fixture,
+      ["wechat", "draft", "--from", "-", "--out", stdinOut, "--dry-run"],
+      `\ufeff---\rtitle: Stdin title\rauthor: Stdin author\rsummary: Stdin digest\r` +
+        "cover: ./wechat-cover.png\rcontentSourceUrl: https://example.com/stdin\r" +
+        "private: stdin-secret\r---\rStdin visible\r\r![body](./wechat-body.png)",
+      { cwd: fixture.dir },
+    );
+    assert.equal(stdin.status, 0, output(stdin));
+    assert.match(stdin.stdout, /title .*: Stdin title/);
+    assert.match(stdin.stdout, /author: Stdin author/);
+    assert.match(stdin.stdout, /digest .*: Stdin digest/);
+    assert.match(stdin.stdout, /https:\/\/example\.com\/stdin/);
+    assert.match(readFileSync(stdinOut, "utf8"), /Stdin visible/);
+    assert.doesNotMatch(output(stdin), /stdin-secret|private:|PLATFORM_IMPORT_BLOCKED/);
+    assert.doesNotMatch(readFileSync(stdinOut, "utf8"), /Stdin title|Stdin author|Stdin digest|stdin-secret|private:/);
+
+    const articleDir = join(fixture.dir, "article");
+    mkdirSync(articleDir);
+    const articleBodyImage = join(articleDir, "local-body.png");
+    const precedencePath = join(articleDir, "precedence.md");
+    writeFileSync(articleBodyImage, png(320, 240));
+    writeFileSync(
+      precedencePath,
+      "---\ntitle: Metadata title\ncoverImage: missing-metadata-cover.png\n---\n" +
+        "File body\n\n![local](./local-body.png)",
+    );
+    const flagCoverFromCwd = runCli(
+      fixture,
+      [
+        "wechat", "draft", "--from", "article/precedence.md",
+        "--title", "Flag title", "--cover", "wechat-flag-cover.png", "--dry-run",
+      ],
+      undefined,
+      { cwd: fixture.dir },
+    );
+    assert.equal(flagCoverFromCwd.status, 0, output(flagCoverFromCwd));
+    assert.match(flagCoverFromCwd.stdout, /title .*: Flag title/);
+    assert.match(flagCoverFromCwd.stdout, new RegExp(flagCover.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(flagCoverFromCwd.stdout, new RegExp(articleBodyImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(output(flagCoverFromCwd), /missing-metadata-cover|Metadata title|PLATFORM_IMPORT_BLOCKED/);
+
+    const emptyPath = join(fixture.dir, "wechat-empty.md");
+    writeFileSync(
+      emptyPath,
+      "\ufeff---\r# comment-only metadata\r---\r# Lone CR heading\r\rLone CR body",
+    );
+    const empty = runCli(fixture, [
+      "wechat", "draft", "--from", emptyPath, "--cover", cover, "--dry-run",
+    ]);
+    assert.equal(empty.status, 0, output(empty));
+    assert.equal(empty.stdout.match(/Lone CR heading/g)?.length, 1, empty.stdout);
+    assert.match(empty.stdout, /Lone CR body/);
+    assert.doesNotMatch(output(empty), /comment-only metadata|PLATFORM_IMPORT_BLOCKED/);
+
+    const explicitEmptyPath = join(fixture.dir, "wechat-empty-map.md");
+    writeFileSync(explicitEmptyPath, "---\n{}\n---\n# Empty-map title\n\nEmpty-map body");
+    const explicitEmpty = runCli(fixture, [
+      "wechat", "draft", "--from", explicitEmptyPath, "--cover", cover, "--dry-run",
+    ]);
+    assert.equal(explicitEmpty.status, 0, output(explicitEmpty));
+    assert.match(explicitEmpty.stdout, /title .*: Empty-map title/);
+    assert.match(explicitEmpty.stdout, /Empty-map body/);
+    assert.doesNotMatch(output(explicitEmpty), /PLATFORM_IMPORT_BLOCKED/);
+
+    for (const [name, source, evidence] of [
+      ["scalar", "\ufeff---\rfalse\r---\rScalar body", /false[\s\S]*Scalar body/],
+      ["sequence", "\ufeff---\r\n- first\r\n- second\r\n---\r\nSequence body", /first[\s\S]*second[\s\S]*Sequence body/],
+      ["colon-scalar", "\ufeff---\nKey:value prose\n---\nColon body", /Key:value prose[\s\S]*Colon body/],
+      ["thematic", "\ufeff---\n\nA thematic section\n\n---\n\nMore prose", /A thematic section[\s\S]*More prose/],
+      ["unclosed-prose", "\ufeff---\n\nOrdinary body\n\nEdit: text", /Ordinary body[\s\S]*Edit: text/],
+    ] as const) {
+      const ordinary = runCli(
+        fixture,
+        ["wechat", "draft", "--from", "-", "--title", "Literal source", "--cover", cover, "--dry-run"],
+        source,
+      );
+      assert.equal(ordinary.status, 0, `${name}: ${output(ordinary)}`);
+      assert.match(ordinary.stdout, evidence);
+      assert.doesNotMatch(output(ordinary), /PLATFORM_IMPORT_BLOCKED/);
+    }
+
+    const inlineSource = "---\ntitle: Literal inline metadata\ncoverImage: missing.png\n---\nInline body";
+    const inline = runCli(
+      fixture,
+      [
+        "wechat", "draft", "--text", inlineSource,
+        "--title", "Flag title", "--cover", "wechat-flag-cover.png", "--dry-run",
+      ],
+      undefined,
+      { cwd: fixture.dir },
+    );
+    assert.equal(inline.status, 0, output(inline));
+    assert.match(inline.stdout, /title: Literal inline metadata/);
+    assert.match(inline.stdout, /coverImage: missing\.png/);
+    assert.match(inline.stdout, /Inline body/);
+    assert.match(inline.stdout, new RegExp(flagCover.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(output(inline), /PLATFORM_IMPORT_BLOCKED/);
+
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("malformed WeChat mapping frontmatter exits 2 before artifacts, assets, state, or API imports", () => {
+  const fixture = createFixture();
+  try {
+    const malformedPath = join(fixture.dir, "wechat-malformed.md");
+    const unterminatedPath = join(fixture.dir, "wechat-unterminated.md");
+    const literalCover = join(fixture.dir, "literal-cover.png");
+    writeFileSync(literalCover, png(900, 900));
+    writeFileSync(
+      malformedPath,
+      "---\ntitle: Hidden\nprivate: workflow-secret\ncoverImage: missing.png\nowner: [broken\n---\nVisible body",
+    );
+    writeFileSync(
+      unterminatedPath,
+      "\ufeff---\rtitle: Hidden\rprivate: workflow-secret\rcoverImage: missing.png\rVisible body",
+    );
+
+    for (const [name, sourcePath, evidence] of [
+      ["malformed", malformedPath, /actual: malformed_yaml; expected: a valid YAML mapping between leading --- delimiters/],
+      ["unterminated", unterminatedPath, /actual: missing_closing_delimiter; expected: a closing --- delimiter for leading YAML frontmatter/],
+    ] as const) {
+      for (const dryRun of [false, true]) {
+        const outPath = join(fixture.dir, `${name}-${dryRun ? "dry" : "real"}.html`);
+        if (dryRun) writeFileSync(outPath, "sentinel: do not overwrite");
+        const result = runCli(fixture, [
+          "wechat", "draft", "--from", sourcePath, "--out", outPath,
+          ...(dryRun ? ["--dry-run"] : []),
+        ]);
+        assert.equal(result.status, 2, output(result));
+        assert.equal(result.signal, null, output(result));
+        assert.equal(result.stdout, "");
+        assert.match(output(result), evidence);
+        assert.match(output(result), new RegExp(sourcePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+        assert.doesNotMatch(output(result), /workflow-secret|Visible body|PLATFORM_IMPORT_BLOCKED/);
+        if (dryRun) {
+          assert.equal(readFileSync(outPath, "utf8"), "sentinel: do not overwrite");
+        } else {
+          assert.equal(existsSync(outPath), false, outPath);
+        }
+      }
+    }
+
+    const malformedStdinOut = join(fixture.dir, "malformed-stdin.html");
+    const malformedStdin = runCli(
+      fixture,
+      ["wechat", "draft", "--from", "-", "--out", malformedStdinOut, "--dry-run"],
+      "\ufeff---\rtitle: Hidden\rprivate: stdin-secret\rowner: [broken\r---\rBody",
+    );
+    assert.equal(malformedStdin.status, 2, output(malformedStdin));
+    assert.equal(malformedStdin.stdout, "");
+    assert.match(output(malformedStdin), /stdin \(--from -\): leading frontmatter is malformed YAML/);
+    assert.match(output(malformedStdin), /actual: malformed_yaml; expected: a valid YAML mapping/);
+    assert.doesNotMatch(output(malformedStdin), /stdin-secret|Body|PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(existsSync(malformedStdinOut), false);
+
+    const literalMalformed = runCli(
+      fixture,
+      [
+        "wechat", "draft", "--text", "---\ntitle: [literal\n---\nInline body",
+        "--title", "Literal", "--cover", "literal-cover.png", "--dry-run",
+      ],
+      undefined,
+      { cwd: fixture.dir },
+    );
+    assert.equal(literalMalformed.status, 0, output(literalMalformed));
+    assert.match(literalMalformed.stdout, /title: \[literal/);
+    assert.match(literalMalformed.stdout, /Inline body/);
+    assert.doesNotMatch(output(literalMalformed), /frontmatter is malformed YAML|PLATFORM_IMPORT_BLOCKED/);
+
     assert.deepEqual(readdirSync(fixture.dataDir), []);
     assert.deepEqual(readdirSync(fixture.repoDir), []);
   } finally {
