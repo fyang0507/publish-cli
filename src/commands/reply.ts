@@ -9,6 +9,8 @@ import {
   isLocalValidationError,
 } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
+import type { ReplyLedgerEntry } from "../db.js";
+import type { StageReplyResult } from "../x/draftPoster.js";
 
 /**
  * `publish x reply` — stage a NATIVE X REPLY draft targeted at an existing tweet
@@ -43,6 +45,271 @@ interface ReplyXOptions {
   force?: boolean;
 }
 
+export interface ReplyLedgerPort {
+  find(targetTweetId: string): ReplyLedgerEntry | undefined;
+  record(
+    targetTweetId: string,
+    opts?: { status?: string; draftRef?: string | null },
+  ): void;
+  close(): void;
+}
+
+export interface ReplyRealRunDependencies {
+  openLedger(): Promise<ReplyLedgerPort>;
+  loadStageReplyDraft(): Promise<(
+    content: GeneratedContent,
+    targetIdOrUrl: string,
+    opts: { inspect?: boolean },
+  ) => Promise<StageReplyResult>>;
+}
+
+export interface ReplyRealRunInput {
+  content: GeneratedContent;
+  targetIdOrUrl: string;
+  replyToId: string;
+  inspect?: boolean;
+  force?: boolean;
+}
+
+export interface ReplyRealRunOutcome {
+  kind:
+    | "duplicate"
+    | "ledger_preflight_failed"
+    | "stage_runtime_failed"
+    | "stage_result_inconclusive"
+    | "native_stage_failed"
+    | "ledger_persistence_failed"
+    | "staged";
+  exitCode: 0 | 1 | 2;
+  stream: "stdout" | "stderr";
+  message: string;
+}
+
+function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
+  return {
+    kind: "duplicate",
+    exitCode: 2,
+    stream: "stderr",
+    message:
+      `✗ Already staged a reply to ${prior.targetTweetId} at ${prior.stagedAt} (status: ${prior.status}).\n` +
+      "  Refusing to stage a duplicate reply. Re-run with --force to override.",
+  };
+}
+
+function ledgerPreflightFailure(phase: "open" | "find"): ReplyRealRunOutcome {
+  const action = phase === "open" ? "open" : "read";
+  return {
+    kind: "ledger_preflight_failed",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ Could not ${action} the X reply duplicate ledger. No native staging was attempted.\n` +
+      "  Repair the local durable state before retrying; the duplicate guard could not run.",
+  };
+}
+
+function nativeStageFailure(error: unknown): ReplyRealRunOutcome {
+  const detail = error instanceof Error ? error.message : String(error);
+  return {
+    kind: "native_stage_failed",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ Failed to stage the X reply draft: ${detail}\n` +
+      "  Composer selectors may need live calibration — re-run with --inspect to watch the DOM.",
+  };
+}
+
+function stageRuntimeFailure(): ReplyRealRunOutcome {
+  return {
+    kind: "stage_runtime_failed",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      "\n✗ Could not initialize the X reply staging runtime. No native staging was attempted.\n" +
+      "  Verify the local installation and runtime dependencies before retrying.",
+  };
+}
+
+function stageResultInconclusive(replyToId: string): ReplyRealRunOutcome {
+  return {
+    kind: "stage_result_inconclusive",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ X reply staging returned no usable result for target ${replyToId} (NEVER posted).\n` +
+      "  The native draft may exist, and no reply-ledger record was written.\n" +
+      "  Do not retry automatically. Before any retry, compare X Unsent/Drafts manually in the same CLI-owned profile.",
+  };
+}
+
+function ledgerPersistenceFailure(
+  result: StageReplyResult,
+  phase: "record" | "close",
+): ReplyRealRunOutcome {
+  const draftState = result.verified
+    ? "The native draft was verified in X Unsent/Drafts"
+    : "The native draft may exist";
+  const ledgerState = phase === "record"
+    ? "its reply-ledger record could not be confirmed"
+    : "the reply ledger did not close cleanly after its record was written";
+  const failureKind = phase === "record" ? "persistence" : "cleanup";
+  return {
+    kind: "ledger_persistence_failed",
+    exitCode: 1,
+    stream: "stderr",
+    message:
+      `\n✗ X reply ledger ${failureKind} failed after the native staging flow returned for target ${result.replyToId} (NEVER posted).\n` +
+      `  ${draftState}, but ${ledgerState}.\n` +
+      "  Do not retry automatically. Before any retry, compare X Unsent/Drafts manually in the same CLI-owned profile.",
+  };
+}
+
+function stagedOutcome(result: StageReplyResult): ReplyRealRunOutcome {
+  const count = result.format === "thread" ? `${result.posts} posts` : "1 reply";
+  return {
+    kind: "staged",
+    exitCode: 0,
+    stream: "stdout",
+    message:
+      `\n✓ Staged a NATIVE X reply draft (${result.format}, ${count}) to ${result.replyToId}. NEVER posted.\n` +
+      `  verified in Unsent/Drafts: ${result.verified ? "yes" : "unconfirmed"}\n` +
+      `  ${result.note}`,
+  };
+}
+
+function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutcome {
+  if (outcome.kind === "staged") {
+    throw new Error("A staged outcome requires its StageReplyResult before close-failure classification.");
+  }
+  if (outcome.kind === "ledger_persistence_failed") {
+    return {
+      ...outcome,
+      message: `${outcome.message}\n  Closing the reply ledger also failed; cleanup was attempted once and was not retried.`,
+    };
+  }
+  if (outcome.kind === "duplicate") {
+    const duplicateFact = outcome.message.split("\n", 1)[0];
+    return {
+      ...outcome,
+      exitCode: 1,
+      message:
+        `${duplicateFact}\n` +
+        "  No new native staging was attempted, but the reply ledger failed to close.\n" +
+        "  Repair the local durable state before any retry; do not bypass an unhealthy ledger with --force.",
+    };
+  }
+  if (outcome.kind === "native_stage_failed") {
+    const stageFact = outcome.message.split("\n").slice(0, 2).join("\n");
+    return {
+      ...outcome,
+      message:
+        `${stageFact}\n` +
+        "  The reply ledger also failed to close after the native staging failure.\n" +
+        "  Repair durable state before retrying. Use --inspect later only if the native error specifically indicates composer selector drift.",
+    };
+  }
+  return {
+    ...outcome,
+    exitCode: 1,
+    message: `${outcome.message}\n  The reply ledger also failed to close; repair durable state before retrying.`,
+  };
+}
+
+/**
+ * Run the stateful portion of `publish x reply` behind injected ledger and X
+ * ports. The command's validation/render-only dry-run returns before calling
+ * this seam, preserving #57's zero-state and dependency-light boundary.
+ */
+export async function executeReplyRealRun(
+  input: ReplyRealRunInput,
+  deps: ReplyRealRunDependencies,
+): Promise<ReplyRealRunOutcome> {
+  let ledger: ReplyLedgerPort;
+  try {
+    ledger = await deps.openLedger();
+  } catch {
+    return ledgerPreflightFailure("open");
+  }
+
+  let outcome: ReplyRealRunOutcome | undefined;
+  let stageResult: StageReplyResult | undefined;
+  let closeFailed = false;
+  try {
+    let prior: ReplyLedgerEntry | undefined;
+    try {
+      prior = ledger.find(input.replyToId);
+    } catch {
+      outcome = ledgerPreflightFailure("find");
+    }
+
+    if (!outcome && prior && !input.force) {
+      outcome = duplicateOutcome(prior);
+    }
+
+    if (!outcome) {
+      let stageReplyDraft:
+        | Awaited<ReturnType<ReplyRealRunDependencies["loadStageReplyDraft"]>>
+        | undefined;
+      try {
+        stageReplyDraft = await deps.loadStageReplyDraft();
+      } catch {
+        outcome = stageRuntimeFailure();
+      }
+
+      if (!outcome && typeof stageReplyDraft !== "function") {
+        outcome = stageRuntimeFailure();
+      } else if (stageReplyDraft) {
+        try {
+          const result = await stageReplyDraft(input.content, input.targetIdOrUrl, {
+            inspect: input.inspect,
+          });
+          if (result) stageResult = result;
+          else outcome = stageResultInconclusive(input.replyToId);
+        } catch (error) {
+          outcome = nativeStageFailure(error);
+        }
+      }
+    }
+
+    if (!outcome && stageResult) {
+      try {
+        // Attempt durable write-dedup only after the native staging flow returns.
+        ledger.record(stageResult.replyToId, {
+          status: stageResult.verified ? "staged" : "staged-unverified",
+        });
+        outcome = stagedOutcome(stageResult);
+      } catch {
+        outcome = ledgerPersistenceFailure(stageResult, "record");
+      }
+    }
+  } finally {
+    try {
+      ledger.close();
+    } catch {
+      closeFailed = true;
+    }
+  }
+
+  if (!outcome) return stageResultInconclusive(input.replyToId);
+  if (!closeFailed) return outcome;
+  if (stageResult && outcome.kind === "staged") {
+    return ledgerPersistenceFailure(stageResult, "close");
+  }
+  return withLedgerCloseFailure(outcome);
+}
+
+const productionReplyRealRunDependencies: ReplyRealRunDependencies = {
+  async openLedger() {
+    const { ReplyLedger } = await import("../db.js");
+    return new ReplyLedger();
+  },
+  async loadStageReplyDraft() {
+    const { stageReplyDraft } = await import("../x/draftPoster.js");
+    return stageReplyDraft;
+  },
+};
+
 export function registerReplyCommand(x: Command): void {
   x
     .command("reply")
@@ -65,7 +332,11 @@ export function registerReplyCommand(x: Command): void {
         "\nDry-run behavior:\n" +
         "  --dry-run skips the duplicate ledger and all browser/profile/database state.\n" +
         "  Target ID/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X.\n" +
-        "  A real run still checks the ledger and may refuse a recorded target unless --force is supplied.\n",
+        "  A real run still checks the ledger and may refuse a recorded target unless --force is supplied.\n" +
+        "\nReal-run ledger recovery:\n" +
+        "  If native staging returns but reply-ledger record/close fails, exit 1; the draft may exist.\n" +
+        "  Before any retry, compare X Unsent/Drafts manually in the same CLI-owned profile.\n" +
+        "  --inspect and selector calibration cannot repair a reply-ledger failure.\n",
     )
     .action(async (opts: ReplyXOptions) => {
       // Resolve content (inline --text or --from file/stdin) up front so a usage
@@ -156,44 +427,18 @@ export function registerReplyCommand(x: Command): void {
         process.exit(0);
       }
 
-      // WRITE-DEDUP (issue #10): validation above completes before durable state
-      // is opened. Refuse an intentional duplicate unless --force.
-      const { ReplyLedger } = await import("../db.js");
-      const ledger = new ReplyLedger();
-      const prior = ledger.find(replyToId);
-      if (prior && !opts.force) {
-        ledger.close();
-        console.error(
-          `✗ Already staged a reply to ${replyToId} at ${prior.stagedAt} (status: ${prior.status}).\n` +
-            "  Refusing to stage a duplicate reply. Re-run with --force to override.",
-        );
-        process.exit(2);
-        return;
-      }
-
-      const { stageReplyDraft } = await import("../x/draftPoster.js");
-      try {
-        const result = await stageReplyDraft(content, opts.to, { inspect: opts.inspect });
-        // Record in the ledger ONLY after a successful stage, so a crash before
-        // this point leaves the tweet re-stageable (idempotent at the action).
-        ledger.record(result.replyToId, {
-          status: result.verified ? "staged" : "staged-unverified",
-        });
-        ledger.close();
-        const count = result.format === "thread" ? `${result.posts} posts` : "1 reply";
-        console.log(
-          `\n✓ Staged a NATIVE X reply draft (${result.format}, ${count}) to ${result.replyToId}. NEVER posted.\n` +
-            `  verified in Unsent/Drafts: ${result.verified ? "yes" : "unconfirmed"}\n` +
-            `  ${result.note}`,
-        );
-        process.exit(0);
-      } catch (err) {
-        ledger.close();
-        console.error(`\n✗ Failed to stage the X reply draft: ${(err as Error).message}`);
-        console.error(
-          "  Composer selectors may need live calibration — re-run with --inspect to watch the DOM.",
-        );
-        process.exit(1);
-      }
+      const outcome = await executeReplyRealRun(
+        {
+          content,
+          targetIdOrUrl: opts.to,
+          replyToId,
+          inspect: opts.inspect,
+          force: opts.force,
+        },
+        productionReplyRealRunDependencies,
+      );
+      if (outcome.stream === "stdout") console.log(outcome.message);
+      else console.error(outcome.message);
+      process.exit(outcome.exitCode);
     });
 }
