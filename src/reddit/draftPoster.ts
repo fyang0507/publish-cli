@@ -56,7 +56,8 @@ export const REDDIT_COMPOSER_SELECTORS = {
   // post type (see selfPostTab below).
   submitUrl: (sub: string) => `https://www.reddit.com/r/${sub}/submit`,
 
-  // Reddit's transient "Draft saved" confirmation toast — the RELIABLE save signal.
+  // Reddit's transient "Draft saved" confirmation toast — usable only as a fresh
+  // absent-before / visible-after signal for this attempt.
   // RE-CALIBRATED LIVE 2026-07-04: reopening the composer-header "Drafts" modal
   // right after saving shows a STALE list (the just-saved draft has NOT propagated —
   // the header still reads the pre-save count), so matching the staged title there
@@ -271,22 +272,30 @@ export interface StageDraftOptions extends EnsureSessionOptions {
 export interface StageDraftResult {
   kind: "self";
   /**
+   * Explicit save-confirmation state. `unconfirmed` means exactly one save click
+   * occurred without a fresh absent-before / visible-after toast transition;
+   * callers must require manual inspection and must not retry blindly. This is
+   * deliberately smaller than the versioned receipt planned in issue #34.
+   */
+  saveStatus: "not_attempted" | "unconfirmed" | "toast_confirmed";
+  /**
    * Whether the "Save Draft" affordance resolved and was clicked. FALSE means the
-   * draft was NOT staged (the poster bailed rather than guess another button) — the
-   * caller MUST treat this as a failure, not a success. Distinct from `verified`,
-   * which is the (best-effort) "Draft saved" toast confirmation of a click.
+   * CLI did not click a save control and no native draft was confirmed; it does
+   * not claim the platform's autosave/native state. The caller MUST treat this as
+   * a failure, not a success. Distinct from `verified` below.
    */
   saved: boolean;
-  /** Whether the post-save verification matched the staged title/leading body. */
+  /** Whether the toast was absent before and visible after the one save click. */
   verified: boolean;
   /** The target subreddit (without the r/ prefix). */
   subreddit: string;
   /** The flair id selected in the composer, when one was applied. */
   flair?: string;
   /**
-   * Set (draft NOT staged) when the composer surfaced an eligibility block — a
-   * plain message like "can't post to r/foo: insufficient karma". stageDraft
-   * returns this rather than throwing, and never proceeds toward Post.
+   * Set when the composer surfaced an eligibility block — a plain message like
+   * "can't post to r/foo: insufficient karma". stageDraft returns this before
+   * title/body/save actions; no native draft is confirmed and it never proceeds
+   * toward Post.
    */
   blocked?: string;
   /** Human-readable note about how the draft was saved / what to check. */
@@ -520,23 +529,102 @@ async function setToggleOn(page: Page, candidates: readonly string[]): Promise<b
  *
  * SAFEGUARD (mirrors LinkedIn's saveAsDraftLinkedIn): if the "Save Draft"
  * affordance does not resolve, we do NOT guess at another button — a wrong click
- * could Post. We bail (return null) and leave it to a human. There is NO fall
+ * could Post. We bail without clicking and leave it to a human. There is NO fall
  * through to Post.
  */
-async function saveDraftReddit(page: Page): Promise<{ clicked: boolean; confirmed: boolean }> {
-  const save = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.saveDraftButton, 6_000);
+export async function saveDraftReddit(
+  page: Page,
+  locate: typeof optionalLocator = optionalLocator,
+  probeToast: (
+    page: Page,
+    candidates: readonly string[],
+  ) => Promise<RedditToastPreclickState> = probeVisibleLocatorNow,
+): Promise<{
+  clicked: boolean;
+  confirmed: boolean;
+  toastBeforeClick: RedditToastPreclickState;
+}> {
+  const save = await locate(page, REDDIT_COMPOSER_SELECTORS.saveDraftButton, 6_000);
   if (!save) {
     // The "Save Draft" affordance didn't appear — do NOT guess another button
     // (a wrong click could post). Bail. NEVER fall through to Post.
-    return { clicked: false, confirmed: false };
+    return { clicked: false, confirmed: false, toastBeforeClick: "not_checked" };
   }
+  // A toast already visible cannot prove causality for this click. Snapshot its
+  // absence first; confirmation requires an absent-before / visible-after edge.
+  const toastBeforeClick = await probeToast(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast);
   await save.click();
-  // Confirm via the "Draft saved" toast, captured HERE (freshest right after the
-  // click). This is the reliable save signal — the drafts modal shows a stale list
-  // at this point (see saveConfirmToast). Non-fatal: a missing toast only means the
-  // save is unconfirmed, never that we should retry/guess another button.
-  const toast = await optionalLocator(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast, 6_000);
-  return { clicked: true, confirmed: !!toast };
+  // Probe the "Draft saved" toast right after the click. Only an absent-before /
+  // visible-after transition is attributed to this attempt; the drafts modal can
+  // show a stale list too (see saveConfirmToast). Missing/ambiguous evidence means
+  // unconfirmed, never that we should retry or guess another button.
+  const toast = await locate(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast, 6_000);
+  return {
+    clicked: true,
+    confirmed: toastBeforeClick === "absent" && !!toast,
+    toastBeforeClick,
+  };
+}
+
+export type RedditToastPreclickState = "not_checked" | "absent" | "present" | "inconclusive";
+
+/** Zero-wait visibility snapshot used to rule out stale or unknowable evidence. */
+async function probeVisibleLocatorNow(
+  page: Page,
+  candidates: readonly string[],
+): Promise<RedditToastPreclickState> {
+  let inconclusive = false;
+  for (const selector of candidates) {
+    try {
+      const matches = selector.startsWith("//")
+        ? page.locator(`xpath=${selector}`)
+        : page.locator(selector);
+      const count = await matches.count();
+      for (let index = 0; index < count; index += 1) {
+        if (await matches.nth(index).isVisible()) return "present";
+      }
+    } catch {
+      // A failed probe is not evidence of absence. Keep checking for a definite
+      // visible stale node, but fail closed if none of the remaining checks find one.
+      inconclusive = true;
+    }
+  }
+  return inconclusive ? "inconclusive" : "absent";
+}
+
+/** Describe the three save outcomes without turning a click into a confirmed save. */
+export function describeRedditSaveAttempt(
+  subreddit: string,
+  clicked: boolean,
+  confirmed: boolean,
+  toastBeforeClick: RedditToastPreclickState = "not_checked",
+): string {
+  if (!clicked) {
+    return (
+      `Could not resolve the "Save Draft" affordance (NEEDS CALIBRATION), so the CLI did not ` +
+      "click a save control. No native draft was confirmed; NEVER auto-posted. Compare Reddit " +
+      "DRAFTS manually in the same CLI-owned profile before deciding any next action. Do not " +
+      "rerun automatically or blindly: Reddit has no draft idempotency ledger and another " +
+      "attempt could duplicate an existing draft."
+    );
+  }
+  if (!confirmed) {
+    const evidence = toastBeforeClick === "present"
+      ? "A visible \"Draft saved\" node already existed before the click, so the post-click signal could not be attributed to this attempt."
+      : toastBeforeClick === "inconclusive"
+        ? "The CLI could not establish that \"Draft saved\" was absent before the click, so later toast visibility could not be attributed to this attempt."
+        : "Reddit's transient \"Draft saved\" toast was not observed after the click.";
+    return (
+      `Clicked "Save Draft" exactly once for r/${subreddit}. ${evidence} Draft state is ` +
+      "UNCONFIRMED. Compare Reddit DRAFTS manually in the same CLI-owned profile; do not rerun " +
+      "automatically or blindly because Reddit has no draft idempotency ledger and another " +
+      "attempt could duplicate an existing draft."
+    );
+  }
+  return (
+    `Reddit's "Draft saved" toast was absent before and visible after one "Save Draft" click for r/${subreddit}. ` +
+    "Open Reddit Drafts to review and post manually."
+  );
 }
 
 /**
@@ -544,10 +632,10 @@ async function saveDraftReddit(page: Page): Promise<{ clicked: boolean; confirme
  * profile. NEVER posts. Runs the eligibility check first (design §4.1) — if the
  * composer surfaces a block, returns { blocked } without staging. Otherwise types
  * the title + Markdown body, selects the resolved flair, sets nsfw/spoiler, and
- * saves via "Save Draft", then best-effort verifies the draft landed.
+ * saves via "Save Draft", then captures the transient acceptance toast.
  *
- * Preflight (§4) is run by the command so --dry-run reuses it; stageDraft consumes
- * the already-resolved opts.flairId.
+ * Live preflight (§4) is run by the real command before this function; stageDraft
+ * consumes the already-resolved opts.flairId. Local-only --dry-run never enters.
  */
 export async function stageDraft(
   post: GeneratedSelfPost,
@@ -568,11 +656,12 @@ export async function stageDraft(
     if (block) {
       return {
         kind: "self",
+        saveStatus: "not_attempted",
         saved: false,
         verified: false,
         subreddit: sub,
         blocked: block,
-        note: `${block}. No draft was staged. NEVER auto-posted.`,
+        note: `${block}. No native draft was confirmed. NEVER auto-posted.`,
       };
     }
 
@@ -618,14 +707,15 @@ export async function stageDraft(
 
     // Save Draft (never Post; bail if the affordance doesn't resolve). The
     // "Draft saved" toast (captured inside saveDraftReddit) is the verification.
-    const { clicked: saved, confirmed: verified } = await saveDraftReddit(page);
+    const {
+      clicked: saved,
+      confirmed: verified,
+      toastBeforeClick,
+    } = await saveDraftReddit(page);
 
-    const noteParts: string[] = [];
-    noteParts.push(
-      saved
-        ? `Saved via "Save Draft" to r/${sub}. Draft is under Reddit's drafts (submit page) — open it to review and post manually.`
-        : `Could not resolve the "Save Draft" affordance (NEEDS CALIBRATION) — bailed WITHOUT guessing another button. No draft confirmed; NEVER auto-posted. Check Reddit drafts / re-run with --inspect.`,
-    );
+    const noteParts: string[] = [
+      describeRedditSaveAttempt(sub, saved, verified, toastBeforeClick),
+    ];
     if (!markdown) {
       noteParts.push(
         "Could NOT switch the composer to Markdown mode THIS RUN (the toggle normally engages — this is a rare fallback; the composer DOM may have drifted) — the body was entered in the RICH editor, so Markdown syntax (**bold**, lists, fenced code) will render LITERALLY. Before posting, open the draft and use the body toolbar's “… → Switch to Markdown” so it renders as intended.",
@@ -638,7 +728,7 @@ export async function stageDraft(
       );
     if (post.codeFlags.length) {
       noteParts.push(
-        "Code blocks: confirm fenced code renders on both new and old Reddit (old Reddit needs 4-space indentation for some clients).",
+        "Code blocks: old Reddit does not support fenced blocks; use 4-space indentation for old/new portability and inspect the native draft.",
       );
     }
     if (post.linkFlags.length) {
@@ -647,6 +737,7 @@ export async function stageDraft(
 
     return {
       kind: "self",
+      saveStatus: !saved ? "not_attempted" : verified ? "toast_confirmed" : "unconfirmed",
       saved,
       verified,
       subreddit: sub,

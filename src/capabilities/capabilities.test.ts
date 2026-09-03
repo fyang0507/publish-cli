@@ -156,6 +156,21 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(reddit, /CAPTCHA/);
   assert.match(reddit, /publish reddit draft --subreddit <name> --title <title>/);
   assert.match(reddit, /intended draft with `--inspect`/);
+  assert.match(reddit, /only accepted keys are string-valued `subreddit`, `title`, and `flair`/);
+  assert.match(reddit, /empty `--subreddit` or `--title` values reject.*empty `--flair` intentionally clears/s);
+  assert.match(reddit, /`nsfw` and `spoiler` are flag-only/);
+  assert.match(reddit, /only the first substantive block.*later key-shaped prose cannot retroactively/s);
+  assert.match(reddit, /scalar\/sequence blocks remain literal thematic-break Markdown/);
+  assert.match(reddit, /only a leading transport BOM removed.*following bytes\/line endings retained/s);
+  assert.match(reddit, /4-space-indented code instead of fenced code/);
+  assert.match(reddit, /Tables render through both parsers.*leading and trailing pipes/s);
+  assert.match(reddit, /does not upload or verify inline body images/);
+  assert.match(reddit, /returns `unconfirmed`.*Both paths exit 1/s);
+  assert.match(reddit, /absent before and visible after/);
+  assert.match(reddit, /inconclusive pre-click visibility probe also fails closed/);
+  assert.match(reddit, /no native draft was confirmed/);
+  assert.match(reddit, /same CLI-owned profile/);
+  assert.match(reddit, /Never retry automatically or blindly.*no draft idempotency ledger/s);
   assert.doesNotMatch(reddit, /Run `publish reddit info`|readiness\.ready/);
 
   const wechat = `${CHANNEL_INFO_SOURCES.wechat.cliBoundary}\n${CHANNEL_INFO_SOURCES.wechat.authentication}\n${CHANNEL_INFO_SOURCES.wechat.platformGuidance}`;
@@ -505,6 +520,17 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   const redditDraftHelp = spawnSync(process.execPath, [CLI_PATH, "reddit", "draft", "--help"], { encoding: "utf8" });
   assert.equal(redditDraftHelp.status, 0);
   assert.match(redditDraftHelp.stdout, /validate locally; skips live subreddit\s+preflight/);
+  assert.match(redditDraftHelp.stdout, /Accepted keys: subreddit, title, flair/);
+  assert.match(redditDraftHelp.stdout, /Empty --subreddit\/--title values reject; empty --flair intentionally clears metadata/);
+  assert.match(redditDraftHelp.stdout, /BOM and LF\/CRLF\/lone-CR delimiters are recognized/);
+  assert.match(redditDraftHelp.stdout, /only the first substantive block establishes mapping intent/);
+  assert.match(redditDraftHelp.stdout, /Valid scalar\/sequence blocks remain literal Markdown/);
+  assert.match(redditDraftHelp.stdout, /Inline --text is always literal/);
+  assert.match(redditDraftHelp.stdout, /4-space-indented code/);
+  assert.match(redditDraftHelp.stdout, /Tables should use outer pipes/);
+  assert.match(redditDraftHelp.stdout, /Inline body images are not uploaded or verified/);
+  assert.match(redditDraftHelp.stdout, /toast to be absent before the one Save Draft click/);
+  assert.match(redditDraftHelp.stdout, /compare DRAFTS manually in the same\s+CLI-owned profile.*Never blindly retry.*duplicate risk.*no draft idempotency ledger/s);
 
   const wechatCheckHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "check", "--help"], { encoding: "utf8" });
   assert.equal(wechatCheckHelp.status, 0);

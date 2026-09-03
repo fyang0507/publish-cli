@@ -1,12 +1,18 @@
 import { Command } from "commander";
-import { resolveContentInput, type ContentInputOptions } from "./contentInput.js";
+import {
+  resolveContentInputDetails,
+  splitLeadingFrontmatter,
+  type ContentInputOptions,
+} from "./contentInput.js";
 import {
   generateSelfPost,
   renderSelfPostForInspection,
   preflightSelfPost,
+  validateRedditFrontmatter,
   type GeneratedSelfPost,
 } from "../reddit/content.js";
 import { isLocalValidationError, LocalValidationError } from "../capabilities/validation.js";
+import type { StageDraftResult } from "../reddit/draftPoster.js";
 
 /**
  * `publish reddit draft` — owned-content publisher for the Reddit channel
@@ -21,12 +27,11 @@ import { isLocalValidationError, LocalValidationError } from "../capabilities/va
  *   2. DETERMINISTIC generation (src/reddit/content.ts; plain code, no LLM):
  *      title (≤300) + Markdown body kept ~verbatim (≤~40k). --subreddit/--title/
  *      --flair may come from --from frontmatter, with the flags overriding.
- *   3. Reader-backed SUBREDDIT PREFLIGHT (§4): fetch the target's about + flairs
- *      + post_requirements through the authenticated browser context and validate
- *      the post against the declared contract. Violations → exit 1, never a draft
- *      the subreddit would reject. Runs for BOTH --dry-run and real runs so the
- *      operator sees identical violations.
- *   4. --dry-run: stop after preflight — no composer touched.
+ *   3. --dry-run: stop after deterministic local validation — no browser or live
+ *      subreddit preflight.
+ *   4. Real run only: reader-backed SUBREDDIT PREFLIGHT (§4) fetches the target's
+ *      about + flairs + post_requirements through the authenticated context.
+ *      Violations → exit 1 before composer staging.
  *   5. Otherwise: drive the composer and SAVE A NATIVE DRAFT — never Post. An
  *      eligibility block (karma/age/approved-submitters/ban; §4.1) is reported
  *      plainly rather than failing opaquely, and never falls through to Post.
@@ -43,6 +48,46 @@ interface RedditDraftOptions extends ContentInputOptions {
   inspect?: boolean;
 }
 
+export interface RedditStageCommandOutcome {
+  exitCode: 0 | 1;
+  stream: "stdout" | "stderr";
+  message: string;
+}
+
+/** Keep save-confirmation truth and exit semantics independent of browser code. */
+export function classifyRedditStageResult(result: StageDraftResult): RedditStageCommandOutcome {
+  if (result.blocked) {
+    return { exitCode: 1, stream: "stderr", message: `\n✗ ${result.blocked}` };
+  }
+  if (result.saveStatus === "not_attempted" || !result.saved) {
+    return {
+      exitCode: 1,
+      stream: "stderr",
+      message:
+        `\n✗ No Reddit draft was confirmed for r/${result.subreddit} (NEVER posted).\n` +
+        `  ${result.note}`,
+    };
+  }
+  if (result.saveStatus === "unconfirmed" || !result.verified) {
+    return {
+      exitCode: 1,
+      stream: "stderr",
+      message:
+        `\n✗ Reddit draft state for r/${result.subreddit} is UNCONFIRMED (NEVER posted).\n` +
+        `  ${result.note}`,
+    };
+  }
+  return {
+    exitCode: 0,
+    stream: "stdout",
+    message:
+      `\n✓ Staged a NATIVE Reddit draft (self-post) to r/${result.subreddit}. NEVER posted.\n` +
+      "  verified by Draft saved toast: yes\n" +
+      (result.flair ? `  flair: ${result.flair}\n` : "") +
+      `  ${result.note}`,
+  };
+}
+
 export function registerRedditDraftCommand(reddit: Command): void {
   reddit
     .command("draft")
@@ -50,16 +95,48 @@ export function registerRedditDraftCommand(reddit: Command): void {
     .option("--subreddit <name>", "Target subreddit (or from --from frontmatter)")
     .option("--title <title>", "Post title, ≤300 chars (or from frontmatter / markdown H1)")
     .option("--text <content>", "Body content inline (exactly one of --text / --from)")
-    .option("--from <base.md>", "Path to a canonical base markdown ('-' = stdin); the primary path")
+    .option(
+      "--from <base.md>",
+      "Canonical markdown file ('-' = stdin); accepts frontmatter keys subreddit/title/flair",
+    )
     .option("--flair <id|text>", "Flair template id, or text matched to a template")
-    .option("--nsfw", "Mark the post NSFW")
-    .option("--spoiler", "Mark the post as a spoiler")
+    .option("--nsfw", "Mark the post NSFW (flag-only; not accepted in frontmatter)")
+    .option("--spoiler", "Mark the post as a spoiler (flag-only; not accepted in frontmatter)")
     .option("--dry-run", "Generate and validate locally; skips live subreddit preflight and composer")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
+    .addHelpText(
+      "after",
+      "\nFile/stdin frontmatter:\n" +
+        "  Accepted keys: subreddit, title, flair (string values). Flags override metadata.\n" +
+        "  Empty --subreddit/--title values reject; empty --flair intentionally clears metadata.\n" +
+        "  Empty mappings are accepted; unsupported/malformed mapping metadata exits 2.\n" +
+        "  BOM and LF/CRLF/lone-CR delimiters are recognized; unterminated metadata exits 2.\n" +
+        "  For an unclosed opener, only the first substantive block establishes mapping intent.\n" +
+        "  Valid scalar/sequence blocks remain literal Markdown. Inline --text is always literal.\n" +
+        "\nMarkdown portability:\n" +
+        "  Use 4-space-indented code for old/new Reddit portability. Tables should use outer pipes.\n" +
+        "  Inline body images are not uploaded or verified by this text-only draft command.\n" +
+        "  Real runs require the Draft saved toast to be absent before the one Save Draft click.\n" +
+        "  If a fresh toast is not observed, exit 1 and compare DRAFTS manually in the same\n" +
+        "  CLI-owned profile. Never blindly retry (duplicate risk; no draft idempotency ledger).\n",
+    )
     .action(async (opts: RedditDraftOptions) => {
       let md: string;
+      let frontmatter = {};
+      let bodyLineOffset = 0;
       try {
-        md = resolveContentInput(opts);
+        const input = resolveContentInputDetails(opts);
+        md = input.markdown;
+        if (input.kind !== "text") {
+          const sourceName = input.kind === "stdin" ? "stdin (--from -)" : (input.sourcePath ?? "--from input");
+          const split = splitLeadingFrontmatter(md, sourceName, {
+            policy: "mapping-only",
+            preserveBodyLineEndings: true,
+          });
+          md = split.body;
+          frontmatter = validateRedditFrontmatter(split.data, sourceName);
+          bodyLineOffset = split.bodyLineOffset;
+        }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);
@@ -76,6 +153,8 @@ export function registerRedditDraftCommand(reddit: Command): void {
           flair: opts.flair,
           nsfw: opts.nsfw,
           spoiler: opts.spoiler,
+          frontmatter,
+          bodyLineOffset,
         });
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
@@ -159,33 +238,18 @@ export function registerRedditDraftCommand(reddit: Command): void {
             flairText: preflight.resolvedFlair?.text,
           });
 
-          if (result.blocked) {
-            // Eligibility block (§4.1) — reported plainly, draft NOT staged.
-            console.error(`\n✗ ${result.blocked}`);
-            exitCode = 1;
-          } else if (!result.saved) {
-            // The "Save Draft" affordance never resolved — the poster bailed rather
-            // than guess another button (never falls through to Post). Nothing was
-            // staged, so this is a FAILURE, not a green ✓ (would otherwise read as a
-            // success to any agent keying on the ✓ / exit code).
-            console.error(
-              `\n✗ Could NOT stage a draft to r/${result.subreddit} — nothing was saved (NEVER posted).\n` +
-                `  ${result.note}`,
-            );
-            exitCode = 1;
-          } else {
-            console.log(
-              `\n✓ Staged a NATIVE Reddit draft (self-post) to r/${result.subreddit}. NEVER posted.\n` +
-                `  verified in drafts: ${result.verified ? "yes" : "unconfirmed"}\n` +
-                (result.flair ? `  flair: ${result.flair}\n` : "") +
-                `  ${result.note}`,
-            );
-          }
+          const outcome = classifyRedditStageResult(result);
+          if (outcome.stream === "stderr") console.error(outcome.message);
+          else console.log(outcome.message);
+          exitCode = outcome.exitCode;
         }
       } catch (err) {
         console.error(`\n✗ Failed to stage the Reddit draft: ${(err as Error).message}`);
         console.error(
-          "  Composer/reader selectors may need live calibration — re-run with --inspect to watch the DOM.",
+          "  Native draft state is not confirmed. Compare Reddit DRAFTS manually in the same " +
+            "CLI-owned profile before any retry; another attempt can duplicate an existing draft " +
+            "because Reddit has no draft idempotency ledger. Use --inspect only after that check " +
+            "if selector calibration is still needed.",
         );
         exitCode = 1;
       } finally {
