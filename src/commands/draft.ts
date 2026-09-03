@@ -8,7 +8,7 @@ import {
   type XFormat,
 } from "../x/content.js";
 import { isLocalValidationError } from "../capabilities/validation.js";
-import { resolveContentInput } from "./contentInput.js";
+import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -79,10 +79,19 @@ export function registerDraftCommand(x: Command): void {
     .description("Stage a NATIVE X draft (tweet/thread/article) from a canonical base markdown — never posts")
     .requiredOption("--format <format>", "Required: tweet | thread | article")
     .option("--text <content>", "Content inline (tweet/thread only; exactly one of --text / --from)")
-    .option("--from <base.md>", "Path to the canonical base markdown ('-' = stdin)")
+    .option("--from <base.md>", "Canonical markdown ('-' = stdin); strips leading mapping/empty YAML frontmatter")
     .option("--long", "Use the local 25,000-code-point guard for Premium long posts; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
+    .addHelpText(
+      "after",
+      "\nFile/stdin frontmatter:\n" +
+        "  A leading empty or YAML mapping block between --- delimiters is metadata only and is removed.\n" +
+        "  Metadata keys are ignored; an Article title comes from the normalized Markdown body.\n" +
+        "  BOM and LF/CRLF/lone-CR delimiters are recognized; mapping-intent malformed or unterminated metadata exits 2.\n" +
+        "  Valid scalar/sequence blocks and thematic-break prose remain literal Markdown apart from a leading transport BOM.\n" +
+        "  Inline --text is always literal and is never interpreted as frontmatter.\n",
+    )
     .action(async (opts: DraftXOptions) => {
       const format = opts.format as XFormat;
       if (!VALID_FORMATS.includes(format)) {
@@ -98,8 +107,21 @@ export function registerDraftCommand(x: Command): void {
       }
 
       let md: string;
+      let sourceLineOffset = 0;
       try {
-        md = resolveContentInput(opts);
+        const input = resolveContentInputDetails(opts);
+        md = input.markdown;
+        if (input.kind !== "text") {
+          const sourceName = input.kind === "stdin"
+            ? "stdin (--from -)"
+            : (input.sourcePath ?? "--from input");
+          const split = splitLeadingFrontmatter(md, sourceName, {
+            policy: "mapping-only",
+            preserveBodyLineEndings: true,
+          });
+          md = split.body;
+          sourceLineOffset = split.bodyLineOffset;
+        }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);
@@ -113,7 +135,7 @@ export function registerDraftCommand(x: Command): void {
       // splitting, and char-fit must stay reproducible).
       let content: GeneratedContent;
       try {
-        content = await generateContent(md, { format, long: opts.long });
+        content = await generateContent(md, { format, long: opts.long, sourceLineOffset });
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         console.error(error.message);

@@ -147,7 +147,8 @@ export function splitLeadingFrontmatter(
       : "";
     if (opener && (policy === "reserved" || hasMappingIntent(candidate))) {
       throw new LocalValidationError(
-        `${sourceName}: leading frontmatter opener has no closing --- delimiter.`,
+        `${sourceName}: leading frontmatter opener has no closing --- delimiter ` +
+          "(actual: missing_closing_delimiter; expected: a closing --- delimiter for leading YAML frontmatter).",
         {
           code: "unterminated_frontmatter",
           field: "text",
@@ -166,12 +167,13 @@ export function splitLeadingFrontmatter(
   let parsed: unknown;
   try {
     parsed = parseYaml(match[1] ?? "");
-  } catch (error) {
+  } catch {
     if (policy === "mapping-only" && !hasMappingIntent(match[1] ?? "")) {
       return { body: stripLeadingBom(markdown), data: {}, present: false, bodyLineOffset: 0 };
     }
     throw new LocalValidationError(
-      `${sourceName}: leading frontmatter is malformed YAML: ${(error as Error).message}`,
+      `${sourceName}: leading frontmatter is malformed YAML ` +
+        "(actual: malformed_yaml; expected: a valid YAML mapping between leading --- delimiters).",
       {
         code: "malformed_frontmatter",
         field: "text",
