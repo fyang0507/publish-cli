@@ -115,7 +115,7 @@ XHS channel.**
    XHS lacks. Candidates: **`compose`** (lead), `stage`, `preview`.
 2. **Publish is always headful + human-present, never headless background.** The
    agent always has a synchronous surface to show the operator (headful browser
-   and/or the **Discord escalation path** in the larger *fred-agent* ecosystem).
+   and/or a synchronous escalation surface supplied by the calling workflow).
    This de-risks the missing draft: a present human reviews the populated composer
    and posts right then; login expiry becomes friction, not a blocker.
 3. **The design/taste system is ORTHOGONAL** — an atomic, cross-channel component
@@ -242,9 +242,6 @@ run from the repo root (Playwright resolves from `node_modules`).
   live), `cv-cat/XhsSkills` (reverse API via `Spider_XHS`+`xhshow`, publishes live);
   taste — `cclank/xhs-cover-skill`, `JuneYaooo/xhs-writer-skill`,
   `ziguishian/xhs-visual-director-skill`. **None save a draft** (confirms §2.1).
-- **Memory** (`~/.claude/projects/…/memory/`): `xhs-no-web-draft.md`,
-  `xhs-login-tts-spike.md`, `publish-always-headful-sync.md`,
-  `design-language-orthogonal.md`.
 - **Closest code analog to mirror:** `src/reddit/*` (browser-driven, persistent
   profile, "Save Draft" boundary with a FORBIDDEN Post selector, live-calibrated
   selectors) + `src/x/content.ts` (deterministic caption/caps).
@@ -256,7 +253,7 @@ run from the repo root (Playwright resolves from `node_modules`).
 - **Never touch the mobile-only draft assumption** — there is no web draft; don't
   design around one, and don't use 私密/定时发布 as a "draft" (they publish).
 - **Reuse by import, don't edit X/LinkedIn/Reddit** for XHS's sake.
-- **Machine-local state off Google Drive** — profile/cookies under
+- **Machine-local state off cloud-synced storage** — profile/cookies under
   `PUBLISH_DATA_DIR`; never commit `.env`.
 - **Design/taste stays orthogonal** — the XHS channel consumes cards + caption; it
   does not embed a renderer or style rules.

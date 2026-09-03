@@ -122,7 +122,7 @@ export const env: PublishEnv = {
  * The directories are created on first access.
  */
 export interface DataPaths {
-  /** Base runtime dir, e.g. ~/.publish-cli. */
+  /** Base runtime dir, e.g. `~/.publish-cli`. */
   baseDir: string;
   /** Persistent Playwright user-data-dir for the logged-in X profile. */
   xProfileDir: string;
