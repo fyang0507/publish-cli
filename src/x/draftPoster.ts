@@ -21,6 +21,7 @@
  */
 
 import type { BrowserContext, Page, Locator } from "playwright";
+import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { dirname, extname, join } from "node:path";
 import { getBrowserContext, type EnsureSessionOptions } from "../session.js";
@@ -28,13 +29,26 @@ import type { ArticleBlock, GeneratedContent, InlineRun } from "./content.js";
 import {
   extractTweetId,
   isLivePositiveXArticleCoverPath,
+  X_PREMIUM_POST_PLATFORM_MAX_LENGTH,
 } from "../capabilities/validation.js";
 import {
+  isPositiveXDraftRowEvidence,
   runXDraftSaveFlow,
+  snapshotXArticleDraftHandoff,
+  snapshotXDraftRowEvidence,
+  X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
+  X_ARTICLE_IMAGE_DIMENSION_LIMIT,
+  X_DRAFT_ROW_OBSERVATION_LIMIT,
+  XDraftStageError,
   xDraftStageError,
+  xDraftRowEvidenceNotApplicable,
+  type XArticleCoverHandoff,
+  type XArticleDraftHandoff,
+  type XDraftRowEvidence,
+  type XDraftRowEvidenceUnverified,
+  type XDraftRowObservation,
   type XDraftReturnedSavePhase,
   type XDraftSaveMechanism,
-  type XDraftSaveFlowResult,
 } from "./saveProgress.js";
 
 // Preserve the existing public import while keeping parsing in a browser-free module.
@@ -53,8 +67,8 @@ export const X_COMPOSER_SELECTORS = {
   homeUrl: "https://x.com/home",
   // The REAL native-drafts surface. CALIBRATED (issue #4): the bare
   // /compose/post/unsent route ERRORS; /compose/post/unsent/drafts works and
-  // lists the saved Unsent drafts. Used to VERIFY a draft actually landed
-  // (matching the staged text) instead of trusting a background-timeline row.
+  // lists the saved Unsent drafts. Issue #89 live-calibrated a unique aria-modal
+  // drafts container with native unsentTweet rows and row-scoped tweetText.
   draftsUrl: "https://x.com/compose/post/unsent/drafts",
   // Reply composer: navigating here opens a composer TARGETED at a reply to the
   // given tweet id (shows "Replying to @handle"). CALIBRATED (issue #8): use the
@@ -236,21 +250,39 @@ interface StageDraftResultBase {
   format: GeneratedContent["format"];
   /** Number of composer rows typed (1 for tweet/article, N for a thread). */
   posts: number;
-  /** Human-readable note about how the draft was saved / what to check. */
+  /** Compatibility diagnostic only; command receipts must not render this open prose. */
   note: string;
   /** Native action whose delivery/persistence phase the result describes. */
   saveMechanism: XDraftSaveMechanism;
 }
 
-/** A returned result always proves Save returned; only savePhase `verified` is success. */
-export type StageDraftResult = StageDraftResultBase & {
-  savePhase: XDraftReturnedSavePhase;
-};
+/**
+ * A returned result always proves Save returned. Composer verification is a
+ * closed phase/evidence pair; Articles deliberately carry no Unsent-row fact.
+ */
+export type StageDraftResult = StageDraftResultBase & (
+  | {
+      saveMechanism: "composer_close_save";
+      savePhase: "verified";
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "verified" }>;
+    }
+  | {
+      saveMechanism: "composer_close_save";
+      savePhase: "save_delivered_unverified";
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "unverified" }>;
+    }
+  | {
+      saveMechanism: "article_create_autosave";
+      savePhase: XDraftReturnedSavePhase;
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "not_applicable" }>;
+      articleHandoff: XArticleDraftHandoff;
+    }
+);
 
 /**
  * Stage `content` as a NATIVE DRAFT on X using the persistent logged-in profile.
- * NEVER posts. Returns a result describing what was staged + a best-effort
- * verification that the draft landed in Unsent.
+ * NEVER posts. Composer success requires closed, scoped Unsent-row evidence;
+ * Article success retains its separate canonical edit-URL observation.
  */
 export async function stageDraft(
   content: GeneratedContent,
@@ -297,21 +329,35 @@ async function stageTweetOrThreadDraft(
     throw new Error("No content to stage (empty tweet/thread).");
   }
 
+  // Read-only baseline on the same page/context. Failure is retained as
+  // unverified evidence and never prevents the later Save attempt.
+  const baseline = await captureDraftRowBaseline(page, posts[0]);
   await page.goto(X_COMPOSER_SELECTORS.composeUrl, { waitUntil: "domcontentloaded" });
 
   await typePosts(page, posts);
 
-  const saved = await saveAsDraft(page, () => verifyDraftSaved(page, posts[0]));
+  const saved = await saveAsDraft(
+    page,
+    () => verifyDraftSaved(page, posts[0], baseline),
+  );
 
-  return {
-    format: content.format,
-    posts: posts.length,
-    saveMechanism: "composer_close_save",
-    savePhase: saved.savePhase,
-    note: saved.savePhase === "verified"
-      ? `Saved via ${saved.value}. Draft was matched under X "Unsent"; review and post manually.`
-      : `Save returned via ${saved.value}, but persistence was not verified in X "Unsent"/Drafts.`,
-  };
+  return saved.savePhase === "verified"
+    ? {
+        format: content.format,
+        posts: posts.length,
+        saveMechanism: "composer_close_save",
+        savePhase: "verified",
+        draftRowEvidence: saved.draftRowEvidence,
+        note: `Saved via ${saved.value}. Full intended ${content.format === "thread" ? "first thread-row" : "tweet"} text was observed in one calibrated X Unsent row; review every row and post manually.`,
+      }
+    : {
+        format: content.format,
+        posts: posts.length,
+        saveMechanism: "composer_close_save",
+        savePhase: "save_delivered_unverified",
+        draftRowEvidence: saved.draftRowEvidence,
+        note: `Save returned via ${saved.value}, but scoped X Unsent row evidence remained unverified.`,
+      };
 }
 
 /**
@@ -383,6 +429,7 @@ export async function stageReplyDraft(
     const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
     const page = await ctx.newPage();
     try {
+      const baseline = await captureDraftRowBaseline(page, posts[0]);
       await page.goto(X_COMPOSER_SELECTORS.replyComposeUrl(replyToId), { waitUntil: "domcontentloaded" });
 
       // Sanity: confirm a composer text box opened for the requested URL. This
@@ -392,19 +439,31 @@ export async function stageReplyDraft(
 
       await typePosts(page, posts);
 
-      const saved = await saveAsDraft(page, () => verifyDraftSaved(page, posts[0]));
+      const saved = await saveAsDraft(
+        page,
+        () => verifyDraftSaved(page, posts[0], baseline),
+      );
 
-      return {
-        format: content.format,
-        posts: posts.length,
-        saveMechanism: "composer_close_save",
-        savePhase: saved.savePhase,
-        replyToId,
-        note: saved.savePhase === "verified"
-          ? `The intended reply text prefix was observed on the exact X "Unsent"/Drafts surface after ${saved.value}; ` +
-            `requested target ${replyToId} was supplied to the composer, but the saved draft's reply-target binding was not verified. Review both manually before posting.`
-          : `Save returned after staging was requested for target ${replyToId}, but text persistence and the saved draft's reply-target binding were not verified in X "Unsent"/Drafts.`,
-      };
+      return saved.savePhase === "verified"
+        ? {
+            format: content.format,
+            posts: posts.length,
+            saveMechanism: "composer_close_save",
+            savePhase: "verified",
+            draftRowEvidence: saved.draftRowEvidence,
+            replyToId,
+            note: `The full intended ${content.format === "thread" ? "first reply-thread row" : "reply"} text was observed in one calibrated X Unsent row after ${saved.value}; ` +
+              `requested target ${replyToId} was supplied to the composer, but the saved draft's reply-target binding was not verified. Review both manually before posting.`,
+          }
+        : {
+            format: content.format,
+            posts: posts.length,
+            saveMechanism: "composer_close_save",
+            savePhase: "save_delivered_unverified",
+            draftRowEvidence: saved.draftRowEvidence,
+            replyToId,
+            note: `Save returned after staging was requested for target ${replyToId}, but scoped row persistence evidence and the saved draft's reply-target binding were not verified in X "Unsent"/Drafts.`,
+          };
     } finally {
       await page.close().catch(() => {});
     }
@@ -419,7 +478,8 @@ export async function stageReplyDraft(
  *   <h1>→Heading, <h2>→Subheading, <p>→paragraph, <ul>/<ol><li>→lists,
  *   <blockquote>→quote, <a href>→link, inline <strong>/<em>/<s>→bold/italic/strike.
  * The ONLY thing paste does NOT convert is code blocks (they land as plain text),
- * so those are EXCLUDED from the paste and surfaced in the result note instead.
+ * so those are EXCLUDED from the paste and surfaced through the closed Article
+ * handoff facts instead.
  *
  * Flow: open the hub → click create → wait for the title input → type the title →
  * build an HTML fragment from the structured blocks → write it to the clipboard
@@ -450,7 +510,7 @@ export interface ArticleDraftStageDependencies {
     html: string,
     plain: string,
   ): Promise<void>;
-  stageCover(page: Page, basePath: string | undefined, notes: string[]): Promise<boolean>;
+  stageCover(page: Page, basePath: string | undefined): Promise<XArticleCoverHandoff>;
   settle(page: Page): Promise<void>;
   verify(
     page: Page,
@@ -469,7 +529,6 @@ export async function stageArticleDraft(
 ): Promise<StageDraftResult> {
   const article = content.article;
   if (!article) throw new Error("No article content to stage.");
-  const notes: string[] = [];
   let createBtn: Locator | undefined;
 
   const saved = await runXDraftSaveFlow("article_create_autosave", {
@@ -499,25 +558,16 @@ export async function stageArticleDraft(
       if (!bodyBox) throw new Error("Article body input unavailable after Create.");
 
       // Build the body as an HTML fragment the editor converts natively on paste
-      // (issue #5). Code blocks are excluded and counted for a human-facing note.
+      // (issue #5). Code blocks are excluded and counted for the closed handoff.
       const { html, codeBlockCount } = htmlFromArticleBlocks(article.blocks);
       const plainFallback = plainTextFromArticleBlocks(article.blocks);
 
       await deps.writeBody(ctx, page, bodyBox, html, plainFallback);
 
-      if (codeBlockCount > 0) {
-        notes.push(
-          `${codeBlockCount} code block${codeBlockCount === 1 ? "" : "s"} NOT auto-formatted ` +
-            "(paste does not convert code to a code block on X). Add each via the editor's " +
-            "Insert → Code, or paste a screenshot. The code text was intentionally excluded " +
-            "from the pasted HTML so it doesn't land as broken plain text.",
-        );
-      }
-
       // Attach an optional auto-discovered cover. The live-positive set includes
       // exact 5:2 and 1500x620; every tested image opened crop/edit and required
       // Apply, so ratio is advisory and never a local rejection.
-      const heroAttached = await deps.stageCover(page, basePath, notes);
+      const cover = await deps.stageCover(page, basePath);
 
       // Let autosave settle, then independently reload the captured edit URL and
       // match the intended title/body. Merely remaining on /edit/<id> is not
@@ -531,56 +581,76 @@ export async function stageArticleDraft(
       );
       return {
         verified,
-        value: { heroAttached, codeBlockCount },
+        value: {
+          body: "rich_html" as const,
+          codeBlockCount: codeBlockCount > X_ARTICLE_CODE_BLOCK_COUNT_LIMIT
+            ? "many" as const
+            : codeBlockCount,
+          cover,
+        },
       };
     },
   });
+
+  const articleHandoff = snapshotXArticleDraftHandoff(saved.value);
+  if (!articleHandoff) {
+    // This is after Create returned; a malformed internal handoff cannot safely
+    // become a successful command receipt.
+    throw new XDraftStageError("save_delivered_unverified", "article_create_autosave");
+  }
 
   return {
     format: "article",
     posts: 1,
     saveMechanism: "article_create_autosave",
     savePhase: saved.savePhase,
-    note:
-      "format=article. Body pasted as rich HTML and converted natively by the X " +
-      "Articles editor (headings/subheadings/paragraphs/lists/quotes/links/bold/italic). " +
-      `hero=${saved.value.heroAttached ? "attached (BEST-EFFORT — verify the crop)" : "not attached"}. ` +
-      `codeBlockCount=${saved.value.codeBlockCount}. ` +
-      (saved.savePhase === "verified"
-        ? "The intended title and, when present, body prefix were matched after independently reopening the Article edit URL. "
-        : "Create returned, but the intended title/body were not verified after reopening the Article edit URL. ") +
-      "X autosaves Article drafts under Articles → Drafts; review and publish manually. " +
-      "NEVER auto-published." +
-      (notes.length ? `\n  - ${notes.join("\n  - ")}` : ""),
+    draftRowEvidence: xDraftRowEvidenceNotApplicable(),
+    articleHandoff,
+    note: "Closed Article review facts are available in articleHandoff.",
   };
 }
 
 export async function stageArticleCover(
   page: Page,
   basePath: string | undefined,
-  notes: string[],
-): Promise<boolean> {
+): Promise<XArticleCoverHandoff> {
   const hero = resolveHeroImage(basePath);
   if (!hero.path) {
-    notes.push(
-      "HERO IMAGE MISSING: X requires a 5:2 cover image to publish. " +
-        "No suitable supported image was selected from the article asset folder. " +
-        "Add a 5:2 JPG, PNG, or WebP cover and verify it manually.",
-    );
-    return false;
+    return {
+      status: "missing",
+      ratio: "not_observed",
+      width: null,
+      height: null,
+      crop: "not_observed",
+    };
   }
-  if (!hero.ratioOk) {
-    notes.push(
-      `HERO IMAGE RATIO: selected image is ${hero.width}x${hero.height} ` +
-        `(ratio ${hero.ratio?.toFixed(3)}). Uploading without local rejection; ` +
-        "review X's mandatory crop/edit step before leaving the draft.",
-    );
+  const dimensions = Number.isInteger(hero.width) && Number.isInteger(hero.height) &&
+      (hero.width as number) > 0 && (hero.height as number) > 0 &&
+      (hero.width as number) <= X_ARTICLE_IMAGE_DIMENSION_LIMIT &&
+      (hero.height as number) <= X_ARTICLE_IMAGE_DIMENSION_LIMIT
+    ? { width: hero.width as number, height: hero.height as number }
+    : { width: null, height: null };
+  const upload = await uploadHeroImage(page, hero.path);
+  if (dimensions.width === null) {
+    return upload.status === "attached"
+      ? { ...upload, ratio: "unknown", width: null, height: null }
+      : {
+          status: "upload_incomplete",
+          ratio: "unknown",
+          width: null,
+          height: null,
+          crop: "not_observed",
+        };
   }
-  const uploaded = await uploadHeroImage(page, hero.path, notes);
-  if (uploaded) {
-    notes.push(`Hero image uploaded (${hero.width}x${hero.height}); verify the applied crop.`);
-  }
-  return uploaded;
+  const ratio = hero.ratioOk ? "within_5_2" as const : "outside_5_2" as const;
+  return upload.status === "attached"
+    ? { ...upload, ratio, ...dimensions }
+    : {
+        status: "upload_incomplete",
+        ratio,
+        ...dimensions,
+        crop: "not_observed",
+      };
 }
 
 const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
@@ -676,6 +746,11 @@ async function locatorTextAtExactArticleRoute(
     if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
     return { routeExact: true, text };
   }
+}
+
+/** Existing tolerant Article title/body-prefix normalization (issue #82). */
+function normalizeForMatch(value: string): string {
+  return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
 
 export async function verifyArticleDraftSaved(
@@ -986,27 +1061,25 @@ function readImageSize(path: string): { width: number; height: number } | null {
  * dialog testids are best-effort. We prefer setting the file <input> directly
  * (works for styled labels), then click through any crop/apply dialog with the
  * 5:2 default. Since the source is already 5:2, no in-browser cropping is needed.
- * Returns true if we found a control to attach to; false (with a note) otherwise.
+ * Returns a closed upload/crop fact without exposing a selector, path, or raw error.
  */
-async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): Promise<boolean> {
+async function uploadHeroImage(
+  page: Page,
+  imagePath: string,
+): Promise<Pick<Extract<XArticleCoverHandoff, { status: "attached" }>, "status" | "crop"> | { status: "upload_incomplete" }> {
   // Try the hidden file input first (most reliable for styled upload buttons).
   const fileInput = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCoverFileInput, 2_500);
   if (fileInput) {
     try {
       await fileInput.setInputFiles(imagePath);
     } catch {
-      notes.push("HERO UPLOAD INCOMPLETE: the selected cover could not be attached.");
-      return false;
+      return { status: "upload_incomplete" };
     }
   } else {
     // Fall back to clicking a labelled cover button that opens a file chooser.
     const coverBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCoverButton, 2_500);
     if (!coverBtn) {
-      notes.push(
-        "HERO UPLOAD INCOMPLETE: the cover-image control was unavailable. " +
-          "Attach the intended 5:2 image manually.",
-      );
-      return false;
+      return { status: "upload_incomplete" };
     }
     try {
       const [chooser] = await Promise.all([
@@ -1015,8 +1088,7 @@ async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): 
       ]);
       await chooser.setFiles(imagePath);
     } catch {
-      notes.push("HERO UPLOAD INCOMPLETE: the selected cover could not be attached.");
-      return false;
+      return { status: "upload_incomplete" };
     }
   }
 
@@ -1026,13 +1098,9 @@ async function uploadHeroImage(page: Page, imagePath: string, notes: string[]): 
   if (apply) {
     await apply.click();
     await page.waitForTimeout(750);
-  } else {
-    notes.push(
-      "HERO CROP UNVERIFIED: a crop/apply confirmation was not observed. " +
-        "If X shows a cropper, confirm the intended 5:2 crop manually.",
-    );
+    return { status: "attached", crop: "applied" };
   }
-  return true;
+  return { status: "attached", crop: "unverified" };
 }
 
 /** Type into a contenteditable composer box reliably (clear-then-type). */
@@ -1079,11 +1147,22 @@ const productionSaveAsDraftDependencies: SaveAsDraftDependencies = {
 
 export async function saveAsDraft(
   page: Page,
-  verify: () => Promise<boolean>,
+  verify: () => Promise<XDraftRowEvidence>,
   deps: SaveAsDraftDependencies = productionSaveAsDraftDependencies,
-): Promise<XDraftSaveFlowResult<string>> {
+): Promise<
+  | {
+      savePhase: "verified";
+      value: "the close→Save dialog";
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "verified" }>;
+    }
+  | {
+      savePhase: "save_delivered_unverified";
+      value: "the close→Save dialog";
+      draftRowEvidence: Extract<XDraftRowEvidence, { status: "unverified" }>;
+    }
+> {
   let save: Locator | undefined;
-  return runXDraftSaveFlow("composer_close_save", {
+  const flow = await runXDraftSaveFlow("composer_close_save", {
     async beforeSave() {
       const close = await deps.locateClose(page);
       if (!close) throw new Error("Close control unavailable.");
@@ -1102,62 +1181,571 @@ export async function saveAsDraft(
     },
     async afterSave() {
       await deps.settle(page);
+      const evidence = snapshotXDraftRowEvidence(await verify());
+      const usable = evidence?.status === "verified" || evidence?.status === "unverified"
+        ? evidence
+        : unavailableDraftRowEvidence("baseline_unavailable");
       return {
-        verified: await verify(),
-        value: "the close→Save dialog",
+        verified: isPositiveXDraftRowEvidence(usable),
+        value: usable,
       };
     },
   });
+
+  if (flow.savePhase === "verified" && flow.value.status === "verified") {
+    return {
+      savePhase: "verified",
+      value: "the close→Save dialog",
+      draftRowEvidence: flow.value,
+    };
+  }
+  return {
+    savePhase: "save_delivered_unverified",
+    value: "the close→Save dialog",
+    draftRowEvidence: flow.value.status === "unverified"
+      ? flow.value
+      : unavailableDraftRowEvidence("baseline_unavailable"),
+  };
 }
 
 /**
- * Verify a draft was ACTUALLY saved (issue #4).
- *
- * Previously this opened a composer, clicked "Drafts", and matched ANY
- * `div[data-testid="cellInnerDiv"]` — but that selector ALSO matches the home
- * timeline rendered behind the composer modal, so it false-positived.
- *
- * Hardened path (CALIBRATED, issue #4):
- *   - Navigate to the REAL drafts view https://x.com/compose/post/unsent/drafts
- *     (the bare /compose/post/unsent route errors; the /drafts route works).
- *   - Observe the STAGED CONTENT's leading text on that exact drafts surface,
- *     rather than treating the presence of an arbitrary row as persistence.
- *
- * `expectedText` should be the leading text of what we just staged (e.g. the
- * first post / reply body). Verification requires that text to appear. An
- * empty or omitted value cannot identify the intended draft and returns false.
- * A clean negative observation returns false. Navigation/probe errors throw so
- * the save-progress boundary can distinguish a failed reopen from not finding
- * the intended draft.
+ * One opaque pre-Save baseline. The public portion contains only bounded facts;
+ * scoped-row fingerprints remain module-private in the WeakMap below.
  */
-export async function verifyDraftSaved(page: Page, expectedText?: string): Promise<boolean> {
-  await page.goto(X_COMPOSER_SELECTORS.draftsUrl, { waitUntil: "domcontentloaded" });
-  await page.waitForTimeout(1_500);
+export interface XDraftRowBaseline {
+  readonly kind: "x_unsent_drafts_baseline";
+  readonly observation: XDraftRowObservation;
+}
 
-  // CALIBRATED (issue #4): on /compose/post/unsent/drafts the drafts render
-  // inside a dialog OVER the home feed, so div[data-testid="cellInnerDiv"] here
-  // still matches the BACKGROUND TIMELINE — iterating those rows both
-  // false-negatives (misses the real draft) and, on empty content, false-
-  // positives (any timeline row counts). Instead match a short, stable prefix
-  // of the STAGED TEXT against the whole drafts-page text. This does not prove
-  // which row supplied the match; row-scoped identity/collision hardening is
-  // tracked separately. Without staged text we CANNOT verify, so return false
-  // (unconfirmed) rather than trusting an arbitrary row.
-  const needle = normalizeForMatch(expectedText ?? "").slice(0, 40);
-  if (!needle) return false;
+interface DraftRowBaselinePrivate {
+  expectedFingerprint: string | null;
+  rowFingerprints: readonly string[] | null;
+}
 
-  const deadline = Date.now() + 6_000;
-  while (Date.now() < deadline) {
-    // X is an SPA: navigation can drift after the initial route load or while
-    // text is being read. A matching prefix is usable evidence only when the
-    // exact canonical surface holds immediately before and after the await.
-    if (!isExactDraftsRoute(page)) return false;
-    const body = normalizeForMatch((await page.locator("body").innerText()) || "");
-    if (!isExactDraftsRoute(page)) return false;
-    if (body.includes(needle)) return true;
-    await page.waitForTimeout(500);
+const draftRowBaselinePrivate = new WeakMap<XDraftRowBaseline, DraftRowBaselinePrivate>();
+
+type DraftRowsAtomicSnapshot =
+  | { kind: "route_not_exact" }
+  | { kind: "modal_missing" }
+  | { kind: "modal_ambiguous"; visibleModalCount: number | "many" }
+  | { kind: "rows_missing" }
+  | {
+      kind: "rows_unreadable";
+      rows: "content_missing" | "content_ambiguous" | "count_exceeded" | "text_too_large";
+      visibleRowCount: number | "many";
+    }
+  | { kind: "observed"; texts: readonly string[] };
+
+interface DraftRowsProbeResult {
+  observation: XDraftRowObservation;
+  rowFingerprints: readonly string[] | null;
+}
+
+export interface DraftRowProbeDependencies {
+  gotoDrafts(page: Page): Promise<void>;
+  wait(page: Page, milliseconds: number): Promise<void>;
+  /** One atomic, route-bearing DOM snapshot. The raw value is validated once. */
+  snapshot(page: Page): Promise<unknown>;
+}
+
+// Premium's local transport guard is measured in Unicode code points. A valid
+// 25,000-code-point post can occupy twice as many UTF-16 code units when every
+// point is astral, so keep the DOM snapshot bound large enough for that path.
+const DRAFT_ROW_TEXT_LIMIT = X_PREMIUM_POST_PLATFORM_MAX_LENGTH * 2;
+const DRAFT_ROW_RETRY_COUNT = 13;
+
+const productionDraftRowProbeDependencies: DraftRowProbeDependencies = {
+  async gotoDrafts(page) {
+    await page.goto(X_COMPOSER_SELECTORS.draftsUrl, { waitUntil: "domcontentloaded" });
+  },
+  async wait(page, milliseconds) {
+    await page.waitForTimeout(milliseconds);
+  },
+  async snapshot(page) {
+    return page.evaluate((limits) => {
+      const isVisible = (element: Element): boolean => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          rect.width > 0 &&
+          rect.height > 0;
+      };
+      const boundedCount = (value: number): number | "many" =>
+        value > limits.rowLimit ? "many" : value;
+
+      if (location.href !== limits.draftsUrl) return { kind: "route_not_exact" };
+
+      // Live-calibrated 2026-09-03. Generic role=dialog produced two nested
+      // dialogs, while the aria-modal form uniquely owned the Unsent rows.
+      const modals = Array.from(
+        document.querySelectorAll('[role="dialog"][aria-modal="true"]'),
+      ).filter(isVisible);
+      if (modals.length === 0) return { kind: "modal_missing" };
+      if (modals.length !== 1) {
+        return {
+          kind: "modal_ambiguous",
+          visibleModalCount: boundedCount(modals.length),
+        };
+      }
+
+      const rows = Array.from(
+        modals[0].querySelectorAll('[data-testid="unsentTweet"]'),
+      ).filter(isVisible);
+      if (rows.length === 0) return { kind: "rows_missing" };
+      if (rows.length > limits.rowLimit) {
+        return {
+          kind: "rows_unreadable",
+          rows: "count_exceeded",
+          visibleRowCount: "many",
+        };
+      }
+
+      const texts: string[] = [];
+      for (const row of rows) {
+        const content = Array.from(
+          row.querySelectorAll('[data-testid="tweetText"]'),
+        ).filter(isVisible);
+        if (content.length === 0) {
+          return {
+            kind: "rows_unreadable",
+            rows: "content_missing",
+            visibleRowCount: rows.length,
+          };
+        }
+        if (content.length !== 1) {
+          return {
+            kind: "rows_unreadable",
+            rows: "content_ambiguous",
+            visibleRowCount: rows.length,
+          };
+        }
+        const text = (content[0] as HTMLElement).innerText;
+        if (typeof text !== "string" || text.length > limits.textLimit) {
+          return {
+            kind: "rows_unreadable",
+            rows: "text_too_large",
+            visibleRowCount: rows.length,
+          };
+        }
+        texts.push(text);
+      }
+      return { kind: "observed", texts };
+    }, {
+      draftsUrl: X_COMPOSER_SELECTORS.draftsUrl,
+      rowLimit: X_DRAFT_ROW_OBSERVATION_LIMIT,
+      textLimit: DRAFT_ROW_TEXT_LIMIT,
+    });
+  },
+};
+
+function notObservedDraftRows(): XDraftRowObservation {
+  return {
+    outcome: "not_observed",
+    route: "not_observed",
+    modal: "not_observed",
+    rows: "not_observed",
+    visibleModalCount: null,
+    visibleRowCount: null,
+    exactFullTextMatches: null,
+  };
+}
+
+function routeNotExactDraftRows(): XDraftRowObservation {
+  return {
+    outcome: "route_not_exact",
+    route: "not_exact",
+    modal: "not_observed",
+    rows: "not_observed",
+    visibleModalCount: null,
+    visibleRowCount: null,
+    exactFullTextMatches: null,
+  };
+}
+
+function failedDraftRowsProbe(): XDraftRowObservation {
+  return {
+    outcome: "probe_failed",
+    route: "unknown",
+    modal: "not_observed",
+    rows: "not_observed",
+    visibleModalCount: null,
+    visibleRowCount: null,
+    exactFullTextMatches: null,
+  };
+}
+
+function normalizeDraftRowText(value: string): string {
+  return value.replace(/\r\n?/g, "\n").normalize("NFC");
+}
+
+function fingerprintDraftRow(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function snapshotAtomicDraftRows(value: unknown): DraftRowsAtomicSnapshot | null {
+  if (typeof value !== "object" || value === null) return null;
+  try {
+    const source = value as Record<string, unknown>;
+    const kind = source.kind;
+    const visibleModalCount = source.visibleModalCount;
+    const visibleRowCount = source.visibleRowCount;
+    const rows = source.rows;
+    const texts = source.texts;
+    if (kind === "route_not_exact" || kind === "modal_missing" || kind === "rows_missing") {
+      return { kind };
+    }
+    if (kind === "modal_ambiguous") {
+      return (visibleModalCount === "many" ||
+          (Number.isInteger(visibleModalCount) &&
+            (visibleModalCount as number) >= 2 &&
+            (visibleModalCount as number) <= X_DRAFT_ROW_OBSERVATION_LIMIT))
+        ? { kind, visibleModalCount: visibleModalCount as number | "many" }
+        : null;
+    }
+    if (kind === "rows_unreadable") {
+      const rowKind = rows === "content_missing" ||
+        rows === "content_ambiguous" ||
+        rows === "count_exceeded" ||
+        rows === "text_too_large";
+      const countValid = rows === "count_exceeded"
+        ? visibleRowCount === "many"
+        : Number.isInteger(visibleRowCount) &&
+          (visibleRowCount as number) >= 1 &&
+          (visibleRowCount as number) <= X_DRAFT_ROW_OBSERVATION_LIMIT;
+      return rowKind && countValid
+        ? {
+            kind,
+            rows,
+            visibleRowCount: visibleRowCount as number | "many",
+          }
+        : null;
+    }
+    if (kind !== "observed" || !Array.isArray(texts)) return null;
+    if (texts.length < 1 || texts.length > X_DRAFT_ROW_OBSERVATION_LIMIT) return null;
+    const copied: string[] = [];
+    for (const item of texts) {
+      if (typeof item !== "string" || item.length > DRAFT_ROW_TEXT_LIMIT) return null;
+      copied.push(item);
+    }
+    return { kind, texts: copied };
+  } catch {
+    return null;
   }
-  return false;
+}
+
+function observationFromAtomicSnapshot(
+  snapshot: DraftRowsAtomicSnapshot,
+  expected: string,
+): DraftRowsProbeResult {
+  if (snapshot.kind === "route_not_exact") {
+    return { observation: routeNotExactDraftRows(), rowFingerprints: null };
+  }
+  if (snapshot.kind === "modal_missing") {
+    return {
+      observation: {
+        outcome: "modal_missing",
+        route: "exact",
+        modal: "missing",
+        rows: "not_observed",
+        visibleModalCount: 0,
+        visibleRowCount: null,
+        exactFullTextMatches: null,
+      },
+      rowFingerprints: null,
+    };
+  }
+  if (snapshot.kind === "modal_ambiguous") {
+    return {
+      observation: {
+        outcome: "modal_ambiguous",
+        route: "exact",
+        modal: "multiple",
+        rows: "not_observed",
+        visibleModalCount: snapshot.visibleModalCount,
+        visibleRowCount: null,
+        exactFullTextMatches: null,
+      },
+      rowFingerprints: null,
+    };
+  }
+  if (snapshot.kind === "rows_missing") {
+    return {
+      observation: {
+        outcome: "rows_missing",
+        route: "exact",
+        modal: "single_visible",
+        rows: "none",
+        visibleModalCount: 1,
+        visibleRowCount: 0,
+        exactFullTextMatches: 0,
+      },
+      rowFingerprints: null,
+    };
+  }
+  if (snapshot.kind === "rows_unreadable") {
+    return {
+      observation: {
+        outcome: "rows_unreadable",
+        route: "exact",
+        modal: "single_visible",
+        rows: snapshot.rows,
+        visibleModalCount: 1,
+        visibleRowCount: snapshot.visibleRowCount,
+        exactFullTextMatches: null,
+      },
+      rowFingerprints: null,
+    };
+  }
+  const normalized = snapshot.texts.map(normalizeDraftRowText);
+  const exactFullTextMatches = normalized.filter((text) => text === expected).length;
+  return {
+    observation: {
+      outcome: "observed",
+      route: "exact",
+      modal: "single_visible",
+      rows: "all_readable",
+      visibleModalCount: 1,
+      visibleRowCount: normalized.length,
+      exactFullTextMatches,
+    },
+    rowFingerprints: normalized.map(fingerprintDraftRow),
+  };
+}
+
+async function probeDraftRows(
+  page: Page,
+  expected: string,
+  deps: DraftRowProbeDependencies,
+): Promise<DraftRowsProbeResult> {
+  if (!isExactDraftsRoute(page)) {
+    return { observation: routeNotExactDraftRows(), rowFingerprints: null };
+  }
+  try {
+    const raw = await deps.snapshot(page);
+    if (!isExactDraftsRoute(page)) {
+      return { observation: routeNotExactDraftRows(), rowFingerprints: null };
+    }
+    const snapshot = snapshotAtomicDraftRows(raw);
+    return snapshot
+      ? observationFromAtomicSnapshot(snapshot, expected)
+      : { observation: failedDraftRowsProbe(), rowFingerprints: null };
+  } catch {
+    return { observation: failedDraftRowsProbe(), rowFingerprints: null };
+  }
+}
+
+async function openDraftRowsSurface(
+  page: Page,
+  deps: DraftRowProbeDependencies,
+): Promise<XDraftRowObservation | null> {
+  try {
+    await deps.gotoDrafts(page);
+  } catch {
+    return failedDraftRowsProbe();
+  }
+  if (!isExactDraftsRoute(page)) return routeNotExactDraftRows();
+  try {
+    if (!isExactDraftsRoute(page)) return routeNotExactDraftRows();
+    await deps.wait(page, 1_500);
+    if (!isExactDraftsRoute(page)) return routeNotExactDraftRows();
+  } catch {
+    return failedDraftRowsProbe();
+  }
+  return null;
+}
+
+/**
+ * Capture the visible, row-scoped multiset before composing. Any failure is a
+ * closed negative fact and never prevents the later native Save attempt.
+ */
+export async function captureDraftRowBaseline(
+  page: Page,
+  expectedText: string,
+  deps: DraftRowProbeDependencies = productionDraftRowProbeDependencies,
+): Promise<XDraftRowBaseline> {
+  const expected = normalizeDraftRowText(expectedText);
+  let result: DraftRowsProbeResult;
+  if (!expected) {
+    result = { observation: notObservedDraftRows(), rowFingerprints: null };
+  } else {
+    const openFailure = await openDraftRowsSurface(page, deps);
+    result = openFailure
+      ? { observation: openFailure, rowFingerprints: null }
+      : await probeDraftRows(page, expected, deps);
+  }
+  const baseline: XDraftRowBaseline = Object.freeze({
+    kind: "x_unsent_drafts_baseline" as const,
+    observation: Object.freeze({ ...result.observation }),
+  });
+  draftRowBaselinePrivate.set(baseline, {
+    expectedFingerprint: expected ? fingerprintDraftRow(expected) : null,
+    rowFingerprints: result.rowFingerprints ? [...result.rowFingerprints] : null,
+  });
+  return baseline;
+}
+
+function unavailableDraftRowEvidence(
+  contentMatch: XDraftRowEvidenceUnverified["contentMatch"],
+  baseline: XDraftRowObservation = notObservedDraftRows(),
+  postSave: XDraftRowObservation = notObservedDraftRows(),
+): XDraftRowEvidenceUnverified {
+  return {
+    status: "unverified",
+    method: "unsent_row_full_text_delta",
+    contentMatch,
+    nativeRowId: "unavailable",
+    listCompleteness: "visible_scoped_rows_only",
+    baseline,
+    postSave,
+  };
+}
+
+function unavailablePostDraftRowEvidence(
+  baseline: XDraftRowObservation,
+  postSave: XDraftRowObservation,
+): XDraftRowEvidenceUnverified {
+  return unavailableDraftRowEvidence(
+    baseline.outcome === "observed" ? "post_unavailable" : "baseline_unavailable",
+    baseline,
+    postSave,
+  );
+}
+
+function multisetsDifferByExpectedOnly(
+  before: readonly string[],
+  after: readonly string[],
+  expectedFingerprint: string,
+): boolean {
+  if (after.length !== before.length + 1) return false;
+  const counts = new Map<string, number>();
+  for (const value of after) counts.set(value, (counts.get(value) ?? 0) + 1);
+  const expectedCount = counts.get(expectedFingerprint) ?? 0;
+  if (expectedCount !== 1) return false;
+  counts.delete(expectedFingerprint);
+  for (const value of before) {
+    const count = counts.get(value) ?? 0;
+    if (count === 0) return false;
+    if (count === 1) counts.delete(value);
+    else counts.set(value, count - 1);
+  }
+  return counts.size === 0;
+}
+
+function compareDraftRowSnapshots(
+  baseline: XDraftRowBaseline,
+  post: DraftRowsProbeResult,
+  expectedFingerprint: string | null,
+): XDraftRowEvidence {
+  const baselineState = draftRowBaselinePrivate.get(baseline);
+  const baselineObservation = baseline.observation;
+  if (!expectedFingerprint || !baselineState?.expectedFingerprint) {
+    return unavailableDraftRowEvidence("empty_intended", baselineObservation, post.observation);
+  }
+  if (
+    baselineState.expectedFingerprint !== expectedFingerprint ||
+    baselineObservation.outcome !== "observed" ||
+    !baselineState.rowFingerprints
+  ) {
+    return unavailableDraftRowEvidence("baseline_unavailable", baselineObservation, post.observation);
+  }
+  if (post.observation.outcome !== "observed" || !post.rowFingerprints) {
+    return unavailableDraftRowEvidence("post_unavailable", baselineObservation, post.observation);
+  }
+  if (baselineObservation.exactFullTextMatches !== 0) {
+    return unavailableDraftRowEvidence("preexisting_exact", baselineObservation, post.observation);
+  }
+  if (post.observation.exactFullTextMatches === 0) {
+    return unavailableDraftRowEvidence("post_exact_missing", baselineObservation, post.observation);
+  }
+  if (post.observation.exactFullTextMatches !== 1) {
+    return unavailableDraftRowEvidence("post_exact_ambiguous", baselineObservation, post.observation);
+  }
+  if (!multisetsDifferByExpectedOnly(
+    baselineState.rowFingerprints,
+    post.rowFingerprints,
+    expectedFingerprint,
+  )) {
+    return unavailableDraftRowEvidence(
+      "visible_scoped_multiset_changed",
+      baselineObservation,
+      post.observation,
+    );
+  }
+  return {
+    status: "verified",
+    method: "unsent_row_full_text_delta",
+    contentMatch: "visible_scoped_multiset_plus_one",
+    nativeRowId: "unavailable",
+    listCompleteness: "visible_scoped_rows_only",
+    baseline: baselineObservation,
+    postSave: post.observation,
+  };
+}
+
+/**
+ * Verify the calibrated X Unsent row structure after Save. Positive evidence
+ * requires the exact canonical route, one visible aria-modal dialog, readable
+ * visible `unsentTweet` rows with one row-scoped `tweetText` each, one exact
+ * full intended-content match, and a visible multiset equal to the pre-Save
+ * baseline plus that one content value. It does not claim a stable native row
+ * id, complete pagination, reply-target identity, or causality.
+ */
+export async function verifyDraftSaved(
+  page: Page,
+  expectedText: string,
+  baseline: XDraftRowBaseline,
+  deps: DraftRowProbeDependencies = productionDraftRowProbeDependencies,
+): Promise<XDraftRowEvidence> {
+  const expected = normalizeDraftRowText(expectedText);
+  const expectedFingerprint = expected ? fingerprintDraftRow(expected) : null;
+  const openFailure = await openDraftRowsSurface(page, deps);
+  if (openFailure) {
+    return expected
+      ? unavailablePostDraftRowEvidence(baseline.observation, openFailure)
+      : unavailableDraftRowEvidence("empty_intended", baseline.observation, openFailure);
+  }
+
+  let finalPost: DraftRowsProbeResult = {
+    observation: notObservedDraftRows(),
+    rowFingerprints: null,
+  };
+  for (let attempt = 0; attempt < DRAFT_ROW_RETRY_COUNT; attempt += 1) {
+    finalPost = await probeDraftRows(page, expected, deps);
+    const evidence = compareDraftRowSnapshots(baseline, finalPost, expectedFingerprint);
+    if (evidence.status === "verified") return evidence;
+    if (
+      evidence.contentMatch === "empty_intended" ||
+      evidence.contentMatch === "baseline_unavailable" ||
+      evidence.contentMatch === "preexisting_exact" ||
+      finalPost.observation.outcome === "route_not_exact" ||
+      finalPost.observation.outcome === "probe_failed" ||
+      attempt === DRAFT_ROW_RETRY_COUNT - 1
+    ) {
+      return evidence;
+    }
+    try {
+      if (!isExactDraftsRoute(page)) {
+        return unavailablePostDraftRowEvidence(
+          baseline.observation,
+          routeNotExactDraftRows(),
+        );
+      }
+      await deps.wait(page, 500);
+      if (!isExactDraftsRoute(page)) {
+        return unavailablePostDraftRowEvidence(
+          baseline.observation,
+          routeNotExactDraftRows(),
+        );
+      }
+    } catch {
+      return unavailablePostDraftRowEvidence(
+        baseline.observation,
+        failedDraftRowsProbe(),
+      );
+    }
+  }
+  return unavailablePostDraftRowEvidence(baseline.observation, finalPost.observation);
 }
 
 function isExactDraftsRoute(page: Page): boolean {
@@ -1166,9 +1754,4 @@ function isExactDraftsRoute(page: Page): boolean {
   } catch {
     return false;
   }
-}
-
-/** Normalize whitespace/case for tolerant text matching in the drafts list. */
-function normalizeForMatch(s: string): string {
-  return s.replace(/\s+/g, " ").trim().toLowerCase();
 }

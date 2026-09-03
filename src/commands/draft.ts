@@ -10,8 +10,14 @@ import {
 import { isLocalValidationError } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
 import {
+  isXDraftRowEvidenceCompatible,
   isXDraftReturnedSavePhase,
   isXDraftStageError,
+  snapshotXArticleDraftHandoff,
+  snapshotXDraftRowEvidence,
+  X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
+  type XArticleDraftHandoff,
+  type XDraftRowEvidence,
   type XDraftSaveMechanism,
   type XDraftSavePhase,
 } from "../x/saveProgress.js";
@@ -34,7 +40,8 @@ import type { StageDraftOptions, StageDraftResult } from "../x/draftPoster.js";
  *   4. Otherwise: session.getBrowserContext() (the persistent logged-in profile),
  *      open the X composer, type the content (thread: add each post; article: use
  *      the Articles composer), and SAVE AS A NATIVE DRAFT — never Post.
- *   5. Report: draft staged on X (or, with --dry-run, where content was written).
+ *   5. Report the bounded native Save/verification outcome (or, with --dry-run,
+ *      where content was written).
  */
 
 const VALID_FORMATS: readonly XFormat[] = ["tweet", "thread", "article"];
@@ -68,16 +75,12 @@ export interface XDraftRealRunOutcome {
   exitCode: 0 | 1;
   stream: "stdout" | "stderr";
   message: string;
+  draftRowEvidence: XDraftRowEvidence | null;
+  articleHandoff: XArticleDraftHandoff | null;
 }
 
 function nativeDraftLocation(format: GeneratedContent["format"]): string {
   return format === "article" ? "X Articles → Drafts" : "X Unsent/Drafts";
-}
-
-function verificationEvidenceLabel(format: GeneratedContent["format"]): string {
-  return format === "article"
-    ? "by reopening the canonical Article edit URL"
-    : "in X Unsent/Drafts";
 }
 
 function beforeSaveFailure(format: GeneratedContent["format"]): XDraftRealRunOutcome {
@@ -88,6 +91,8 @@ function beforeSaveFailure(format: GeneratedContent["format"]): XDraftRealRunOut
     saveMechanism: format === "article" ? "article_create_autosave" : "composer_close_save",
     exitCode: 1,
     stream: "stderr",
+    draftRowEvidence: null,
+    articleHandoff: null,
     message:
       `\n✗ X ${format} draft staging stopped before the native ${mechanism} action was invoked. NEVER posted.\n` +
       "  No saved-draft outcome is claimed. Verify the local runtime and browser flow before a separate retry.",
@@ -97,6 +102,8 @@ function beforeSaveFailure(format: GeneratedContent["format"]): XDraftRealRunOut
 function uncertainSaveOutcome(
   format: GeneratedContent["format"],
   phase: "save_delivery_unknown" | "save_delivered_unverified",
+  draftRowEvidence: XDraftRowEvidence | null = null,
+  articleHandoff: XArticleDraftHandoff | null = null,
 ): XDraftRealRunOutcome {
   const location = nativeDraftLocation(format);
   const fact = phase === "save_delivery_unknown"
@@ -108,11 +115,62 @@ function uncertainSaveOutcome(
     saveMechanism: format === "article" ? "article_create_autosave" : "composer_close_save",
     exitCode: 1,
     stream: "stderr",
+    draftRowEvidence,
+    articleHandoff,
     message:
       `\n✗ ${fact} for the X ${format} draft. NEVER posted.\n` +
+      (format !== "article" && draftRowEvidence?.status === "unverified"
+        ? "  The calibrated scoped-row evidence did not show one exact full-content visible-multiset addition.\n"
+        : "") +
+      (format === "article" &&
+          phase === "save_delivered_unverified" &&
+          articleHandoff !== null
+        ? `${renderArticleHandoff(articleHandoff)}\n`
+        : "") +
       `  A native draft may exist. Before any retry, compare ${location} manually in the exact CLI-owned profile used by this run.\n` +
       "  Do not retry automatically. Selector calibration and --inspect cannot prove whether the draft persisted.",
   };
+}
+
+function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
+  const count = handoff.codeBlockCount;
+  const countLabel = count === "many" ? `>${X_ARTICLE_CODE_BLOCK_COUNT_LIMIT}` : String(count);
+  const heroAction = handoff.cover.status === "missing"
+    ? "no supported cover selected"
+    : handoff.cover.status === "upload_incomplete"
+      ? "upload action incomplete; attachment unconfirmed"
+      : "upload action returned; attachment and persistence unverified";
+  const lines = [
+    "  Article body input mode=rich_html paste for native conversion; this fact alone does not prove persistence.",
+    `  heroAction=${heroAction}. codeBlockCount=${countLabel}.`,
+  ];
+  if (count === "many" || count > 0) {
+    lines.push(
+      `  ${count === "many" ? `More than ${X_ARTICLE_CODE_BLOCK_COUNT_LIMIT}` : count} code block${count === 1 ? "" : "s"} NOT auto-formatted; the code text was intentionally excluded. Add ${count === 1 ? "it" : "them"} with Insert → Code or as screenshots.`,
+    );
+  }
+  const cover = handoff.cover;
+  if (cover.status === "missing") {
+    lines.push(
+      "  HERO IMAGE MISSING: no supported cover was selected. Add a 5:2 JPG, PNG, or WebP cover and verify it manually.",
+    );
+  } else {
+    if (cover.ratio === "outside_5_2") {
+      lines.push(
+        `  HERO IMAGE RATIO: selected image is ${cover.width}x${cover.height} (ratio ${(cover.width / cover.height).toFixed(3)}). X may require crop/edit; verify it manually.`,
+      );
+    } else if (cover.ratio === "unknown") {
+      lines.push("  HERO IMAGE RATIO UNVERIFIED: image dimensions were unavailable; verify X's crop/edit result manually.");
+    }
+    if (cover.status === "upload_incomplete") {
+      lines.push("  HERO UPLOAD INCOMPLETE: the selected cover could not be confirmed attached. Attach and verify it manually.");
+    } else if (cover.crop === "unverified") {
+      lines.push("  HERO CROP UNVERIFIED: a crop/apply confirmation was not observed. Confirm the intended crop manually.");
+    } else {
+      lines.push("  Hero upload and crop/apply actions returned; cover persistence remains manual-review evidence only.");
+    }
+  }
+  return lines.join("\n");
 }
 
 function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
@@ -121,16 +179,37 @@ function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
     : result.format === "article"
       ? "1 article"
       : "1 tweet";
+  if (result.saveMechanism === "article_create_autosave") {
+    return {
+      kind: "staged",
+      savePhase: "verified",
+      saveMechanism: result.saveMechanism,
+      exitCode: 0,
+      stream: "stdout",
+      draftRowEvidence: result.draftRowEvidence,
+      articleHandoff: result.articleHandoff,
+      message:
+        `\n✓ Staged a NATIVE X draft (${result.format}, ${count}). NEVER posted.\n` +
+        "  persistence verified by reopening the captured canonical Article edit URL: yes\n" +
+        `${renderArticleHandoff(result.articleHandoff)}\n` +
+        "  Review the Article content and cover manually in X Articles → Drafts before publishing.",
+    };
+  }
   return {
     kind: "staged",
     savePhase: "verified",
     saveMechanism: result.saveMechanism,
     exitCode: 0,
     stream: "stdout",
+    draftRowEvidence: result.draftRowEvidence,
+    articleHandoff: null,
     message:
-      `\n✓ Staged a NATIVE X draft (${result.format}, ${count}). NEVER posted.\n` +
-      `  verified ${verificationEvidenceLabel(result.format)}: yes\n` +
-      `  ${result.note}`,
+      `\n✓ Native X Save action returned (${result.format}, ${count}). NEVER posted.\n` +
+      "  scoped-row observation: positive\n" +
+      `  full intended ${result.format === "thread" ? "first thread-row" : "tweet"} text observed in one calibrated X Unsent draft row: yes\n` +
+      "  visible scoped row multiset changed by exactly that one full-text value: yes\n" +
+      "  stable native row id: unavailable; full-list completeness and causality: unproven (visible scoped rows only)\n" +
+      "  Review every saved row manually before posting.",
   };
 }
 
@@ -151,6 +230,8 @@ export async function executeXDraftRealRun(
         : "composer_close_save",
       exitCode: 1,
       stream: "stderr",
+      draftRowEvidence: null,
+      articleHandoff: null,
       message:
         "\n✗ Could not initialize the X draft staging runtime. No native Save/autosave action was invoked. NEVER posted.\n" +
         "  Verify the local installation and runtime dependencies before a separate retry.",
@@ -165,6 +246,8 @@ export async function executeXDraftRealRun(
         : "composer_close_save",
       exitCode: 1,
       stream: "stderr",
+      draftRowEvidence: null,
+      articleHandoff: null,
       message:
         "\n✗ Could not initialize the X draft staging runtime. No native Save/autosave action was invoked. NEVER posted.\n" +
         "  Verify the local installation and runtime dependencies before a separate retry.",
@@ -186,20 +269,30 @@ export async function executeXDraftRealRun(
     const candidate = {
       format: returned.format,
       posts: returned.posts,
-      note: returned.note,
       saveMechanism: returned.saveMechanism,
       savePhase: returned.savePhase,
+      draftRowEvidence: snapshotXDraftRowEvidence(returned.draftRowEvidence),
+      articleHandoff: snapshotXArticleDraftHandoff(
+        (returned as StageDraftResult & { articleHandoff?: unknown }).articleHandoff,
+      ),
     };
     if (
       candidate.format !== input.content.format ||
       candidate.posts !== (input.content.format === "thread"
         ? (input.content.thread?.length ?? 0)
         : 1) ||
-      typeof candidate.note !== "string" ||
       candidate.saveMechanism !== (input.content.format === "article"
         ? "article_create_autosave"
         : "composer_close_save") ||
-      !isXDraftReturnedSavePhase(candidate.savePhase)
+      !isXDraftReturnedSavePhase(candidate.savePhase) ||
+      candidate.draftRowEvidence === null ||
+      (candidate.saveMechanism === "article_create_autosave" &&
+        candidate.articleHandoff === null) ||
+      !isXDraftRowEvidenceCompatible(
+        candidate.saveMechanism,
+        candidate.savePhase,
+        candidate.draftRowEvidence,
+      )
     ) {
       return uncertainSaveOutcome(input.content.format, "save_delivery_unknown");
     }
@@ -223,7 +316,12 @@ export async function executeXDraftRealRun(
 
   return result.savePhase === "verified"
     ? stagedOutcome(result)
-    : uncertainSaveOutcome(result.format, "save_delivered_unverified");
+    : uncertainSaveOutcome(
+        result.format,
+        "save_delivered_unverified",
+        result.draftRowEvidence,
+        result.saveMechanism === "article_create_autosave" ? result.articleHandoff : null,
+      );
 }
 
 const productionXDraftRealRunDependencies: XDraftRealRunDependencies = {
@@ -285,7 +383,10 @@ export function registerDraftCommand(x: Command): void {
         "  Inline --text is always literal and is never interpreted as frontmatter.\n" +
         "\nNative-save outcome:\n" +
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
-        "  Success requires observing a normalized prefix of the intended tweet or first thread post on the exact X Unsent/Drafts route, or matching the Article title and, when present, body prefix.\n" +
+        "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
+        "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or other visible-row changes remain unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
+        "  Article success instead requires matching the title and, when present, body prefix after reopening the captured canonical edit URL.\n" +
+        "  A returned Article outcome reports bounded body-input, excluded-code, and cover selection/upload/ratio/crop action facts whether verified or unverified; those facts do not prove cover attachment or persistence.\n" +
         "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
         "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +
         "  Never retry automatically. --inspect and selector calibration do not prove persistence.\n",
