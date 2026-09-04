@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { executeXDraftRealRun } from "../commands/draft.js";
 import { LocalValidationError } from "../capabilities/validation.js";
 import { splitLeadingFrontmatter } from "../commands/contentInput.js";
@@ -37,6 +40,7 @@ import {
   X_ARTICLE_STAGE_TEXT_MAX_CODE_UNITS,
   xArticleStageCopiedTextCodeUnits,
 } from "./articleStageTextBudget.js";
+import { preloadXArticleCover } from "./articleCover.js";
 
 const TILDE_FENCE = "~".repeat(3);
 const UNSAFE_TERMINAL = /[\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}]/u;
@@ -51,13 +55,32 @@ function firstArticleFlag(content: GeneratedContent): ArticleCodeBlockFlag {
   return flag;
 }
 
-function missingCover(): XArticleDraftHandoff["cover"] {
+const COVER_DIR = mkdtempSync(join(tmpdir(), "publish-x-article-code-cover-"));
+const COVER_PATH = join(COVER_DIR, "cover.png");
+const COVER_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+writeFileSync(COVER_PATH, COVER_BYTES);
+const ARTICLE_COVER = preloadXArticleCover(COVER_PATH);
+test.after(() => rmSync(COVER_DIR, { recursive: true, force: true }));
+
+function verifiedCover(): XArticleDraftHandoff["cover"] {
   return {
-    status: "missing",
-    ratio: "not_observed",
-    width: null,
-    height: null,
-    crop: "not_observed",
+    selection: "explicit",
+    contentType: "image/png",
+    width: ARTICLE_COVER.width,
+    height: ARTICLE_COVER.height,
+    ratio: "exact_5_2",
+    sourceSha256: ARTICLE_COVER.sourceSha256,
+    requested: true,
+    resolved: true,
+    set: true,
+    setPhase: "set_returned",
+    uploaded: null,
+    applyPhase: "returned",
+    observed: true,
+    verified: true,
   };
 }
 
@@ -356,7 +379,7 @@ test("excluded-code link identity rejects a present undefined text key before st
     codeBlockCount: canonicalSnapshot.receiptCodeBlockCount,
     codeAdvisories: canonicalSnapshot.codeAdvisories,
     codeLinkAdvisories: canonicalSnapshot.codeLinkAdvisories,
-    cover: missingCover(),
+    cover: verifiedCover(),
   };
 
   const hostile = structuredClone(content) as GeneratedContent;
@@ -382,7 +405,7 @@ test("excluded-code link identity rejects a present undefined text key before st
 
   let loaderCalls = 0;
   const outcome = await executeXDraftRealRun(
-    { content: hostile },
+    { content: hostile, cover: ARTICLE_COVER },
     {
       async loadStageDraft() {
         loaderCalls += 1;
@@ -558,7 +581,7 @@ test("canonical Article link flags reject extra, omitted, reordered, or changed 
 
   let loaderCalls = 0;
   const outcome = await executeXDraftRealRun(
-    { content: hostile },
+    { content: hostile, cover: ARTICLE_COVER },
     {
       async loadStageDraft() {
         loaderCalls += 1;
@@ -614,7 +637,7 @@ test("verified and returned-unverified receipts reuse frozen code and code-link 
     codeBlockCount: snapshot.receiptCodeBlockCount,
     codeAdvisories: snapshot.codeAdvisories,
     codeLinkAdvisories: snapshot.codeLinkAdvisories,
-    cover: missingCover(),
+    cover: verifiedCover(),
   };
   assert.ok(snapshotXArticleDraftHandoff(handoff));
   for (const phase of ["verified", "save_delivered_unverified"] as const) {
@@ -625,10 +648,11 @@ test("verified and returned-unverified receipts reuse frozen code and code-link 
       savePhase: phase,
       draftRowEvidence: xDraftRowEvidenceNotApplicable(),
       articleHandoff: handoff,
+      nativeReference: "https://x.com/compose/articles/edit/12345",
       note: "ignored",
     };
     const outcome = await executeXDraftRealRun(
-      { content },
+      { content, cover: ARTICLE_COVER },
       { async loadStageDraft() { return async () => returned; } },
     );
     assert.equal(outcome.kind, phase === "verified" ? "staged" : "save_incomplete");
@@ -657,7 +681,7 @@ test("returned Article handoff arrays cannot forge or leak code-derived evidence
     codeBlockCount: snapshot.receiptCodeBlockCount,
     codeAdvisories: snapshot.codeAdvisories,
     codeLinkAdvisories: snapshot.codeLinkAdvisories,
-    cover: missingCover(),
+    cover: verifiedCover(),
   };
   const returned = (articleHandoff: unknown): StageDraftResult => ({
     format: "article",
@@ -670,7 +694,7 @@ test("returned Article handoff arrays cannot forge or leak code-derived evidence
   });
   const expectUnknown = async (articleHandoff: unknown): Promise<void> => {
     const outcome = await executeXDraftRealRun(
-      { content },
+      { content, cover: ARTICLE_COVER },
       { async loadStageDraft() { return async () => returned(articleHandoff); } },
     );
     assert.equal(outcome.kind, "save_incomplete");
@@ -991,7 +1015,7 @@ test("strict advisory and handoff validators reject impossible explicit-fence fa
       codeBlockCount: 1,
       codeAdvisories: [flag],
       codeLinkAdvisories: [],
-      cover: missingCover(),
+      cover: verifiedCover(),
     }), null);
   }
 });

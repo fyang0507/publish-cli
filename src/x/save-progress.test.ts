@@ -17,21 +17,43 @@ import {
   stageArticleCover,
   stageArticleDraft,
   verifyArticleDraftSaved,
+  waitForCanonicalArticleEditUrl,
   type ArticleDraftStageDependencies,
   type SaveAsDraftDependencies,
 } from "./draftPoster.js";
 import { generateContent } from "./content.js";
+import { preloadXArticleCover } from "./articleCover.js";
+import { executeXDraftRealRun } from "../commands/draft.js";
 
 const RAW_CANARY =
   "selector=[data-secret] PRIVATE_PATH_CANARY/operator/secret token=super-secret page=Private composer text";
 
-function missingCover(): XArticleCoverHandoff {
+const COVER_DIR = mkdtempSync(join(tmpdir(), "publish-x-article-save-cover-"));
+const COVER_PATH = join(COVER_DIR, "cover.png");
+const COVER_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+writeFileSync(COVER_PATH, COVER_BYTES);
+const ARTICLE_COVER = preloadXArticleCover(COVER_PATH);
+test.after(() => rmSync(COVER_DIR, { recursive: true, force: true }));
+
+function stagedCover(): XArticleCoverHandoff {
   return {
-    status: "missing",
-    ratio: "not_observed",
-    width: null,
-    height: null,
-    crop: "not_observed",
+    selection: "explicit",
+    contentType: "image/png",
+    width: ARTICLE_COVER.width,
+    height: ARTICLE_COVER.height,
+    ratio: "exact_5_2",
+    sourceSha256: ARTICLE_COVER.sourceSha256,
+    requested: true,
+    resolved: true,
+    set: true,
+    setPhase: "set_returned",
+    uploaded: null,
+    applyPhase: "returned",
+    observed: true,
+    verified: null,
   };
 }
 
@@ -364,6 +386,7 @@ type ArticleFailurePoint =
   | "write_body"
   | "stage_cover"
   | "settle"
+  | "settled_edit_url"
   | "verify";
 
 function articleDependencies(
@@ -372,7 +395,9 @@ function articleDependencies(
     failAt?: ArticleFailurePoint;
     createMissing?: boolean;
     editUrl?: string | null;
+    lateEditUrl?: string | null;
     verified?: boolean;
+    verifyResult?: Readonly<{ content: boolean; cover: boolean }>;
     stageCover?: ArticleDraftStageDependencies["stageCover"];
   } = {},
 ): ArticleDraftStageDependencies {
@@ -398,7 +423,15 @@ function articleDependencies(
       return opts.createMissing ? null : create;
     },
     currentEditUrl() {
-      events.push("edit:url");
+      events.push("edit:url:provisional");
+      return opts.editUrl === undefined
+        ? "https://x.com/compose/articles/edit/12345"
+        : opts.editUrl;
+    },
+    async settledEditUrl() {
+      events.push("edit:url:settled");
+      fail("settled_edit_url");
+      if (opts.lateEditUrl !== undefined) return opts.lateEditUrl;
       return opts.editUrl === undefined
         ? "https://x.com/compose/articles/edit/12345"
         : opts.editUrl;
@@ -421,10 +454,10 @@ function articleDependencies(
       events.push("body:write");
       fail("write_body");
     },
-    async stageCover(page, basePath) {
+    async stageCover(page, cover) {
       events.push("cover:stage");
       fail("stage_cover");
-      return opts.stageCover ? opts.stageCover(page, basePath) : missingCover();
+      return opts.stageCover ? opts.stageCover(page, cover) : stagedCover();
     },
     async settle() {
       events.push("autosave:settle");
@@ -433,7 +466,9 @@ function articleDependencies(
     async verify() {
       events.push("edit:verify");
       fail("verify");
-      return opts.verified ?? true;
+      if (opts.verifyResult) return opts.verifyResult;
+      const verified = opts.verified ?? true;
+      return { content: verified, cover: verified };
     },
   };
 }
@@ -452,7 +487,7 @@ test("Article wiring binds Create to delivery and every later failure to unverif
       {} as never,
       {} as Page,
       generated,
-      undefined,
+      ARTICLE_COVER,
       articleDependencies(events, before),
     ));
     assert.equal(error.savePhase, "save_not_attempted");
@@ -464,7 +499,7 @@ test("Article wiring binds Create to delivery and every later failure to unverif
     {} as never,
     {} as Page,
     generated,
-    undefined,
+    ARTICLE_COVER,
     articleDependencies(clickEvents, { failAt: "create_click" }),
   ));
   assert.equal(clickError.savePhase, "save_delivery_unknown");
@@ -478,19 +513,61 @@ test("Article wiring binds Create to delivery and every later failure to unverif
     "locate_body",
     "write_body",
     "stage_cover",
-    "settle",
-    "verify",
   ] as const) {
     const events: string[] = [];
     const error = await capturedStageError(() => stageArticleDraft(
       {} as never,
       {} as Page,
       generated,
-      undefined,
+      ARTICLE_COVER,
       articleDependencies(events, { failAt }),
     ));
     assert.equal(error.savePhase, "save_delivered_unverified", failAt);
     assert.equal(events.filter((event) => event === "create:click").length, 1);
+  }
+});
+
+test("Article post-cover continuation failures retain the returned handoff and edit reference", async () => {
+  const generated = await generateContent(
+    "# Article title\n\nArticle body for reopen matching.",
+    { format: "article" },
+  );
+  const editUrl = "https://x.com/compose/articles/edit/12345";
+
+  for (const failAt of ["settle", "settled_edit_url", "verify"] as const) {
+    const events: string[] = [];
+    const returnedCover = stagedCover();
+    const outcome = await executeXDraftRealRun(
+      { content: generated, cover: ARTICLE_COVER },
+      {
+        async loadStageDraft() {
+          return async (stageContent, options) => {
+            assert.ok(options.cover);
+            return stageArticleDraft(
+              {} as never,
+              {} as Page,
+              stageContent,
+              options.cover,
+              articleDependencies(events, {
+                failAt,
+                async stageCover() { return returnedCover; },
+              }),
+            );
+          };
+        },
+      },
+    );
+
+    assert.equal(outcome.kind, "save_incomplete", failAt);
+    assert.equal(outcome.savePhase, "save_delivered_unverified", failAt);
+    assert.equal(outcome.exitCode, 1, failAt);
+    assert.equal(outcome.nativeReference, editUrl, failAt);
+    assert.deepEqual(outcome.articleHandoff?.cover, returnedCover, failAt);
+    assert.equal(outcome.articleHandoff?.cover.set, true, failAt);
+    assert.equal(outcome.articleHandoff?.cover.applyPhase, "returned", failAt);
+    assert.equal(outcome.articleHandoff?.cover.observed, true, failAt);
+    assert.equal(outcome.articleHandoff?.cover.verified, null, failAt);
+    assert.equal(events.filter((event) => event === "cover:stage").length, 1, failAt);
   }
 });
 
@@ -504,7 +581,7 @@ test("Article wiring returns unverified for no canonical edit URL or negative re
       {} as never,
       {} as Page,
       generated,
-      undefined,
+      ARTICLE_COVER,
       articleDependencies(events, opts),
     );
     assert.equal(result.saveMechanism, "article_create_autosave");
@@ -512,6 +589,149 @@ test("Article wiring returns unverified for no canonical edit URL or negative re
     assert.equal(events.filter((event) => event === "create:click").length, 1);
     if (opts.editUrl === null) assert.equal(events.includes("edit:verify"), false);
   }
+});
+
+test("Article verification requires one non-conflicting post-settle canonical edit URL", async () => {
+  const generated = await generateContent("# Article title\n\nArticle body for reopen matching.", {
+    format: "article",
+  });
+  const delayedUrl = "https://x.com/compose/articles/edit/67890";
+  const delayedEvents: string[] = [];
+  const delayed = await stageArticleDraft(
+    {} as never,
+    {} as Page,
+    generated,
+    ARTICLE_COVER,
+    articleDependencies(delayedEvents, { editUrl: null, lateEditUrl: delayedUrl }),
+  );
+  assert.equal(delayed.savePhase, "verified");
+  if (delayed.saveMechanism !== "article_create_autosave") {
+    assert.fail("expected an Article result");
+  }
+  assert.equal(delayed.nativeReference, delayedUrl);
+  assert.equal(delayed.articleHandoff.cover.verified, true);
+  assert.deepEqual(
+    delayedEvents.filter((event) => event.startsWith("edit:url") || event === "edit:verify"),
+    ["edit:url:provisional", "edit:url:settled", "edit:verify"],
+  );
+
+  for (const fixture of [
+    {
+      name: "conflicting positive samples",
+      editUrl: "https://x.com/compose/articles/edit/12345",
+      lateEditUrl: "https://x.com/compose/articles/edit/67890",
+    },
+    {
+      name: "invalid late sample",
+      editUrl: "https://x.com/compose/articles/edit/12345",
+      lateEditUrl: "https://x.com/compose/articles/edit/12345?source=untrusted",
+    },
+    {
+      name: "missing late sample",
+      editUrl: "https://x.com/compose/articles/edit/12345",
+      lateEditUrl: null,
+    },
+  ]) {
+    const events: string[] = [];
+    const result = await stageArticleDraft(
+      {} as never,
+      {} as Page,
+      generated,
+      ARTICLE_COVER,
+      articleDependencies(events, fixture),
+    );
+    assert.equal(result.savePhase, "save_delivered_unverified", fixture.name);
+    if (result.saveMechanism !== "article_create_autosave") {
+      assert.fail("expected an Article result");
+    }
+    assert.equal(result.nativeReference, undefined, fixture.name);
+    assert.equal(result.articleHandoff.cover.verified, null, fixture.name);
+    assert.equal(events.includes("edit:verify"), false, fixture.name);
+    assert.equal(events.filter((event) => event === "edit:url:provisional").length, 1);
+    assert.equal(events.filter((event) => event === "edit:url:settled").length, 1);
+  }
+});
+
+test("Article verification repairs only a transient early cover observation miss", async () => {
+  const generated = await generateContent(
+    "# Article title\n\nArticle body for reopen matching.",
+    { format: "article" },
+  );
+
+  for (const coverVerified of [true, false]) {
+    const events: string[] = [];
+    const earlyUnobservedCover: XArticleCoverHandoff = {
+      ...stagedCover(),
+      set: true,
+      setPhase: "set_returned",
+      applyPhase: "returned",
+      observed: false,
+      verified: null,
+    };
+    const result = await stageArticleDraft(
+      {} as never,
+      {} as Page,
+      generated,
+      ARTICLE_COVER,
+      articleDependencies(events, {
+        async stageCover() {
+          return earlyUnobservedCover;
+        },
+        verifyResult: { content: true, cover: coverVerified },
+      }),
+    );
+
+    assert.equal(
+      result.savePhase,
+      coverVerified ? "verified" : "save_delivered_unverified",
+    );
+    if (result.saveMechanism !== "article_create_autosave") {
+      assert.fail("expected an Article result");
+    }
+    assert.equal(result.articleHandoff.cover.set, true);
+    assert.equal(result.articleHandoff.cover.applyPhase, "returned");
+    assert.equal(result.articleHandoff.cover.observed, coverVerified);
+    assert.equal(result.articleHandoff.cover.verified, coverVerified);
+    assert.equal(events.filter((event) => event === "edit:verify").length, 1);
+  }
+});
+
+test("post-settle canonical URL capture accepts a delayed route and has a fixed poll bound", async () => {
+  let delayedReads = 0;
+  const delayedWaits: number[] = [];
+  const delayedPage = {
+    url() {
+      delayedReads += 1;
+      return delayedReads === 1
+        ? "https://x.com/compose/articles"
+        : "https://x.com/compose/articles/edit/24680";
+    },
+    async waitForTimeout(milliseconds: number) {
+      delayedWaits.push(milliseconds);
+    },
+  } as unknown as Page;
+  assert.equal(
+    await waitForCanonicalArticleEditUrl(delayedPage),
+    "https://x.com/compose/articles/edit/24680",
+  );
+  assert.equal(delayedReads, 2);
+  assert.deepEqual(delayedWaits, [125]);
+
+  let invalidReads = 0;
+  const invalidWaits: number[] = [];
+  const invalidPage = {
+    url() {
+      invalidReads += 1;
+      return "https://x.com/compose/articles/edit/24680#not-exact";
+    },
+    async waitForTimeout(milliseconds: number) {
+      invalidWaits.push(milliseconds);
+    },
+  } as unknown as Page;
+  assert.equal(await waitForCanonicalArticleEditUrl(invalidPage), null);
+  assert.equal(invalidReads, 21);
+  assert.equal(invalidWaits.length, 20);
+  assert.ok(invalidWaits.every((milliseconds) => milliseconds === 125));
 });
 
 function articleVerifierPage(options: {
@@ -530,12 +750,14 @@ function articleVerifierPage(options: {
     },
     async waitForTimeout() {},
     locator(selector: string) {
-      const value = selector.includes("twitter-article-title")
+      const value = selector.includes("textarea")
         ? options.title
         : options.body;
       const locator = {
-        first() { return locator; },
-        async waitFor() {},
+        async count() { return 1; },
+        nth() { return locator; },
+        async isVisible() { return true; },
+        async isEnabled() { return true; },
         async inputValue() { return value; },
         async innerText() { return value; },
       };
@@ -549,7 +771,7 @@ type ArticleRouteDriftPoint =
   | "body_locator"
   | "title_read"
   | "body_read"
-  | "body_fallback_read";
+  | "title_input_error";
 
 function articleRouteDriftPage(driftAt: ArticleRouteDriftPoint): Page {
   const editUrl = "https://x.com/compose/articles/edit/12345";
@@ -559,28 +781,29 @@ function articleRouteDriftPage(driftAt: ArticleRouteDriftPoint): Page {
     url() { return currentUrl; },
     async waitForTimeout() {},
     locator(selector: string) {
-      const kind = selector.includes("title") ? "title" : "body";
+      const kind = selector.includes("textarea") ? "title" : "body";
       const value = kind === "title"
         ? "Article title"
         : "Body prefix followed by intended text";
       const locator = {
-        first() { return locator; },
-        async waitFor() {
+        async count() {
           if (driftAt === `${kind}_locator`) {
             currentUrl = "https://x.com/compose/articles/edit/99999";
           }
+          return 1;
         },
+        nth() { return locator; },
+        async isVisible() { return true; },
+        async isEnabled() { return true; },
         async inputValue() {
-          if (driftAt === "body_fallback_read" && kind === "body") {
-            throw new Error("contenteditable has no input value");
+          if (driftAt === "title_input_error" && kind === "title") {
+            throw new Error("title input unreadable");
           }
           if (driftAt === `${kind}_read`) currentUrl = "https://x.com/home";
           return value;
         },
         async innerText() {
-          if (driftAt === "body_fallback_read" && kind === "body") {
-            currentUrl = "https://x.com/login";
-          }
+          if (driftAt === `${kind}_read`) currentUrl = "https://x.com/home";
           return value;
         },
       };
@@ -589,35 +812,55 @@ function articleRouteDriftPage(driftAt: ArticleRouteDriftPoint): Page {
   } as unknown as Page;
 }
 
-test("Article verifier requires the same canonical edit URL and exact title/body prefix", async () => {
+test("Article verifier requires the same canonical edit URL and exact normalized full body", async () => {
   const editUrl = "https://x.com/compose/articles/edit/12345";
+  const expectedBody =
+    "Body prefix followed by intended text. The intended ending is alpha.";
   assert.equal(await verifyArticleDraftSaved(
-    articleVerifierPage({ title: " Article Title ", body: "Body prefix followed by intended text plus persisted suffix" }),
+    articleVerifierPage({
+      title: " Article Title ",
+      body: " BODY  prefix followed\nby intended TEXT. The intended ending is ALPHA. ",
+    }),
     editUrl,
     "Article title",
-    "Body prefix followed by intended text",
+    expectedBody,
   ), true);
+  for (const [name, body] of [
+    [
+      "same prefix but different tail",
+      "Body prefix followed by intended text. The persisted ending is beta.",
+    ],
+    ["truncated body", "Body prefix followed by intended text."],
+    ["unexpected extra tail", `${expectedBody} Unexpected persisted tail.`],
+  ] as const) {
+    assert.equal(await verifyArticleDraftSaved(
+      articleVerifierPage({ title: "Article title", body }),
+      editUrl,
+      "Article title",
+      expectedBody,
+    ), false, name);
+  }
   assert.equal(await verifyArticleDraftSaved(
     articleVerifierPage({
       currentUrl: "https://x.com/compose/articles/edit/99999",
       title: "Article title",
-      body: "Body prefix followed by intended text",
+      body: expectedBody,
     }),
     editUrl,
     "Article title",
-    "Body prefix followed by intended text",
+    expectedBody,
   ), false);
   assert.equal(await verifyArticleDraftSaved(
     articleVerifierPage({ title: "Article title", body: "Different persisted body" }),
     editUrl,
     "Article title",
-    "Body prefix followed by intended text",
+    expectedBody,
   ), false);
   assert.equal(await verifyArticleDraftSaved(
-    articleVerifierPage({ currentUrl: "not a URL", title: "Article title", body: "Body prefix followed by intended text" }),
+    articleVerifierPage({ currentUrl: "not a URL", title: "Article title", body: expectedBody }),
     editUrl,
     "Article title",
-    "Body prefix followed by intended text",
+    expectedBody,
   ), false);
   assert.equal(await verifyArticleDraftSaved(
     articleVerifierPage({ title: "Article title", body: "" }),
@@ -634,7 +877,7 @@ test("Article verifier gates the captured edit URL around every locator and text
     "body_locator",
     "title_read",
     "body_read",
-    "body_fallback_read",
+    "title_input_error",
   ] as const) {
     assert.equal(await verifyArticleDraftSaved(
       articleRouteDriftPage(driftAt),
@@ -645,34 +888,47 @@ test("Article verifier gates the captured edit URL around every locator and text
   }
 });
 
-test("verified Article output stays bounded when a cover upload fails", async () => {
+test("unknown Article cover delivery keeps output unverified and bounded", async () => {
   const dir = mkdtempSync(join(tmpdir(), "publish-x-article-private-canary-"));
   try {
     const basePath = join(dir, "private-source.md");
     const coverPath = join(dir, "private-cover.png");
     writeFileSync(basePath, "# Article\n\nBody\n");
-    const png = Buffer.alloc(24);
-    png.writeUInt32BE(0x89504e47, 0);
-    png.writeUInt32BE(1500, 16);
-    png.writeUInt32BE(600, 20);
-    writeFileSync(coverPath, png);
+    writeFileSync(coverPath, COVER_BYTES);
+    const privateCover = preloadXArticleCover(coverPath);
 
-    const coverPage = {
-      locator() {
-        const locator = {
-          first() { return locator; },
-          async waitFor() {},
-          async setInputFiles() { throw new Error(RAW_CANARY); },
+    const rejectingInput = {
+      async setInputFiles() { throw new Error(RAW_CANARY); },
+    };
+    const coverDeps = {
+      async resolveTarget() {
+        return {
+          input: rejectingInput as never,
+          editUrl: "https://x.com/compose/articles/edit/12345",
         };
-        return locator;
       },
-    } as unknown as Page;
-    assert.deepEqual(await stageArticleCover(coverPage, basePath), {
-      status: "upload_incomplete",
-      ratio: "within_5_2",
-      width: 1500,
-      height: 600,
-      crop: "not_observed",
+      async targetStillCalibrated() { return true; },
+      async activeDialogCount() { return 0; },
+      async locateApply() { return assert.fail("apply is not reached after unknown delivery"); },
+      async settleAfterSet() { return assert.fail("set did not return"); },
+      async settleAfterApply() { return assert.fail("apply was not reached"); },
+      async observeCover() { return { status: "none" as const }; },
+    };
+    assert.deepEqual(await stageArticleCover({} as Page, privateCover, coverDeps), {
+      selection: "explicit",
+      contentType: "image/png",
+      width: privateCover.width,
+      height: privateCover.height,
+      ratio: "exact_5_2",
+      sourceSha256: privateCover.sourceSha256,
+      requested: true,
+      resolved: true,
+      set: null,
+      setPhase: "set_delivery_unknown",
+      uploaded: null,
+      applyPhase: "not_reached",
+      observed: false,
+      verified: null,
     });
 
     const generated = await generateContent(
@@ -684,25 +940,34 @@ test("verified Article output stays bounded when a cover upload fails", async ()
       {} as never,
       {} as Page,
       generated,
-      basePath,
+      privateCover,
       articleDependencies(events, {
         verified: true,
-        async stageCover(_page, sourcePath) {
-          return stageArticleCover(coverPage, sourcePath);
+        async stageCover(_page, cover) {
+          return stageArticleCover({} as Page, cover, coverDeps);
         },
       }),
     );
-    assert.equal(result.savePhase, "verified");
+    assert.equal(result.savePhase, "save_delivered_unverified");
     if (result.saveMechanism !== "article_create_autosave") {
       assert.fail("expected an Article result");
     }
     assert.equal(result.articleHandoff.codeBlockCount, 1);
     assert.deepEqual(result.articleHandoff.cover, {
-      status: "upload_incomplete",
-      ratio: "within_5_2",
-      width: 1500,
-      height: 600,
-      crop: "not_observed",
+      selection: "explicit",
+      contentType: "image/png",
+      width: privateCover.width,
+      height: privateCover.height,
+      ratio: "exact_5_2",
+      sourceSha256: privateCover.sourceSha256,
+      requested: true,
+      resolved: true,
+      set: null,
+      setPhase: "set_delivery_unknown",
+      uploaded: null,
+      applyPhase: "not_reached",
+      observed: false,
+      verified: false,
     });
     assert.doesNotMatch(JSON.stringify(result.articleHandoff), /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer|private-cover|publish-x-article-private/);
   } finally {

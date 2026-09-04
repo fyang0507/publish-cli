@@ -1,11 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   executeXDraftRealRun,
   type XDraftRealRunDependencies,
+  type XDraftRealRunInput,
 } from "./draft.js";
 import { generateContent, type GeneratedContent, type XFormat } from "../x/content.js";
 import { snapshotXArticleStageInput } from "../x/articleStageSnapshot.js";
+import { preloadXArticleCover } from "../x/articleCover.js";
 import type { StageDraftResult } from "../x/draftPoster.js";
 import {
   isXDraftStageError,
@@ -18,6 +23,38 @@ import {
 
 const RAW_CANARY =
   "selector=[data-secret] PRIVATE_PATH_CANARY/operator/secret cookie=session-secret page=Private composer text";
+
+const COVER_DIR = mkdtempSync(join(tmpdir(), "publish-x-draft-lifecycle-cover-"));
+const COVER_PATH = join(COVER_DIR, "cover.png");
+const COVER_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+writeFileSync(COVER_PATH, COVER_BYTES);
+const ARTICLE_COVER = preloadXArticleCover(COVER_PATH);
+test.after(() => rmSync(COVER_DIR, { recursive: true, force: true }));
+
+function verifiedCover(
+  overrides: Partial<XArticleDraftHandoff["cover"]> = {},
+): XArticleDraftHandoff["cover"] {
+  return {
+    selection: "explicit",
+    contentType: ARTICLE_COVER.contentType,
+    width: ARTICLE_COVER.width,
+    height: ARTICLE_COVER.height,
+    ratio: "exact_5_2",
+    sourceSha256: ARTICLE_COVER.sourceSha256,
+    requested: true,
+    resolved: true,
+    set: true,
+    setPhase: "set_returned",
+    uploaded: null,
+    applyPhase: "returned",
+    observed: true,
+    verified: true,
+    ...overrides,
+  };
+}
 
 function mechanism(format: XFormat): XDraftSaveMechanism {
   return format === "article" ? "article_create_autosave" : "composer_close_save";
@@ -59,13 +96,7 @@ function composerEvidence(verified: boolean): XDraftRowEvidence {
 }
 
 function articleHandoff(
-  cover: XArticleDraftHandoff["cover"] = {
-    status: "missing",
-    ratio: "not_observed",
-    width: null,
-    height: null,
-    crop: "not_observed",
-  },
+  cover: XArticleDraftHandoff["cover"] = verifiedCover(),
   codeBlockCount: number | "many" = 0,
 ): XArticleDraftHandoff {
   return {
@@ -98,6 +129,15 @@ async function content(format: XFormat): Promise<GeneratedContent> {
   );
 }
 
+function runInput(
+  generated: GeneratedContent,
+  extras: Omit<XDraftRealRunInput, "content" | "cover"> = {},
+): XDraftRealRunInput {
+  return generated.format === "article"
+    ? { content: generated, ...extras, cover: ARTICLE_COVER }
+    : { content: generated, ...extras };
+}
+
 function stageResult(
   generated: GeneratedContent,
   savePhase: "save_delivered_unverified" | "verified",
@@ -113,7 +153,12 @@ function stageResult(
     savePhase,
     note: "Bounded verified draft note.",
     draftRowEvidence,
-    ...(generated.format === "article" ? { articleHandoff: articleHandoffFor(generated) } : {}),
+    ...(generated.format === "article"
+      ? {
+          articleHandoff: articleHandoffFor(generated),
+          nativeReference: "https://x.com/compose/articles/edit/12345",
+        }
+      : {}),
     ...overrides,
   } as StageDraftResult;
 }
@@ -133,12 +178,16 @@ test("tweet, thread, and Article commands expose each typed save phase without r
       "save_delivered_unverified",
     ] as const) {
       const outcome = await executeXDraftRealRun(
-        { content: generated, inspect: true, basePath: "PRIVATE_PATH_CANARY/operator/source.md" },
+        runInput(generated, {
+          inspect: true,
+          ...(format === "article"
+            ? {}
+            : { basePath: "PRIVATE_PATH_CANARY/operator/source.md" }),
+        }),
         dependencies(async () => async (_content, opts) => {
-          assert.deepEqual(opts, {
-            inspect: true,
-            basePath: "PRIVATE_PATH_CANARY/operator/source.md",
-          });
+          assert.deepEqual(opts, format === "article"
+            ? { inspect: true, cover: ARTICLE_COVER }
+            : { inspect: true, basePath: "PRIVATE_PATH_CANARY/operator/source.md" });
           const error = new XDraftStageError(phase, mechanism(format));
           Object.defineProperty(error, "cause", { value: new Error(RAW_CANARY) });
           throw error;
@@ -225,7 +274,7 @@ test("runtime, untyped, wrong-mechanism, and malformed results default safely", 
   ];
 
   for (const fixture of cases) {
-    const outcome = await executeXDraftRealRun({ content: generated }, fixture.deps);
+    const outcome = await executeXDraftRealRun(runInput(generated), fixture.deps);
     assert.equal(outcome.savePhase, fixture.phase, fixture.name);
     assert.equal(outcome.exitCode, 1);
     assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
@@ -325,7 +374,7 @@ test("resolved unverified results never print poster notes; verified is the only
   for (const format of ["tweet", "thread", "article"] as const) {
     const generated = await content(format);
     const unverified = await executeXDraftRealRun(
-      { content: generated },
+      runInput(generated),
       dependencies(async () => async () => stageResult(
         generated,
         "save_delivered_unverified",
@@ -342,13 +391,13 @@ test("resolved unverified results never print poster notes; verified is the only
     assert.equal(unverified.exitCode, 1);
     assert.match(unverified.message, /persistence was not verified/i);
     if (format === "article") {
-      assert.match(unverified.message, /heroAction=no supported cover selected.*codeBlockCount=0/s);
-      assert.match(unverified.message, /HERO IMAGE MISSING/);
+      assert.match(unverified.message, /heroAction=exact preloaded cover observed after canonical draft reopen.*codeBlockCount=0/s);
+      assert.match(unverified.message, /Cover evidence: requested=yes; resolved=yes; set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/);
     }
     assert.doesNotMatch(unverified.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
 
     const verified = await executeXDraftRealRun(
-      { content: generated },
+      runInput(generated),
       dependencies(async () => async () => stageResult(
         generated,
         "verified",
@@ -381,8 +430,8 @@ test("resolved unverified results never print poster notes; verified is the only
       assert.doesNotMatch(verified.message, /Staged a NATIVE X draft/);
       assert.match(verified.message, /full-list completeness and causality: unproven/);
     } else {
-      assert.match(verified.message, /heroAction=no supported cover selected.*codeBlockCount=0/s);
-      assert.match(verified.message, /HERO IMAGE MISSING/);
+      assert.match(verified.message, /heroAction=exact preloaded cover observed after canonical draft reopen.*codeBlockCount=0/s);
+      assert.match(verified.message, /Cover evidence: requested=yes; resolved=yes; set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/);
     }
     assert.doesNotMatch(verified.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
   }
@@ -396,51 +445,43 @@ test("verified and returned-unverified Article receipts preserve only closed han
   }> = [
     {
       codeBlockCount: 1,
-      expected: [/heroAction=no supported cover selected/, /codeBlockCount=1/, /1 code block NOT auto-formatted/, /HERO IMAGE MISSING/],
+      expected: [/heroAction=exact preloaded cover observed after canonical draft reopen/, /codeBlockCount=1/, /1 code block NOT auto-formatted/, /verified=yes/],
     },
     {
       codeBlockCount: 2,
-      cover: {
-        status: "upload_incomplete",
-        ratio: "outside_5_2",
-        width: 1200,
-        height: 600,
-        crop: "not_observed",
-      },
-      expected: [/heroAction=upload action incomplete; attachment unconfirmed/, /codeBlockCount=2/, /2 code blocks NOT auto-formatted/, /HERO IMAGE RATIO/, /HERO UPLOAD INCOMPLETE/],
+      cover: verifiedCover({
+        set: false,
+        setPhase: "target_unavailable",
+        applyPhase: "not_reached",
+        observed: false,
+        verified: false,
+      }),
+      expected: [/heroAction=exact preloaded cover not set \(target_unavailable\)/, /codeBlockCount=2/, /2 code blocks NOT auto-formatted/, /set=no/, /HERO PERSISTENCE UNVERIFIED/],
     },
     {
       codeBlockCount: 0,
-      cover: {
-        status: "upload_incomplete",
-        ratio: "unknown",
-        width: null,
-        height: null,
-        crop: "not_observed",
-      },
-      expected: [/heroAction=upload action incomplete; attachment unconfirmed/, /HERO IMAGE RATIO UNVERIFIED/, /HERO UPLOAD INCOMPLETE/],
+      cover: verifiedCover({
+        set: null,
+        setPhase: "set_delivery_unknown",
+        applyPhase: "not_reached",
+        observed: false,
+        verified: null,
+      }),
+      expected: [/heroAction=exact preloaded cover delivery unknown/, /set=unknown/, /apply=not_reached/, /HERO PERSISTENCE UNVERIFIED/],
     },
     {
       codeBlockCount: 0,
-      cover: {
-        status: "attached",
-        ratio: "within_5_2",
-        width: 1500,
-        height: 600,
-        crop: "unverified",
-      },
-      expected: [/heroAction=upload action returned; attachment and persistence unverified/, /codeBlockCount=0/, /HERO CROP UNVERIFIED/],
+      cover: verifiedCover({
+        applyPhase: "not_observed",
+        observed: true,
+        verified: false,
+      }),
+      expected: [/heroAction=exact preloaded cover set; persistence not verified/, /codeBlockCount=0/, /observed=yes; verified=no; apply=not_observed/, /HERO PERSISTENCE UNVERIFIED/],
     },
     {
       codeBlockCount: 0,
-      cover: {
-        status: "attached",
-        ratio: "within_5_2",
-        width: 1500,
-        height: 600,
-        crop: "applied",
-      },
-      expected: [/heroAction=upload action returned; attachment and persistence unverified/, /Hero upload and crop\/apply actions returned/, /cover persistence remains manual-review evidence only/],
+      cover: verifiedCover(),
+      expected: [/heroAction=exact preloaded cover observed after canonical draft reopen/, /explicit image\/png; 5x2; exact 5:2/, /set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/],
     },
   ];
   for (const fixture of cases) {
@@ -453,9 +494,12 @@ test("verified and returned-unverified Article receipts preserve only closed han
       { format: "article" },
     );
     const handoff = articleHandoffFor(fixtureGenerated, fixture.cover);
-    for (const phase of ["verified", "save_delivered_unverified"] as const) {
+    const phases = handoff.cover.verified === true
+      ? (["verified", "save_delivered_unverified"] as const)
+      : (["save_delivered_unverified"] as const);
+    for (const phase of phases) {
       const outcome = await executeXDraftRealRun(
-        { content: fixtureGenerated },
+        runInput(fixtureGenerated),
         dependencies(async () => async () => stageResult(fixtureGenerated, phase, {
           articleHandoff: handoff,
           note: RAW_CANARY,
@@ -464,6 +508,10 @@ test("verified and returned-unverified Article receipts preserve only closed han
       assert.equal(outcome.kind, phase === "verified" ? "staged" : "save_incomplete");
       assert.equal(outcome.exitCode, phase === "verified" ? 0 : 1);
       assert.deepEqual(outcome.articleHandoff, handoff);
+      assert.equal(
+        outcome.nativeReference,
+        "https://x.com/compose/articles/edit/12345",
+      );
       for (const pattern of fixture.expected) assert.match(outcome.message, pattern);
       if (fixture.codeBlockCount > 0) {
         assert.match(outcome.message, /LF-normalized exact fence source sha256=[a-f0-9]{64}/);
@@ -473,10 +521,31 @@ test("verified and returned-unverified Article receipts preserve only closed han
         assert.match(outcome.message, /native Save\/autosave action returned, but persistence was not verified/i);
         assert.match(outcome.message, /compare X Articles → Drafts manually in the exact CLI-owned profile/);
       }
-      assert.doesNotMatch(outcome.message, /hero=attached|cover (?:was )?attached|cover persistence (?:was )?verified/i);
+      assert.doesNotMatch(outcome.message, /hero=attached|cover (?:was )?attached/i);
       assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
     }
   }
+});
+
+test("a verified Article result without a canonical native reference cannot exit zero", async () => {
+  const generated = await content("article");
+  const hostile = {
+    ...stageResult(generated, "verified"),
+    nativeReference: null,
+  } as unknown as StageDraftResult;
+  const outcome = await executeXDraftRealRun(
+    runInput(generated),
+    dependencies(async () => async () => hostile),
+  );
+
+  assert.equal(outcome.kind, "save_incomplete");
+  assert.equal(outcome.savePhase, "save_delivery_unknown");
+  assert.equal(outcome.saveMechanism, "article_create_autosave");
+  assert.equal(outcome.exitCode, 1);
+  assert.equal(outcome.stream, "stderr");
+  assert.equal(outcome.nativeReference, null);
+  assert.equal(outcome.articleHandoff, null);
+  assert.doesNotMatch(outcome.message, /persistence verified.*yes/i);
 });
 
 test("malformed and stateful Article handoff facts cannot leak or change after validation", async () => {
@@ -488,11 +557,8 @@ test("malformed and stateful Article handoff facts cannot leak or change after v
       body: "rich_html",
       codeBlockCount: 0,
       cover: {
-        status: "upload_incomplete",
+        ...verifiedCover(),
         ratio: "outside_5_2",
-        width: 1500,
-        height: 600,
-        crop: "not_observed",
       },
     },
     Object.defineProperty({}, "body", {
@@ -502,7 +568,7 @@ test("malformed and stateful Article handoff facts cannot leak or change after v
   for (const value of malformed) {
     for (const phase of ["verified", "save_delivered_unverified"] as const) {
       const outcome = await executeXDraftRealRun(
-        { content: generated },
+        runInput(generated),
         dependencies(async () => async () => stageResult(generated, phase, {
           articleHandoff: value as never,
           note: RAW_CANARY,
@@ -515,28 +581,25 @@ test("malformed and stateful Article handoff facts cannot leak or change after v
   }
 
   for (const phase of ["verified", "save_delivered_unverified"] as const) {
-    let statusReads = 0;
+    let setPhaseReads = 0;
     const cover = {
-      ratio: "within_5_2",
-      width: 1500,
-      height: 600,
-      crop: "not_observed",
+      ...verifiedCover(),
     } as Record<string, unknown>;
-    Object.defineProperty(cover, "status", {
+    Object.defineProperty(cover, "setPhase", {
       get() {
-        statusReads += 1;
-        return statusReads === 1 ? "upload_incomplete" : "attached";
+        setPhaseReads += 1;
+        return setPhaseReads === 1 ? "set_returned" : "target_unavailable";
       },
     });
     const baseHandoff = articleHandoffFor(generated);
     const outcome = await executeXDraftRealRun(
-      { content: generated },
+      runInput(generated),
       dependencies(async () => async () => stageResult(generated, phase, {
         articleHandoff: { ...baseHandoff, cover } as never,
         note: RAW_CANARY,
       })),
     );
-    assert.equal(statusReads, 0);
+    assert.equal(setPhaseReads, 0);
     assert.equal(outcome.kind, "save_incomplete");
     assert.equal(outcome.savePhase, "save_delivery_unknown");
     assert.equal(outcome.exitCode, 1);
@@ -602,7 +665,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
         },
       }) as StageDraftResult;
       const topLevelOutcome = await executeXDraftRealRun(
-        { content: generated },
+        runInput(generated),
         dependencies(async () => async () => topLevel),
       );
       assert.equal(topLevelReads, format === "article" ? 1 : 0);
@@ -624,7 +687,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
         },
       });
       const nestedOutcome = await executeXDraftRealRun(
-        { content: generated },
+        runInput(generated),
         dependencies(async () => async () => nested),
       );
       assert.equal(nestedReads, 0);

@@ -275,15 +275,15 @@ test("large JSON and human receipts fully drain before an immediate process exit
 const RAW_ARTICLE_RECEIPT_CONTENT =
   "RAW_ARTICLE_CALLER_CONTENT_[data-secret]_PRIVATE_PATH_CANARY_session-secret";
 
-const MISSING_ARTICLE_COVER = Object.freeze({
+const VERIFIED_ARTICLE_COVER = Object.freeze({
   index: 0,
   role: "cover" as const,
-  requested: false,
-  resolved: false,
-  set: false,
-  uploaded: false,
-  observed: false,
-  verified: false,
+  requested: true,
+  resolved: true,
+  set: true,
+  uploaded: null,
+  observed: true,
+  verified: true,
   remoteReference: null,
 });
 
@@ -311,11 +311,20 @@ const ARTICLE_RECEIPT_HANDOFF: XArticleDraftHandoff = Object.freeze({
   }]),
   codeLinkAdvisories: Object.freeze([]),
   cover: Object.freeze({
-    status: "missing" as const,
-    ratio: "not_observed" as const,
-    width: null,
-    height: null,
-    crop: "not_observed" as const,
+    selection: "explicit" as const,
+    contentType: "image/png" as const,
+    width: 1500,
+    height: 600,
+    ratio: "exact_5_2" as const,
+    sourceSha256: "b".repeat(64),
+    requested: true as const,
+    resolved: true as const,
+    set: true,
+    setPhase: "set_returned" as const,
+    uploaded: null,
+    applyPhase: "returned" as const,
+    observed: true,
+    verified: true,
   }),
 });
 
@@ -337,54 +346,49 @@ function articleReceiptOutcome(
   };
 }
 
-test("verified and unverified X Article receipts retain content-free manual-work and missing-cover facts", () => {
+test("verified and unverified X Article receipts retain content-free manual-work and explicit-cover facts", () => {
   const receipts = (["verified", "save_delivered_unverified"] as const).map(
     (phase) => receiptForXDraftOutcome(articleReceiptOutcome(phase), "article"),
   );
 
   for (const receipt of receipts) {
-    assert.deepEqual(receipt.assets, [MISSING_ARTICLE_COVER]);
+    assert.deepEqual(receipt.assets, [VERIFIED_ARTICLE_COVER]);
     assert.deepEqual(receipt.evidenceSummary.assets.requested, {
-      yes: 0,
-      no: 1,
+      yes: 1,
+      no: 0,
       unknown: 0,
     });
     for (const evidence of [
       receipt.evidenceSummary.assets.resolved,
       receipt.evidenceSummary.assets.set,
-      receipt.evidenceSummary.assets.uploaded,
       receipt.evidenceSummary.assets.observed,
       receipt.evidenceSummary.assets.verified,
     ]) {
-      assert.deepEqual(evidence, { yes: 0, no: 1, unknown: 0 });
+      assert.deepEqual(evidence, { yes: 1, no: 0, unknown: 0 });
     }
+    assert.deepEqual(receipt.evidenceSummary.assets.uploaded, {
+      yes: 0,
+      no: 0,
+      unknown: 1,
+    });
 
     const manualCodeGotcha = receipt.gotchas.find(
       (gotcha) => /Insert → Code/.test(gotcha) && /screenshot/i.test(gotcha),
     );
     assert.ok(manualCodeGotcha, "Article receipt must retain the manual code-block handoff");
     assert.ok(!manualCodeGotcha.includes(RAW_ARTICLE_RECEIPT_CONTENT));
-    const missingCoverGotcha = receipt.gotchas.find(
-      (gotcha) =>
-        /cover/i.test(gotcha) &&
-        /add/i.test(gotcha) &&
-        /verify.*manually.*native draft/i.test(gotcha),
-    );
-    assert.ok(missingCoverGotcha, "Article receipt must retain the manual missing-cover action");
-    assert.ok(!missingCoverGotcha.includes(RAW_ARTICLE_RECEIPT_CONTENT));
+    assert.equal(receipt.gotchas.some((gotcha) => /cover.*not positively observed/i.test(gotcha)), false);
 
     const json = JSON.stringify(receipt);
     const parsed = JSON.parse(json) as typeof receipt;
     const human = renderTransportReceiptHuman(receipt);
-    assert.deepEqual(parsed.assets, [MISSING_ARTICLE_COVER]);
+    assert.deepEqual(parsed.assets, [VERIFIED_ARTICLE_COVER]);
     assert.ok(parsed.gotchas.includes(manualCodeGotcha));
-    assert.ok(parsed.gotchas.includes(missingCoverGotcha));
     assert.match(
       human,
-      /asset\[0\] cover: requested=no; resolved=no; set=no; uploaded=no; observed=no; verified=no/,
+      /asset\[0\] cover: requested=yes; resolved=yes; set=yes; uploaded=unknown; observed=yes; verified=yes/,
     );
     assert.ok(human.includes(`gotcha: ${manualCodeGotcha}`));
-    assert.ok(human.includes(`gotcha: ${missingCoverGotcha}`));
     assert.ok(!json.includes(RAW_ARTICLE_RECEIPT_CONTENT));
     assert.ok(!human.includes(RAW_ARTICLE_RECEIPT_CONTENT));
   }

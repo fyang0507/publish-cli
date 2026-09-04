@@ -98,6 +98,7 @@ stdin) for canonical Markdown. Draft commands accept exactly one content input.
 ```bash
 publish x watch --json
 publish x draft --format thread --from article.md
+publish x draft --format article --from article.md --cover cover.png
 publish linkedin draft --text "Draft copy"
 publish reddit inspect agents --json
 publish reddit draft --subreddit agents --title "Title" --from post.md

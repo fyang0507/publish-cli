@@ -9,6 +9,7 @@ import { AUTH_PLATFORMS, createAuthProbeRegistry, type AuthReadiness } from "../
 import { executeChannelInfo, renderChannelInfo } from "../commands/channel-info.js";
 import { generatePost } from "../linkedin/content.js";
 import { generateContent } from "../x/content.js";
+import { preloadXArticleCover } from "../x/articleCover.js";
 import { generateArticle } from "../wechat/content.js";
 import {
   CHANNEL_INFO_SCHEMA_VERSION,
@@ -35,6 +36,13 @@ function pngHeader(width: number, height: number): Buffer {
   buffer.writeUInt32BE(width, 16);
   buffer.writeUInt32BE(height, 20);
   return buffer;
+}
+
+function validTinyXArticleCoverPng(): Buffer {
+  return Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+    "base64",
+  );
 }
 
 function bmpHeader(width: number, height: number): Buffer {
@@ -158,7 +166,9 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /structured payload is CommonMark-deindented.*canonical clean artifact retains the exact normalized caller Markdown/s);
   assert.match(x, /separate `\.x-article\.inspection\.txt` receipt/);
   assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
-  assert.match(x, /directory containing the `--from` Markdown/);
+  assert.match(x, /Every Article requires one explicit `--cover <path>`/);
+  assert.match(x, /never scans neighboring files and never crops, resizes, compresses, or converts the cover/);
+  assert.match(x, /rejected native cover-input set leaves `set` unknown.*never retried, routed through another input, or replaced by a media-button click/s);
   assert.match(
     x,
     /leading H1.*later heading lines.*image-only lines.*`Key: value`-shaped lines among the first eight lines of the normalized Markdown body/s,
@@ -227,8 +237,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /one closed save phase: `save_not_attempted`, `save_delivery_unknown`, `save_delivered_unverified`, or `verified`/);
   assert.match(x, /Tweet\/thread\/reply staging treats the close→Save click as the persistence action/);
   assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
-  assert.match(x, /Article verification reopens the captured canonical edit URL and matches the intended title plus, when present, a body prefix/);
-  assert.match(x, /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed title, canonical Markdown, block\/run\/mark\/link, excluded-code, advisory, and count snapshot/);
+  assert.match(x, /Article verification reopens only that post-settle canonical edit URL and matches the complete intended title and body.*prefixes, truncation, or extra tails are not positive evidence/s);
+  assert.match(x, /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed request snapshot containing the title, canonical Markdown, block\/run\/mark\/link, excluded-code, advisory, count, and detached cover-byte facts/);
   assert.match(x, /reparses canonical Markdown with the same Article parser and requires the complete code-block, code-advisory, and code-link-advisory sets to correspond/);
   assert.match(x, /More than 10,000 Article code blocks, or more than 1,000,000 UTF-16 code units.*rejects locally/s);
   assert.match(x, /Malformed, throwing\/accessor\/proxy, cyclic, sparse\/oversized, count-inconsistent, or unsafe-active-href structures fail locally with bounded `save_not_attempted` evidence and exit 2/);
@@ -244,8 +254,11 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Background feed, navigation, modal labels, prefixes, substring matches/);
   assert.match(x, /pre-existing identical visible rows, duplicate post-Save matches/);
   assert.match(x, /no stable native row ID.*does not prove the rendered rows are the complete drafts list or that this run caused the added value/s);
-  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code count, complete code digest\/truncation facts, bounded code-link provenance\/truncation facts, and cover selection\/upload\/ratio\/crop action facts in both verified and unverified receipts/);
-  assert.match(x, /receipt uses the frozen pre-loader advisory copy after exact returned-handoff comparison/);
+  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code facts, and distinct cover `requested`, `resolved`, `set`, `uploaded`, post-apply `observed`, and canonical-reopen `verified` evidence/);
+  assert.match(x, /Positive Article success requires a unique title\/body editor root, one direct set on its calibrated same-parent cover input, one newly attributable crop dialog with one exact Apply control, a unique above-title post-apply cover observation, canonical reopen, title\/body match, and the same persisted cover identity, box, and natural dimensions/);
+  assert.match(x, /immediate post-Create URL sample is provisional.*missing\/invalid late sample or two conflicting positive samples is never used for navigation or verification/s);
+  assert.match(x, /rejected native cover-input set leaves `set` unknown.*never retried, routed through another input, or replaced by a media-button click/s);
+  assert.match(x, /receipt uses the frozen pre-loader copy after exact returned-handoff comparison/);
   assert.match(x, /Reply target identity is a separate closed fact/);
   assert.match(x, /Live calibration on 2026-09-03 found no exact numeric target-id signal/);
   assert.match(x, /returned real reply Save finalizes `staged-unverified` history and exits 1 even when its content row verifies/);
@@ -382,20 +395,19 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(acres, /No calibrated authenticated\/save-success marker/);
 });
 
-test("X Article cover selection has a deterministic lexical tie-break", async () => {
+test("X Article cover selection is explicit and never scans neighboring images", () => {
   const dir = mkdtempSync(join(tmpdir(), "publish-x-cover-selection-"));
   try {
-    const basePath = join(dir, "article.md");
-    writeFileSync(basePath, "# Article\n");
-    writeFileSync(join(dir, "z-cover.png"), pngHeader(1500, 600));
-    writeFileSync(join(dir, "a-cover.png"), pngHeader(1500, 600));
+    writeFileSync(join(dir, "z-cover.png"), validTinyXArticleCoverPng());
+    writeFileSync(join(dir, "a-cover.png"), validTinyXArticleCoverPng());
 
-    const { resolveHeroImage } = await import("../x/draftPoster.js");
-    const selected = resolveHeroImage(basePath);
-    assert.equal(selected.path, join(dir, "a-cover.png"));
-    assert.equal(selected.width, 1500);
-    assert.equal(selected.height, 600);
-    assert.equal(selected.ratioOk, true);
+    const selected = preloadXArticleCover(join(dir, "z-cover.png"));
+    assert.equal(selected.selection, "explicit");
+    assert.equal(selected.fileName, "x-article-cover.png");
+    assert.equal(selected.width, 5);
+    assert.equal(selected.height, 2);
+    assert.equal(selected.ratio, "exact_5_2");
+    assert.doesNotMatch(JSON.stringify(selected), /a-cover|z-cover|publish-x-cover-selection/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -699,8 +711,12 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value/,
     /Matching background\/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows/,
     /no stable native row id and does not prove full-list completeness or causality/,
-    /Article success instead requires matching the title and, when present, body prefix/,
-    /returned Article outcome reports bounded body-input, excluded-code count, complete digest\/truncation evidence, bounded code-link provenance\/truncation evidence, and cover selection\/upload\/ratio\/crop action facts whether verified or unverified/i,
+    /Article requires one explicit --cover path; tweet and thread reject that flag/,
+    /never scans neighboring files and never crops, resizes, compresses, or converts the cover/,
+    /Article success requires one unique title\/body editor root, one direct set on its calibrated same-parent cover input, one attributable crop dialog and exact Apply return, a unique above-title post-apply cover observation, then matching title\/body plus the same cover identity, box, and natural dimensions/,
+    /immediate post-Create URL is provisional; a missing\/invalid late sample or conflicting positive samples are never used for navigation or verification/,
+    /returned Article outcome reports bounded body\/code facts and distinct cover requested\/resolved\/set\/uploaded\/observed\/verified evidence/i,
+    /rejected native cover-input set leaves set unknown.*never retries, clicks the media button, or uses another upload route/s,
     /rejected Save\/Create action has unknown delivery.*returned action without a positive reopen match is unverified/s,
     /Both exit 1 because a draft may exist/,
     /compare X Unsent\/Drafts or X Articles → Drafts manually in the exact CLI-owned profile/,
