@@ -6,9 +6,14 @@ import {
   countXWeightedLength,
   type LengthUnit,
 } from "../capabilities/validation.js";
+import {
+  X_CODE_INFO_MAX_CODE_POINTS,
+  X_CODE_PREVIEW_MAX_CODE_POINTS,
+  isTerminalSafeBoundedCodeEvidence,
+  type CodeBlockFlag,
+} from "./codeAdvisory.js";
 import type {
   CodeBlockFidelityFlag,
-  CodeBlockFlag,
   GeneratedContent,
   LinkFlag,
   ProseOmissionFlag,
@@ -22,6 +27,31 @@ import type {
 export const X_NON_ARTICLE_TRANSPORT_CODE_UNITS_MAX = 50_000;
 export const X_NON_ARTICLE_ADVISORY_CODE_UNITS_MAX = 10_000_000;
 export const X_NON_ARTICLE_ARRAY_ENTRIES_MAX = 10_000;
+export const X_CODE_BLOCK_FIDELITY_NOTE =
+  "The LF-normalized fenced source segment was replaced by the exact placeholder; provide and verify a screenshot/image before final publication.";
+
+function boundedFidelityEvidence(value: string | null, truncated: boolean): string {
+  if (value === null) return "none";
+  return `${JSON.stringify(value)}${truncated ? " (bounded prefix; truncated)" : ""}`;
+}
+
+/** The one canonical warning generated from a frozen non-Article fidelity fact. */
+export function renderXNonArticleFidelityWarning(flag: XContentFidelityFlag): string {
+  if (flag.kind !== "code_block") {
+    return `Source line ${flag.sourceLine} (${flag.kind}) was omitted: ${JSON.stringify(flag.source)}. ${flag.note}`;
+  }
+  const lineLabel = flag.sourceStartLine === flag.sourceEndLine
+    ? `line ${flag.sourceStartLine}`
+    : `lines ${flag.sourceStartLine}-${flag.sourceEndLine}`;
+  return (
+    `Source ${lineLabel} (code_block) ${flag.sourceLineCount === 1 ? "was" : "were"} replaced by ${JSON.stringify(flag.placeholder)}; ` +
+    `fence=${flag.fence}, closure=${flag.closure}, lineCount=${flag.sourceLineCount}, ` +
+    `info=${boundedFidelityEvidence(flag.infoString, flag.infoStringTruncated)}, ` +
+    `preview=${boundedFidelityEvidence(flag.preview, flag.previewTruncated)}, ` +
+    `digestNormalization=${flag.digestNormalization}, ` +
+    `LF-normalized source sha256=${flag.normalizedSourceSha256}. ${flag.note}`
+  );
+}
 
 const MAX_GRAPH_NODES = 100_000;
 const INVALID_NON_ARTICLE_SNAPSHOT = Symbol("invalid_non_article_snapshot");
@@ -578,12 +608,22 @@ function snapshotFidelityFlag(
         64,
         context,
       );
+      const infoCodePoints = infoString === null ? 0 : Array.from(infoString).length;
+      const previewCodePoints = Array.from(preview).length;
       if (
         placeholder !== `[code block #${index} → screenshot]` ||
         sourceEndLine < sourceStartLine ||
         sourceLineCount !== sourceEndLine - sourceStartLine + 1 ||
         (fence !== "backtick" && fence !== "tilde") ||
         (closure !== "explicit" && closure !== "end_of_input") ||
+        note !== X_CODE_BLOCK_FIDELITY_NOTE ||
+        (infoString === null
+          ? infoStringTruncated
+          : infoString.length === 0 ||
+            !isTerminalSafeBoundedCodeEvidence(infoString, X_CODE_INFO_MAX_CODE_POINTS) ||
+            (infoStringTruncated && infoCodePoints !== X_CODE_INFO_MAX_CODE_POINTS)) ||
+        !isTerminalSafeBoundedCodeEvidence(preview, X_CODE_PREVIEW_MAX_CODE_POINTS) ||
+        (previewTruncated && previewCodePoints !== X_CODE_PREVIEW_MAX_CODE_POINTS) ||
         digestNormalization !== "lf_joined_source_lines" ||
         !/^[a-f0-9]{64}$/u.test(normalizedSourceSha256)
       ) {
@@ -652,11 +692,40 @@ function verifyAdvisoryCorrespondence(
   );
   if (codeFlags.length !== fidelityCodeFlags.length) failXGeneratedContentSnapshot();
   for (let index = 0; index < codeFlags.length; index += 1) {
+    const codeFlag = codeFlags[index];
+    const fidelityFlag = fidelityCodeFlags[index];
+    const expectedPreview = `${fidelityFlag.preview}${fidelityFlag.previewTruncated ? "…" : ""}`;
+    const hasLang = Object.prototype.hasOwnProperty.call(codeFlag, "lang");
+    const possibleLangs = new Set<string>();
+    if (fidelityFlag.infoString !== null) {
+      possibleLangs.add(fidelityFlag.infoString);
+      const firstSpace = fidelityFlag.infoString.indexOf(" ");
+      if (firstSpace > 0) possibleLangs.add(fidelityFlag.infoString.slice(0, firstSpace));
+      for (
+        let tab = fidelityFlag.infoString.indexOf("\\u{09}");
+        tab > 0;
+        tab = fidelityFlag.infoString.indexOf("\\u{09}", tab + 1)
+      ) {
+        possibleLangs.add(fidelityFlag.infoString.slice(0, tab));
+      }
+      if (fidelityFlag.infoStringTruncated) {
+        possibleLangs.add(`${fidelityFlag.infoString}…`);
+      }
+    }
     if (
-      codeFlags[index].index !== index + 1 ||
-      fidelityCodeFlags[index].index !== codeFlags[index].index ||
-      fidelityCodeFlags[index].sourceStartLine !== codeFlags[index].sourceLine
+      codeFlag.index !== index + 1 ||
+      fidelityFlag.index !== codeFlag.index ||
+      fidelityFlag.sourceStartLine !== codeFlag.sourceLine ||
+      codeFlag.preview !== expectedPreview ||
+      (fidelityFlag.infoString === null
+        ? hasLang
+        : !hasLang || typeof codeFlag.lang !== "string" || !possibleLangs.has(codeFlag.lang))
     ) {
+      failXGeneratedContentSnapshot();
+    }
+  }
+  for (let index = 0; index < warnings.length; index += 1) {
+    if (warnings[index] !== renderXNonArticleFidelityWarning(fidelityFlags[index])) {
       failXGeneratedContentSnapshot();
     }
   }

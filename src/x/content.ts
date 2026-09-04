@@ -55,6 +55,19 @@ import {
   snapshotXArticleStageInput,
   snapshotXContentFormat,
 } from "./articleStageSnapshot.js";
+import {
+  X_CODE_BLOCK_FIDELITY_NOTE,
+  createXGeneratedContentSnapshotContext,
+  renderXNonArticleFidelityWarning,
+  snapshotXGeneratedNonArticleContent,
+} from "./nonArticleStageSnapshot.js";
+import {
+  TerminalProjectionError,
+  finalizeTerminalDocument,
+  projectTerminalText,
+  renderTerminalBlock,
+  renderTerminalInline,
+} from "../terminalOutput.js";
 
 export {
   X_CODE_INFO_MAX_CODE_POINTS,
@@ -668,8 +681,7 @@ function mapParserConfirmedFence(
       previewTruncated: preview.truncated,
       digestNormalization: "lf_joined_source_lines",
       normalizedSourceSha256: createHash("sha256").update(sourceSegment, "utf8").digest("hex"),
-      note:
-        "The LF-normalized fenced source segment was replaced by the exact placeholder; provide and verify a screenshot/image before final publication.",
+      note: X_CODE_BLOCK_FIDELITY_NOTE,
     },
   };
 }
@@ -1045,23 +1057,6 @@ function boundedEvidence(value: string | null, truncated: boolean): string {
   return `${JSON.stringify(value)}${truncated ? " (bounded prefix; truncated)" : ""}`;
 }
 
-function renderFidelityWarning(flag: XContentFidelityFlag): string {
-  if (flag.kind !== "code_block") {
-    return `Source line ${flag.sourceLine} (${flag.kind}) was omitted: ${JSON.stringify(flag.source)}. ${flag.note}`;
-  }
-  const lineLabel = flag.sourceStartLine === flag.sourceEndLine
-    ? `line ${flag.sourceStartLine}`
-    : `lines ${flag.sourceStartLine}-${flag.sourceEndLine}`;
-  return (
-    `Source ${lineLabel} (code_block) ${flag.sourceLineCount === 1 ? "was" : "were"} replaced by ${JSON.stringify(flag.placeholder)}; ` +
-    `fence=${flag.fence}, closure=${flag.closure}, lineCount=${flag.sourceLineCount}, ` +
-    `info=${boundedEvidence(flag.infoString, flag.infoStringTruncated)}, ` +
-    `preview=${boundedEvidence(flag.preview, flag.previewTruncated)}, ` +
-    `digestNormalization=${flag.digestNormalization}, ` +
-    `LF-normalized source sha256=${flag.normalizedSourceSha256}. ${flag.note}`
-  );
-}
-
 function renderFailureFidelityEvidence(flag: XContentFidelityFlag): string {
   if (flag.kind !== "code_block") {
     return `line ${flag.sourceLine} [${flag.kind}] ${JSON.stringify(flag.source)}: ${flag.note}`;
@@ -1106,7 +1101,7 @@ export async function generateContent(
   const fidelityFlags: XContentFidelityFlag[] =
     [...parsed.proseOmissions, ...parsed.codeFidelityFlags]
       .sort((left, right) => fidelityStartLine(left) - fidelityStartLine(right));
-  const warnings = fidelityFlags.map(renderFidelityWarning);
+  const warnings = fidelityFlags.map(renderXNonArticleFidelityWarning);
 
   const tweetLimit = opts.long ? opts.longLimit ?? TWEET_LIMIT_LONG : TWEET_LIMIT_DEFAULT;
 
@@ -1263,34 +1258,44 @@ export function parseArticleBlocks(body: string): ArticleBlock[] {
   return parseXArticleBlocks(body);
 }
 
-/**
- * Render a GeneratedContent to a human-readable inspection string (used by
- * --dry-run echo and by the draft command's success report).
- */
-export function renderForInspection(c: GeneratedContent): string {
-  let format: GeneratedContent["format"];
-  let content = c;
-  let codeFlags: readonly CodeBlockFlag[];
-  let articleCodeFlags: readonly ArticleCodeBlockFlag[] | null = null;
-  let articleTerminalMarkdown: string | null = null;
-  try {
-    format = snapshotXContentFormat(c);
-    if (format === "article") {
-      const snapshot = snapshotXArticleStageInput(c, format);
-      content = snapshot.content;
-      articleCodeFlags = snapshot.codeAdvisories;
-      codeFlags = articleCodeFlags;
-      if (!content.article) throw new Error("Article snapshot omitted Article content");
-      articleTerminalMarkdown = articleMarkdownForTerminal(
-        content.article.markdown,
-        articleCodeFlags,
-      );
-    } else {
-      codeFlags = c.codeFlags;
-    }
-  } catch {
-    return "[Content inspection failed closed: code-advisory validation failed; no caller evidence rendered.]";
+export interface PreparedXTerminalContent {
+  readonly content: GeneratedContent;
+  readonly inspection: string;
+}
+
+function snapshotXTerminalContent(c: unknown): {
+  format: GeneratedContent["format"];
+  content: GeneratedContent;
+  codeFlags: readonly CodeBlockFlag[];
+  articleTerminalMarkdown: string | null;
+} {
+  const format = snapshotXContentFormat(c as GeneratedContent);
+  if (format === "article") {
+    const snapshot = snapshotXArticleStageInput(c as GeneratedContent, format);
+    if (!snapshot.content.article) throw new TerminalProjectionError();
+    return {
+      format,
+      content: snapshot.content,
+      codeFlags: snapshot.codeAdvisories,
+      articleTerminalMarkdown: articleMarkdownForTerminal(
+        snapshot.content.article.markdown,
+        snapshot.codeAdvisories,
+      ),
+    };
   }
+  const content = snapshotXGeneratedNonArticleContent(
+    c,
+    createXGeneratedContentSnapshotContext(),
+  );
+  return { format, content, codeFlags: content.codeFlags, articleTerminalMarkdown: null };
+}
+
+function renderXTerminalSnapshot(
+  format: GeneratedContent["format"],
+  content: GeneratedContent,
+  codeFlags: readonly CodeBlockFlag[],
+  articleTerminalMarkdown: string | null,
+): string {
   const out: string[] = [];
   out.push(`format: ${format}`);
   if (Number.isFinite(content.limit)) out.push(`per-post limit: ${content.limit}`);
@@ -1299,20 +1304,32 @@ export function renderForInspection(c: GeneratedContent): string {
     const unit = content.tweet.unit === "twitter_text_weighted"
       ? "twitter-text weighted chars"
       : "Unicode code points (local Premium transport policy)";
-    out.push("", "── tweet ──", content.tweet.text, `[${content.tweet.chars} ${unit}]`);
+    out.push(
+      "",
+      "── tweet (terminal-safe projection; every caller line begins with │) ──",
+      renderTerminalBlock(projectTerminalText(content.tweet.text, { lineMode: "block" })),
+      `[${content.tweet.chars} ${unit}]`,
+    );
   }
   if (content.thread) {
-    out.push("", `── thread (${content.thread.length} posts) ──`);
-    for (const p of content.thread) {
-      out.push("", `[${p.index}/${p.total}] (${p.chars} twitter-text weighted chars)`, p.text);
-    }
+    const threadText = content.thread.map((post) =>
+      `[${post.index}/${post.total}] (${post.chars} twitter-text weighted chars)\n${post.text}`
+    ).join("\n\n");
+    out.push(
+      "",
+      `── thread (${content.thread.length} posts) — terminal-safe projection ──`,
+      renderTerminalBlock(projectTerminalText(threadText, { lineMode: "block" })),
+    );
   }
   if (content.article) {
     out.push(
       "",
-      `── article: ${content.article.title} ──`,
-      articleTerminalMarkdown ??
-        "[Article Markdown terminal preview unavailable: validation failed closed.]",
+      `── article: ${renderTerminalInline(projectTerminalText(content.article.title, { lineMode: "inline" }))} ──`,
+      "── canonical Markdown terminal-safe projection (every caller line begins with │) ──",
+      renderTerminalBlock(projectTerminalText(
+        articleTerminalMarkdown ?? "[Article Markdown terminal preview unavailable: validation failed closed.]",
+        { lineMode: "block" },
+      )),
       `[native rich-HTML excluded code blocks: ${content.article.codeBlockCount}]`,
     );
   }
@@ -1326,12 +1343,97 @@ export function renderForInspection(c: GeneratedContent): string {
     }
   }
   if (content.linkFlags.length) {
+    const trustedArticleCodeLinks = format === "article"
+      ? content.linkFlags.filter((flag) => flag.advisorySource === "excluded_article_code")
+      : [];
+    const projectedLinks = content.linkFlags.filter(
+      (flag) => flag.advisorySource !== "excluded_article_code",
+    );
     out.push("", "⚠ LINKS (placement matters for reach):");
-    for (const f of content.linkFlags) out.push(renderXLinkFlag(f));
+    if (projectedLinks.length) {
+      const linkText = projectedLinks.map((flag) =>
+        `${flag.url}${flag.text ? ` (${flag.text})` : ""}\n${flag.note}`
+      ).join("\n");
+      out.push(renderTerminalBlock(projectTerminalText(linkText, { lineMode: "block" })));
+    }
+    for (const flag of trustedArticleCodeLinks) out.push(renderXLinkFlag(flag));
   }
   if (content.warnings.length) {
     out.push("", "⚠ WARNINGS:");
-    for (const w of content.warnings) out.push(`  - ${w}`);
+    const trustedCodeWarnings: string[] = [];
+    const callerWarnings: string[] = [];
+    for (const [index, warning] of content.warnings.entries()) {
+      if (content.fidelityFlags[index]?.kind === "code_block") trustedCodeWarnings.push(warning);
+      else callerWarnings.push(warning);
+    }
+    // #59 code warnings are already closed, bounded, and terminal-safe. Keep
+    // their reviewed escape/digest wording intact; project non-code omissions.
+    for (const warning of trustedCodeWarnings) out.push(`  - ${warning}`);
+    if (callerWarnings.length) {
+      out.push(renderTerminalBlock(projectTerminalText(callerWarnings.join("\n"), { lineMode: "block" })));
+    }
+  }
+  return finalizeTerminalDocument(out);
+}
+
+export function prepareXTerminalContent(c: unknown): Readonly<PreparedXTerminalContent> {
+  try {
+    const snapshot = snapshotXTerminalContent(c);
+    const inspection = renderXTerminalSnapshot(
+      snapshot.format,
+      snapshot.content,
+      snapshot.codeFlags,
+      snapshot.articleTerminalMarkdown,
+    );
+    return Object.freeze({ content: snapshot.content, inspection });
+  } catch (error) {
+    if (error instanceof TerminalProjectionError) throw error;
+    throw new TerminalProjectionError();
+  }
+}
+
+/**
+ * Compatibility renderer for callers. Commands use prepareXTerminalContent so
+ * a projection failure is a typed, pre-side-effect gate rather than this marker.
+ */
+export function renderForInspection(c: GeneratedContent): string {
+  try {
+    return prepareXTerminalContent(c).inspection;
+  } catch {
+    return "[Content inspection failed closed: code-advisory validation failed; no caller evidence rendered.]";
+  }
+}
+
+/** Legacy byte-faithful tweet/thread inspection artifact (never a terminal sink). */
+export function renderXArtifactInspection(content: GeneratedContent): string {
+  const out: string[] = [];
+  out.push(`format: ${content.format}`);
+  if (Number.isFinite(content.limit)) out.push(`per-post limit: ${content.limit}`);
+  if (content.tweet) {
+    const unit = content.tweet.unit === "twitter_text_weighted"
+      ? "twitter-text weighted chars"
+      : "Unicode code points (local Premium transport policy)";
+    out.push("", "── tweet ──", content.tweet.text, `[${content.tweet.chars} ${unit}]`);
+  }
+  if (content.thread) {
+    out.push("", `── thread (${content.thread.length} posts) ──`);
+    for (const post of content.thread) {
+      out.push("", `[${post.index}/${post.total}] (${post.chars} twitter-text weighted chars)`, post.text);
+    }
+  }
+  if (content.codeFlags.length) {
+    out.push("", "⚠ CODE BLOCKS (X won't render code — paste a screenshot/image instead):");
+    for (const flag of content.codeFlags) {
+      out.push(`  #${flag.index} ${flag.lang ? `[${flag.lang}] ` : ""}line ${flag.sourceLine}: ${flag.preview}`);
+    }
+  }
+  if (content.linkFlags.length) {
+    out.push("", "⚠ LINKS (placement matters for reach):");
+    for (const flag of content.linkFlags) out.push(renderXLinkFlag(flag));
+  }
+  if (content.warnings.length) {
+    out.push("", "⚠ WARNINGS:");
+    for (const warning of content.warnings) out.push(`  - ${warning}`);
   }
   return out.join("\n");
 }

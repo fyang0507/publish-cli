@@ -17,7 +17,11 @@
  */
 
 import type { WeChatClient } from "./client.js";
-import { escapeHtmlAttribute, type GeneratedArticle } from "./content.js";
+import {
+  escapeHtmlAttribute,
+  snapshotWechatGeneratedArticle,
+  type GeneratedArticle,
+} from "./content.js";
 import { env } from "../config.js";
 
 /** The 草稿箱 (draft box) landing spot for the operator's manual review + publish. */
@@ -67,6 +71,7 @@ export async function stageArticleDraft(
   article: GeneratedArticle,
   opts: StageArticleOptions = {},
 ): Promise<StageArticleResult> {
+  article = snapshotWechatGeneratedArticle(article);
   const needOpenComment = opts.needOpenComment ?? env.WECHAT_NEED_OPEN_COMMENT;
   const onlyFansCanComment = opts.onlyFansCanComment ?? env.WECHAT_ONLY_FANS_CAN_COMMENT;
 

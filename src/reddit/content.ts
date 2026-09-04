@@ -43,6 +43,26 @@ import { countUnicodeCodePoints as countChars } from "../capabilities/measuremen
 import { LocalValidationError } from "../capabilities/validation.js";
 import type { SubredditAbout, PostRequirements, FlairTemplate } from "./reader.js";
 import { marked, type Token, type Tokens } from "marked";
+import {
+  GENERATED_DRAFT_TEXT_MAX,
+  commonAdvisoryText,
+  newGeneratedDraftSnapshotContext,
+  snapshotGeneratedCodeFlags,
+  snapshotGeneratedLinkFlags,
+  snapshotGeneratedWarnings,
+} from "../draftSnapshot.js";
+import {
+  TerminalProjectionError,
+  finalizeTerminalDocument,
+  projectTerminalText,
+  renderTerminalBlock,
+  renderTerminalInline,
+  snapshotBoolean,
+  snapshotBoundedString,
+  snapshotClosedRecord,
+  snapshotOptionalString,
+  snapshotSafeInteger,
+} from "../terminalOutput.js";
 
 /** Reddit title cap, in Unicode code points. */
 export const REDDIT_TITLE_LIMIT = 300;
@@ -93,6 +113,11 @@ export interface GeneratedSelfPost {
   linkFlags: LinkFlag[];
   /** Non-fatal advisories (old-reddit code/table rendering and links). */
   warnings: string[];
+}
+
+export interface PreparedRedditSelfPost {
+  readonly post: GeneratedSelfPost;
+  readonly inspection: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -692,46 +717,103 @@ export function preflightSelfPost(post: GeneratedSelfPost, contract: SelfPostCon
 // Public API: inspection dump
 // ---------------------------------------------------------------------------
 
-/**
- * Render a GeneratedSelfPost to a human-readable inspection string (used by
- * --dry-run echo and the draft command's success report). Mirrors X's
- * renderForInspection and LinkedIn's renderPostForInspection.
- */
-export function renderSelfPostForInspection(p: GeneratedSelfPost): string {
+/** Closed, recursively frozen generated DTO shared by terminal and transport. */
+export function snapshotRedditGeneratedSelfPost(value: unknown): GeneratedSelfPost {
+  const context = newGeneratedDraftSnapshotContext();
+  return snapshotClosedRecord(
+    value,
+    ["format", "title", "titleChars", "body", "bodyChars", "nsfw", "spoiler", "codeFlags", "linkFlags", "warnings"],
+    ["subreddit", "flair"],
+    context,
+    (reader) => {
+      if (reader.read("format") !== "self") throw new TerminalProjectionError();
+      const subreddit = reader.has("subreddit")
+        ? snapshotOptionalString(reader.read("subreddit"), GENERATED_DRAFT_TEXT_MAX, context)
+        : undefined;
+      const flair = reader.has("flair")
+        ? snapshotOptionalString(reader.read("flair"), GENERATED_DRAFT_TEXT_MAX, context)
+        : undefined;
+      const title = snapshotBoundedString(reader.read("title"), REDDIT_TITLE_LIMIT * 2, context);
+      const titleChars = snapshotSafeInteger(reader.read("titleChars"));
+      if (!title || titleChars !== countChars(title) || titleChars > REDDIT_TITLE_LIMIT) {
+        throw new TerminalProjectionError();
+      }
+      const body = snapshotBoundedString(reader.read("body"), REDDIT_BODY_LIMIT * 2, context);
+      const bodyChars = snapshotSafeInteger(reader.read("bodyChars"));
+      if (bodyChars !== countChars(body) || bodyChars > REDDIT_BODY_LIMIT) {
+        throw new TerminalProjectionError();
+      }
+      const nsfw = snapshotBoolean(reader.read("nsfw"));
+      const spoiler = snapshotBoolean(reader.read("spoiler"));
+      const codeFlags = snapshotGeneratedCodeFlags(reader.read("codeFlags"), context);
+      const linkFlags = snapshotGeneratedLinkFlags(reader.read("linkFlags"), context);
+      const warnings = snapshotGeneratedWarnings(reader.read("warnings"), context);
+      return Object.freeze({
+        format: "self",
+        ...(reader.has("subreddit") ? { subreddit } : {}),
+        title,
+        titleChars,
+        body,
+        bodyChars,
+        ...(reader.has("flair") ? { flair } : {}),
+        nsfw,
+        spoiler,
+        codeFlags,
+        linkFlags,
+        warnings,
+      }) as unknown as GeneratedSelfPost;
+    },
+  );
+}
+
+function renderRedditSelfPostSnapshot(p: GeneratedSelfPost): string {
   const out: string[] = [];
   out.push(`format: ${p.format}`);
-  if (p.subreddit) out.push(`subreddit: r/${p.subreddit}`);
-  if (p.flair) out.push(`flair (requested): ${p.flair}`);
+  if (p.subreddit) {
+    out.push(`subreddit: r/${renderTerminalInline(projectTerminalText(p.subreddit, { lineMode: "inline" }))}`);
+  }
+  if (p.flair) {
+    out.push(`flair (requested): ${renderTerminalInline(projectTerminalText(p.flair, { lineMode: "inline" }))}`);
+  }
   const flags: string[] = [];
   if (p.nsfw) flags.push("NSFW");
   if (p.spoiler) flags.push("spoiler");
   if (flags.length) out.push(`flags: ${flags.join(", ")}`);
 
-  out.push("", `── title (${p.titleChars}/${REDDIT_TITLE_LIMIT} Unicode code points) ──`, p.title);
   out.push(
     "",
-    `── body — Markdown, verbatim (${p.bodyChars}/${REDDIT_BODY_LIMIT} Unicode code points) ──`,
-    p.body,
+    `── title (${p.titleChars}/${REDDIT_TITLE_LIMIT} Unicode code points; terminal-safe projection) ──`,
+    renderTerminalBlock(projectTerminalText(p.title, { lineMode: "block" })),
+  );
+  out.push(
+    "",
+    `── body — Markdown transport remains verbatim (${p.bodyChars}/${REDDIT_BODY_LIMIT} Unicode code points; terminal-safe projection below) ──`,
+    renderTerminalBlock(projectTerminalText(p.body, { lineMode: "block" })),
   );
 
-  if (p.codeFlags.length) {
+  const advisorySections = commonAdvisoryText(
+    p.codeFlags,
+    p.linkFlags,
+    p.warnings,
+    "⚠ CODE BLOCKS (old.reddit won't render fenced code — prefer 4-space-indented code for old-reddit reach):",
+    "⚠ LINKS:",
+  );
+  if (advisorySections.length) {
     out.push(
       "",
-      "⚠ CODE BLOCKS (old.reddit won't render fenced code — prefer 4-space-indented code for old-reddit reach):",
+      "── advisories (terminal-safe projection) ──",
+      renderTerminalBlock(projectTerminalText(advisorySections.join("\n"), { lineMode: "block" })),
     );
-    for (const f of p.codeFlags) {
-      out.push(`  #${f.index} ${f.lang ? `[${f.lang}] ` : ""}line ${f.sourceLine}: ${f.preview}`);
-    }
   }
-  if (p.linkFlags.length) {
-    out.push("", "⚠ LINKS:");
-    for (const f of p.linkFlags) {
-      out.push(`  ${f.url}${f.text ? ` (${f.text})` : ""}`, `    ${f.note}`);
-    }
-  }
-  if (p.warnings.length) {
-    out.push("", "⚠ WARNINGS:");
-    for (const w of p.warnings) out.push(`  - ${w}`);
-  }
-  return out.join("\n");
+  return finalizeTerminalDocument(out);
+}
+
+export function prepareRedditSelfPost(value: unknown): Readonly<PreparedRedditSelfPost> {
+  const post = snapshotRedditGeneratedSelfPost(value);
+  const inspection = renderRedditSelfPostSnapshot(post);
+  return Object.freeze({ post, inspection });
+}
+
+export function renderSelfPostForInspection(p: GeneratedSelfPost): string {
+  return prepareRedditSelfPost(p).inspection;
 }

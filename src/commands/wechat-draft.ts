@@ -6,11 +6,20 @@ import {
   splitLeadingFrontmatter,
   type ContentInputOptions,
 } from "./contentInput.js";
-import { generateArticle, renderArticleForInspection, type GeneratedArticle } from "../wechat/content.js";
+import { generateArticle, prepareWechatArticle, type GeneratedArticle } from "../wechat/content.js";
 import {
   createServerValidationReceipt,
   isLocalValidationError,
 } from "../capabilities/validation.js";
+import {
+  TerminalOutputBudget,
+  emitTerminalOutput,
+  isTerminalProjectionError,
+  projectTerminalText,
+  renderTerminalErrorMessage,
+  renderTerminalInline,
+  terminalProjectionFailureMessage,
+} from "../terminalOutput.js";
 
 /**
  * `publish wechat draft` — owned-content publisher for the WeChat Official Account
@@ -136,12 +145,19 @@ export function registerWechatDraftCommand(
         "  image identity/order is retained for upload rewriting.\n",
     )
     .action(async (opts: WechatDraftOptions) => {
+      const output = new TerminalOutputBudget();
+      const emit = (stream: "stdout" | "stderr", message: string) =>
+        emitTerminalOutput(output, stream, message);
       let input: ResolvedWechatDraftInput;
       try {
         input = resolveWechatDraftInput(opts, resolveAuthorFallback);
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        try {
+          emit("stderr", renderTerminalErrorMessage(error.message));
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
 
@@ -150,8 +166,9 @@ export function registerWechatDraftCommand(
       // DETERMINISTIC generation (no LLM, no network). Throws on a missing title
       // or cover — a usage error (exit 2), same tier as resolveContentInput.
       let article: GeneratedArticle;
+      let inspection: string;
       try {
-        article = generateArticle(input.markdown, {
+        const prepared = prepareWechatArticle(generateArticle(input.markdown, {
           title: opts.title,
           author: opts.author,
           authorFallback: input.authorFallback,
@@ -163,29 +180,61 @@ export function registerWechatDraftCommand(
           frontmatter: input.frontmatter,
           keepLinks: opts.keepLinks,
           baseDir: input.baseDir,
-        });
+        }));
+        article = prepared.article;
+        inspection = prepared.inspection;
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
+        if (isTerminalProjectionError(error)) {
+          console.error(terminalProjectionFailureMessage());
+        } else {
+          try {
+            emit("stderr", renderTerminalErrorMessage(error.message));
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
+        }
         process.exit(2);
       }
 
-      // Always show the generated article + advisory warnings to the operator.
-      console.log(renderArticleForInspection(article));
-      for (const w of article.warnings) console.log(`  advisory: ${w}`);
+      // Prepare every caller-derived path plus the complete pre-network output
+      // budget before rendering content or creating an artifact.
+      let outputArtifact: { path: string; receipt: string } | null = null;
+      try {
+        output.consume(inspection);
+        if (opts.out) {
+          const path = resolve(opts.out);
+          const terminalPath = renderTerminalInline(projectTerminalText(path, { lineMode: "inline" }));
+          const receipt = `\nWrote rendered HTML to ${terminalPath}`;
+          output.consume(receipt);
+          outputArtifact = { path, receipt };
+        }
+      } catch {
+        console.error(terminalProjectionFailureMessage());
+        process.exit(2);
+      }
+      console.log(inspection);
 
       // --out: write the exact inline-styled HTML for eyeballing. Body <img src>
       // still point at LOCAL paths here — a real run rewrites them to WeChat URLs.
-      if (opts.out) {
-        const outPath = resolve(opts.out);
-        writeFileSync(outPath, article.html, "utf-8");
-        console.log(`\nWrote rendered HTML to ${outPath}`);
+      if (outputArtifact) {
+        try {
+          writeFileSync(outputArtifact.path, article.html, "utf-8");
+        } catch {
+          emit(
+            "stderr",
+            "\n✗ Local WeChat --out artifact write failed. The requested HTML artifact may be absent, partial, or replaced. " +
+              "No token, client, upload, or draft API action followed.",
+          );
+          process.exit(2);
+        }
+        console.log(outputArtifact.receipt);
       }
 
       // --dry-run is NETWORK-FREE: the deterministic render + metadata validation
       // above is the whole run. No token minted, no image uploaded, no draft/add.
       if (opts.dryRun) {
-        console.log(
+        emit("stdout",
           "\n[dry-run] Deterministic render + local validation passed; measured image facts are above, " +
             "and listed server-authoritative constraints remain unverified. " +
             "No token minted, no images uploaded, no draft/add call — nothing staged.\n" +
@@ -205,12 +254,15 @@ export function registerWechatDraftCommand(
       const client = await createWeChatClient();
       try {
         const res = await stageArticleDraft(client, article);
-        console.log(
+        const mediaId = renderTerminalInline(projectTerminalText(res.mediaId, { lineMode: "inline" }));
+        const thumbMediaId = renderTerminalInline(projectTerminalText(res.thumbMediaId, { lineMode: "inline" }));
+        const draftBoxUrl = renderTerminalInline(projectTerminalText(res.draftBoxUrl, { lineMode: "inline" }));
+        emit("stdout",
           `\n✓ Staged a native WeChat draft (article) — NEVER published.\n` +
-            `  media_id: ${res.mediaId}\n` +
-            `  thumb_media_id: ${res.thumbMediaId}\n` +
+            `  media_id: ${mediaId}\n` +
+            `  thumb_media_id: ${thumbMediaId}\n` +
             (res.uploadedImages.length ? `  body images uploaded: ${res.uploadedImages.length}\n` : "") +
-            `  ${res.draftBoxUrl}`,
+            `  ${draftBoxUrl}`,
         );
       } catch (err) {
         exitCode = 1;
@@ -236,21 +288,27 @@ export function registerWechatDraftCommand(
             // IP not allowlisted — the ordered uploads (§5) aborted before any
             // partial work, so nothing was staged. Surface the exact egress IP.
             const ip = parseEgressIpFrom40164(err.errmsg);
-            console.error("\n✗ WeChat rejected the egress IP (40164 — not in whitelist). Nothing was staged.");
-            if (ip) console.error(`  WeChat sees this machine as ${ip}.`);
-            console.error(
+            emit("stderr", "\n✗ WeChat rejected the egress IP (40164 — not in whitelist). Nothing was staged.");
+            if (ip) {
+              emit("stderr", `  WeChat sees this machine as ${renderTerminalInline(projectTerminalText(ip, { lineMode: "inline" }))}.`);
+            }
+            emit("stderr",
               "  Add it at 微信开发者平台 → 开发管理 → 开发接口管理 → IP白名单:\n" +
                 "    https://developers.weixin.qq.com/platform/\n" +
                 "  (Needs an admin WeChat QR re-scan. Run 'publish wechat check' to re-verify.)",
             );
           } else {
-            console.error(
-              `\n✗ WeChat API error on ${err.endpoint}: ${err.errcode} ${receipt.sanitizedMessage}. Nothing was staged.`,
+            emit("stderr",
+              `\n✗ WeChat API error on ${renderTerminalInline(projectTerminalText(err.endpoint, { lineMode: "inline" }))}: ` +
+              `${err.errcode} ${renderTerminalInline(projectTerminalText(receipt.sanitizedMessage, { lineMode: "inline" }))}. Nothing was staged.`,
             );
           }
-          console.error(`  server receipt: ${JSON.stringify(receipt)}`);
+          emit("stderr", `  server receipt: ${renderTerminalInline(projectTerminalText(JSON.stringify(receipt), { lineMode: "inline" }))}`);
         } else {
-          console.error(`\n✗ Failed to stage the WeChat draft: ${(err as Error).message}`);
+          const detail = isTerminalProjectionError(err)
+            ? terminalProjectionFailureMessage()
+            : renderTerminalInline(projectTerminalText((err as Error).message, { lineMode: "inline" }));
+          emit("stderr", `\n✗ Failed to stage the WeChat draft: ${detail}`);
         }
       } finally {
         await client.close();

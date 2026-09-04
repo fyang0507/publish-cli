@@ -2,7 +2,7 @@ import { Command } from "commander";
 import { isProxy } from "node:util/types";
 import {
   generateContent,
-  renderForInspection,
+  prepareXTerminalContent,
   type GeneratedContent,
 } from "../x/content.js";
 import {
@@ -34,6 +34,15 @@ import {
   type XDraftSavePhase,
   type XReplyTargetEvidence,
 } from "../x/saveProgress.js";
+import {
+  TerminalOutputBudget,
+  emitTerminalOutput,
+  isTerminalProjectionError,
+  projectTerminalText,
+  renderTerminalErrorMessage,
+  renderTerminalInline,
+  terminalProjectionFailureMessage,
+} from "../terminalOutput.js";
 
 /**
  * `publish x reply` — request a NATIVE X REPLY draft for an existing tweet
@@ -1125,6 +1134,9 @@ export function registerReplyCommand(x: Command): void {
         "  --inspect and selector calibration cannot repair a reply-ledger failure.\n",
     )
     .action(async (opts: ReplyXOptions) => {
+      const output = new TerminalOutputBudget();
+      const emit = (stream: "stdout" | "stderr", message: string) =>
+        emitTerminalOutput(output, stream, message);
       if (opts.recoverStaleReservationAfterConfirmingNoDraft) {
         const conflicts = [
           opts.text !== undefined ? "--text" : undefined,
@@ -1135,7 +1147,7 @@ export function registerReplyCommand(x: Command): void {
           opts.force ? "--force" : undefined,
         ].filter((flag): flag is string => flag !== undefined);
         if (conflicts.length > 0) {
-          console.error(
+          emit("stderr",
             `${RECOVER_RESERVATION_FLAG} is recovery-only and accepts only --to; remove ${conflicts.join(
               ", ",
             )}. No reply-ledger or browser state was accessed.`,
@@ -1148,7 +1160,14 @@ export function registerReplyCommand(x: Command): void {
         try {
           recoveryTargetId = extractTweetId(opts.to);
         } catch (error) {
-          console.error(`Invalid --to: ${(error as Error).message}`);
+          try {
+            emit("stderr", `Invalid --to: ${renderTerminalInline(projectTerminalText(
+              (error as Error).message,
+              { lineMode: "inline" },
+            ))}`);
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
           process.exit(2);
           return;
         }
@@ -1157,8 +1176,7 @@ export function registerReplyCommand(x: Command): void {
           recoveryTargetId,
           productionReplyRealRunDependencies,
         );
-        if (outcome.stream === "stdout") console.log(outcome.message);
-        else console.error(outcome.message);
+        emit(outcome.stream, outcome.message);
         process.exit(outcome.exitCode);
         return;
       }
@@ -1169,7 +1187,14 @@ export function registerReplyCommand(x: Command): void {
       try {
         replyToId = extractTweetId(opts.to);
       } catch (err) {
-        console.error(`Invalid --to: ${(err as Error).message}`);
+        try {
+          emit("stderr", `Invalid --to: ${renderTerminalInline(projectTerminalText(
+            (err as Error).message,
+            { lineMode: "inline" },
+          ))}`);
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
         return;
       }
@@ -1194,7 +1219,11 @@ export function registerReplyCommand(x: Command): void {
         }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        try {
+          emit("stderr", renderTerminalErrorMessage(error.message));
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
 
@@ -1211,7 +1240,11 @@ export function registerReplyCommand(x: Command): void {
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
         if (error.problem.code !== "x_text_too_long") {
-          console.error(error.message);
+          try {
+            emit("stderr", renderTerminalErrorMessage(error.message));
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
           process.exit(2);
         }
         overflowed = true;
@@ -1223,25 +1256,40 @@ export function registerReplyCommand(x: Command): void {
           });
         } catch (threadError) {
           if (!isLocalValidationError(threadError)) throw threadError;
-          console.error(threadError.message);
+          try {
+            emit("stderr", renderTerminalErrorMessage(threadError.message));
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
           process.exit(2);
         }
       }
+      let inspection: string;
+      try {
+        const prepared = prepareXTerminalContent(content);
+        content = prepared.content;
+        inspection = prepared.inspection;
+        output.consume(inspection);
+      } catch (error) {
+        if (!isTerminalProjectionError(error)) throw error;
+        console.error(terminalProjectionFailureMessage());
+        process.exit(2);
+      }
       if (overflowed) {
-        console.log(
+        emit("stdout",
           `[note] Reply content exceeds the single-post limit — generated a ${content.thread?.length ?? 0}-post reply thread without truncating the normalized reply prose.`,
         );
       }
 
-      console.log(`Replying to tweet ${replyToId}:\n`);
-      console.log(renderForInspection(content));
+      emit("stdout", `Replying to tweet ${replyToId}:\n`);
+      console.log(inspection);
 
       // A valid dry-run is deliberately state-free. In particular, return
       // BEFORE importing db.js: that module loads better-sqlite3 and constructing
       // ReplyLedger creates profile/data-repository directories plus publish.db.
       // The real run below remains authoritative for duplicate prevention.
       if (opts.dryRun) {
-        console.log(
+        emit("stdout",
           `\n[dry-run] Local content validation and generation passed for syntactically valid reply target ${replyToId}. No draft was staged.\n` +
             "  No browser opened; no profile, data-repository, or SQLite runtime state was read or written.\n" +
             "  Target ID/URL syntax was validated locally. Target existence, visibility, and reply eligibility were not " +
@@ -1262,8 +1310,7 @@ export function registerReplyCommand(x: Command): void {
         },
         productionReplyRealRunDependencies,
       );
-      if (outcome.stream === "stdout") console.log(outcome.message);
-      else console.error(outcome.message);
+      emit(outcome.stream, outcome.message);
       process.exit(outcome.exitCode);
     });
 }

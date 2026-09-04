@@ -32,6 +32,7 @@
 import type { BrowserContext, Page, Locator } from "playwright";
 import { getBrowserContext, type EnsureSessionOptions } from "./session.js";
 import { tolerantLocator, optionalLocator, typeText } from "../x/draftPoster.js";
+import { snapshotLinkedInGeneratedPost, type GeneratedPost } from "./content.js";
 
 /**
  * Centralized composer/draft/media selectors. EVERY entry NEEDS LIVE CALIBRATION.
@@ -328,9 +329,10 @@ async function verifyDraftSaved(page: Page, expectedText: string): Promise<boole
  * a best-effort verification that the draft landed.
  */
 export async function stagePost(
-  content: { text: string; hook?: string; linkFlags?: { url: string }[] },
+  content: GeneratedPost,
   opts: StagePostOptions = {},
 ): Promise<StagePostResult> {
+  content = snapshotLinkedInGeneratedPost(content);
   const text = content.text;
   if (!text.trim()) throw new Error("No content to stage (empty LinkedIn post).");
 
