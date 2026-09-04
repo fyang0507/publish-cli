@@ -42,7 +42,7 @@
 import type { BrowserContext, Page, Locator } from "playwright";
 import { getBrowserContext, type EnsureSessionOptions } from "./session.js";
 import { tolerantLocator, optionalLocator, typeText } from "../x/draftPoster.js";
-import type { GeneratedSelfPost } from "./content.js";
+import { snapshotRedditGeneratedSelfPost, type GeneratedSelfPost } from "./content.js";
 
 /**
  * Centralized composer / flair / toggle / save / verify selectors. EVERY entry
@@ -641,6 +641,7 @@ export async function stageDraft(
   post: GeneratedSelfPost,
   opts: StageDraftOptions = {},
 ): Promise<StageDraftResult> {
+  post = snapshotRedditGeneratedSelfPost(post);
   const sub = post.subreddit?.trim();
   if (!sub) throw new Error("No target subreddit to stage a Reddit draft (post.subreddit is empty).");
   if (!post.title.trim()) throw new Error("No title to stage (empty Reddit self-post title).");

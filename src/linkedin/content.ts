@@ -38,6 +38,27 @@ import {
   sliceByMeasuredLength,
   validateLinkedInPostText,
 } from "../capabilities/validation.js";
+import {
+  GENERATED_DRAFT_ARRAY_MAX,
+  GENERATED_DRAFT_TEXT_MAX,
+  commonAdvisoryText,
+  newGeneratedDraftSnapshotContext,
+  snapshotGeneratedCodeFlags,
+  snapshotGeneratedLinkFlags,
+  snapshotGeneratedWarnings,
+} from "../draftSnapshot.js";
+import {
+  TerminalProjectionError,
+  finalizeTerminalDocument,
+  projectTerminalText,
+  renderTerminalBlock,
+  snapshotBoolean,
+  snapshotBoundedString,
+  snapshotClosedRecord,
+  snapshotDenseArray,
+  snapshotSafeInteger,
+  type ClosedSnapshotContext,
+} from "../terminalOutput.js";
 
 /** LinkedIn's live-confirmed feed-post cap, measured in UTF-16 code units. */
 export const LINKEDIN_POST_LIMIT = LINKEDIN_POST_MAX_UTF16_CODE_UNITS;
@@ -84,6 +105,11 @@ export interface MarkdownImageFlag {
   alt?: string;
   source: string;
   sourceLine: number;
+}
+
+export interface PreparedLinkedInPost {
+  readonly post: GeneratedPost;
+  readonly inspection: string;
 }
 
 const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
@@ -618,47 +644,133 @@ export function generatePost(md: string, opts: GeneratePostOptions = {}): Genera
   };
 }
 
-/**
- * Render a GeneratedPost to a human-readable inspection string (used by --dry-run
- * echo and the draft command's success report). Mirrors X's renderForInspection.
- */
-export function renderPostForInspection(p: GeneratedPost): string {
+function snapshotMarkdownImageFlags(
+  value: unknown,
+  context: ClosedSnapshotContext,
+): readonly Readonly<MarkdownImageFlag>[] {
+  return snapshotDenseArray(
+    value,
+    GENERATED_DRAFT_ARRAY_MAX,
+    context,
+    (entry) => snapshotClosedRecord(
+      entry,
+      ["source", "sourceLine"],
+      ["alt"],
+      context,
+      (reader) => {
+        const source = snapshotBoundedString(
+          reader.read("source"),
+          GENERATED_DRAFT_TEXT_MAX,
+          context,
+        );
+        const sourceLine = snapshotSafeInteger(reader.read("sourceLine"), 1);
+        const altValue = reader.has("alt") ? reader.read("alt") : undefined;
+        const alt = altValue === undefined
+          ? undefined
+          : snapshotBoundedString(altValue, GENERATED_DRAFT_TEXT_MAX, context);
+        return Object.freeze({
+          source,
+          sourceLine,
+          ...(reader.has("alt") ? { alt } : {}),
+        });
+      },
+    ),
+  );
+}
+
+/** Closed, recursively frozen generated DTO shared by terminal and transport. */
+export function snapshotLinkedInGeneratedPost(value: unknown): GeneratedPost {
+  const context = newGeneratedDraftSnapshotContext();
+  return snapshotClosedRecord(
+    value,
+    ["format", "limit", "text", "chars", "hook", "usedBold", "codeFlags", "linkFlags", "imageFlags", "warnings"],
+    [],
+    context,
+    (reader) => {
+      if (reader.read("format") !== "post") throw new TerminalProjectionError();
+      const limit = snapshotSafeInteger(reader.read("limit"), 1);
+      if (limit !== LINKEDIN_POST_LIMIT) throw new TerminalProjectionError();
+      const text = snapshotBoundedString(reader.read("text"), LINKEDIN_POST_LIMIT, context);
+      const chars = snapshotSafeInteger(reader.read("chars"));
+      if (chars !== countUtf16CodeUnits(text)) throw new TerminalProjectionError();
+      const hook = snapshotBoundedString(reader.read("hook"), LINKEDIN_POST_LIMIT, context);
+      if (hook.length > text.length || (hook.length > 0 && !text.startsWith(hook))) {
+        throw new TerminalProjectionError();
+      }
+      const usedBold = snapshotBoolean(reader.read("usedBold"));
+      const codeFlags = snapshotGeneratedCodeFlags(reader.read("codeFlags"), context);
+      const linkFlags = snapshotGeneratedLinkFlags(reader.read("linkFlags"), context);
+      const imageFlags = snapshotMarkdownImageFlags(reader.read("imageFlags"), context);
+      const warnings = snapshotGeneratedWarnings(reader.read("warnings"), context);
+      return Object.freeze({
+        format: "post",
+        limit,
+        text,
+        chars,
+        hook,
+        usedBold,
+        codeFlags,
+        linkFlags,
+        imageFlags,
+        warnings,
+      }) as unknown as GeneratedPost;
+    },
+  );
+}
+
+function renderLinkedInPostSnapshot(p: GeneratedPost): string {
   const out: string[] = [];
   out.push(`format: ${p.format}`);
   out.push(`limit: ${p.limit}`);
   if (p.usedBold) out.push("bold: Unicode math-bold applied (--bold)");
 
-  out.push("", "── post ──", p.text, `[${p.chars} UTF-16 code units]`);
+  out.push(
+    "",
+    "── post (terminal-safe projection; every caller line begins with │) ──",
+    renderTerminalBlock(projectTerminalText(p.text, { lineMode: "block" })),
+    `[${p.chars} UTF-16 code units]`,
+  );
 
   out.push(
     "",
     `── above-the-fold hook (~${LINKEDIN_FOLD_CHARS} chars, before "…see more") ──`,
-    p.hook,
+    renderTerminalBlock(projectTerminalText(p.hook, { lineMode: "block" })),
   );
 
-  if (p.codeFlags.length) {
-    out.push("", "⚠ CODE BLOCKS (LinkedIn won't render code — paste a screenshot or attach a document instead):");
-    for (const f of p.codeFlags) {
-      out.push(`  #${f.index} ${f.lang ? `[${f.lang}] ` : ""}line ${f.sourceLine}: ${f.preview}`);
-    }
-  }
-  if (p.linkFlags.length) {
-    out.push("", "⚠ LINKS (placement matters for reach):");
-    for (const f of p.linkFlags) {
-      out.push(`  ${f.url}${f.text ? ` (${f.text})` : ""}`, `    ${f.note}`);
-    }
+  const advisorySections = commonAdvisoryText(
+    p.codeFlags,
+    p.linkFlags,
+    p.warnings,
+    "⚠ CODE BLOCKS (LinkedIn won't render code — paste a screenshot or attach a document instead):",
+    "⚠ LINKS (placement matters for reach):",
+  );
+  if (advisorySections.length) {
+    out.push(
+      "",
+      "── advisories (terminal-safe projection) ──",
+      renderTerminalBlock(projectTerminalText(advisorySections.join("\n"), { lineMode: "block" })),
+    );
   }
   if (p.imageFlags.length) {
-    out.push("", "⚠ MARKDOWN IMAGES (not attachments; pass intended files with --media):");
-    for (const image of p.imageFlags) {
-      out.push(
-        `  line ${image.sourceLine}: ${image.source}${image.alt ? ` (alt: ${image.alt})` : ""}`,
-      );
-    }
+    const images = p.imageFlags.map((image) =>
+      `line ${image.sourceLine}: ${image.source}${image.alt ? ` (alt: ${image.alt})` : ""}`
+    ).join("\n");
+    out.push(
+      "",
+      "⚠ MARKDOWN IMAGES (not attachments; pass intended files with --media):",
+      renderTerminalBlock(projectTerminalText(images, { lineMode: "block" })),
+    );
   }
-  if (p.warnings.length) {
-    out.push("", "⚠ WARNINGS:");
-    for (const w of p.warnings) out.push(`  - ${w}`);
-  }
-  return out.join("\n");
+  return finalizeTerminalDocument(out);
+}
+
+export function prepareLinkedInPost(value: unknown): Readonly<PreparedLinkedInPost> {
+  const post = snapshotLinkedInGeneratedPost(value);
+  const inspection = renderLinkedInPostSnapshot(post);
+  return Object.freeze({ post, inspection });
+}
+
+/** Human terminal renderer; canonical transport still uses `prepareLinkedInPost().post`. */
+export function renderPostForInspection(p: GeneratedPost): string {
+  return prepareLinkedInPost(p).inspection;
 }

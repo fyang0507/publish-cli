@@ -31,6 +31,10 @@ import type {
   XDraftRowEvidence,
   XReplyTargetEvidence,
 } from "../x/saveProgress.js";
+import {
+  X_CODE_BLOCK_FIDELITY_NOTE,
+  renderXNonArticleFidelityWarning,
+} from "../x/nonArticleStageSnapshot.js";
 
 const TARGET_A = "1234567890123456789";
 const TARGET_B = "9876543210987654321";
@@ -86,12 +90,13 @@ function fidelityFlag(): CodeBlockFidelityFlag {
     previewTruncated: false,
     digestNormalization: "lf_joined_source_lines",
     normalizedSourceSha256: "a".repeat(64),
-    note: "Add and verify the corresponding screenshot before final publication.",
+    note: X_CODE_BLOCK_FIDELITY_NOTE,
   };
 }
 
 function richThreadContent(): GeneratedContent {
   const text = "Reply A https://example.com [code block #1 → screenshot] 1/1";
+  const fidelity = fidelityFlag();
   return {
     format: "thread",
     limit: 280,
@@ -107,8 +112,8 @@ function richThreadContent(): GeneratedContent {
       text: "example",
       note: "Keep the link outside the opening post.",
     }],
-    fidelityFlags: [fidelityFlag()],
-    warnings: ["One fenced code block was replaced by an exact screenshot placeholder."],
+    fidelityFlags: [fidelity],
+    warnings: [renderXNonArticleFidelityWarning(fidelity)],
   };
 }
 

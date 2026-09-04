@@ -4,7 +4,8 @@ import { isProxy } from "node:util/types";
 import { dirname, basename, extname, join, resolve } from "node:path";
 import {
   generateContent,
-  renderForInspection,
+  prepareXTerminalContent,
+  renderXArtifactInspection,
   renderXLinkFlag,
   type GeneratedContent,
   type XFormat,
@@ -41,6 +42,15 @@ import {
   type XNonArticleStageSnapshot,
   type XArticleStageSnapshotFailure,
 } from "../x/articleStageSnapshot.js";
+import {
+  TerminalOutputBudget,
+  emitTerminalOutput,
+  isTerminalProjectionError,
+  projectTerminalText,
+  renderTerminalErrorMessage,
+  renderTerminalInline,
+  terminalProjectionFailureMessage,
+} from "../terminalOutput.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -517,7 +527,7 @@ function artifactBody(content: GeneratedContent): string {
     return content.article.markdown;
   }
   // tweet/thread artifact = the full inspection render (text + flags + warnings).
-  return `${renderForInspection(content)}\n`;
+  return `${renderXArtifactInspection(content)}\n`;
 }
 
 function renderFlagsBlock(content: GeneratedContent): string {
@@ -605,9 +615,17 @@ export function registerDraftCommand(x: Command): void {
         "  Never retry automatically. --inspect and selector calibration do not prove persistence.\n",
     )
     .action(async (opts: DraftXOptions) => {
+      const output = new TerminalOutputBudget();
+      const emit = (stream: "stdout" | "stderr", message: string) =>
+        emitTerminalOutput(output, stream, message);
       const format = opts.format as XFormat;
       if (!VALID_FORMATS.includes(format)) {
-        console.error(`Invalid --format "${opts.format}". Expected one of: ${VALID_FORMATS.join(" | ")}.`);
+        try {
+          const supplied = renderTerminalInline(projectTerminalText(opts.format, { lineMode: "inline" }));
+          emit("stderr", `Invalid --format "${supplied}". Expected one of: ${VALID_FORMATS.join(" | ")}.`);
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
 
@@ -636,7 +654,11 @@ export function registerDraftCommand(x: Command): void {
         }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        try {
+          emit("stderr", renderTerminalErrorMessage(error.message));
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
       // A real file base path (not stdin) — used to locate an article's hero
@@ -646,33 +668,107 @@ export function registerDraftCommand(x: Command): void {
       // DETERMINISTIC generation. No LLM voice pass by default (formatting,
       // splitting, and char-fit must stay reproducible).
       let content: GeneratedContent;
+      let inspection: string;
       try {
-        content = await generateContent(md, { format, long: opts.long, sourceLineOffset });
+        const prepared = prepareXTerminalContent(
+          await generateContent(md, { format, long: opts.long, sourceLineOffset }),
+        );
+        content = prepared.content;
+        inspection = prepared.inspection;
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
+        if (isTerminalProjectionError(error)) {
+          console.error(terminalProjectionFailureMessage());
+        } else {
+          try {
+            emit("stderr", renderTerminalErrorMessage(error.message));
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
+        }
         process.exit(2);
       }
 
-      // Always show the generated content + advisory flags to the operator.
-      console.log(renderForInspection(content));
+      let dryRunArtifacts: {
+        contentPath: string;
+        contentBody: string;
+        inspectionPath?: string;
+        inspectionBody?: string;
+        receipt: string;
+      } | null = null;
+      // Project caller paths and reserve the complete pre-runtime transcript
+      // before exposing content or writing any artifact.
+      try {
+        output.consume(inspection);
+        if (opts.dryRun && basePath) {
+          const contentPath = artifactPath(basePath, format);
+          const terminalContentPath = renderTerminalInline(projectTerminalText(
+            contentPath,
+            { lineMode: "inline" },
+          ));
+          if (format === "article") {
+            const inspectionPath = articleInspectionArtifactPath(basePath);
+            const terminalInspectionPath = renderTerminalInline(projectTerminalText(
+              inspectionPath,
+              { lineMode: "inline" },
+            ));
+            const receipt =
+              `\n[dry-run] No browser touched. Clean content written to:\n  ${terminalContentPath}\n` +
+              `Inspection receipt written to:\n  ${terminalInspectionPath}`;
+            output.consume(receipt);
+            dryRunArtifacts = {
+              contentPath,
+              contentBody: artifactBody(content),
+              inspectionPath,
+              inspectionBody: `${renderFlagsBlock(content)}\n`,
+              receipt,
+            };
+          } else {
+            const receipt = `\n[dry-run] No browser touched. Content written to:\n  ${terminalContentPath}`;
+            output.consume(receipt);
+            dryRunArtifacts = {
+              contentPath,
+              contentBody: artifactBody(content),
+              receipt,
+            };
+          }
+        } else if (opts.dryRun) {
+          output.consume("\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)");
+        }
+      } catch {
+        console.error(terminalProjectionFailureMessage());
+        process.exit(2);
+      }
+      console.log(inspection);
 
       if (opts.dryRun) {
         // Write an artifact only when there's a base file to write beside it;
         // inline --text (and stdin) have nowhere to anchor, so print-only.
-        if (basePath) {
-          const outPath = artifactPath(basePath, format);
-          writeFileSync(outPath, artifactBody(content), "utf-8");
-          if (format === "article") {
-            const inspectionPath = articleInspectionArtifactPath(basePath);
-            writeFileSync(inspectionPath, `${renderFlagsBlock(content)}\n`, "utf-8");
-            console.log(
-              `\n[dry-run] No browser touched. Clean content written to:\n  ${outPath}\n` +
-              `Inspection receipt written to:\n  ${inspectionPath}`,
+        if (dryRunArtifacts) {
+          try {
+            writeFileSync(dryRunArtifacts.contentPath, dryRunArtifacts.contentBody, "utf-8");
+          } catch {
+            emit(
+              "stderr",
+              "\n✗ Local X dry-run artifact write failed. The requested artifact may be absent, partial, or replaced. " +
+                "No browser, profile, reply ledger, or native staging action followed.",
             );
-          } else {
-            console.log(`\n[dry-run] No browser touched. Content written to:\n  ${outPath}`);
+            process.exit(2);
           }
+          if (dryRunArtifacts.inspectionPath && dryRunArtifacts.inspectionBody !== undefined) {
+            try {
+              writeFileSync(dryRunArtifacts.inspectionPath, dryRunArtifacts.inspectionBody, "utf-8");
+            } catch {
+              emit(
+                "stderr",
+                "\n✗ Local X Article inspection receipt write failed after the clean content artifact write returned. " +
+                  "The clean content artifact may already exist; the inspection receipt may be absent, partial, or replaced. " +
+                  "No browser, profile, or native staging action followed.",
+              );
+              process.exit(2);
+            }
+          }
+          console.log(dryRunArtifacts.receipt);
         } else {
           console.log("\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)");
         }
@@ -683,8 +779,7 @@ export function registerDraftCommand(x: Command): void {
         { content, inspect: opts.inspect, basePath },
         productionXDraftRealRunDependencies,
       );
-      if (outcome.stream === "stdout") console.log(outcome.message);
-      else console.error(outcome.message);
+      emit(outcome.stream, outcome.message);
       process.exit(outcome.exitCode);
     });
 }

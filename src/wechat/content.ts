@@ -51,6 +51,29 @@ import {
   assertWechatLocalImage,
   type LocalImageValidationResult,
 } from "../capabilities/validation.js";
+import {
+  GENERATED_DRAFT_ARRAY_MAX,
+  GENERATED_DRAFT_TEXT_MAX,
+  commonAdvisoryText,
+  newGeneratedDraftSnapshotContext,
+  snapshotGeneratedLinkFlags,
+  snapshotGeneratedWarnings,
+} from "../draftSnapshot.js";
+import {
+  TerminalProjectionError,
+  finalizeTerminalDocument,
+  projectTerminalText,
+  renderTerminalBlock,
+  renderTerminalInline,
+  snapshotBoolean,
+  snapshotBoundedString,
+  snapshotClosedRecord,
+  snapshotDenseArray,
+  snapshotFiniteNumber,
+  snapshotOptionalString,
+  snapshotSafeInteger,
+  type ClosedSnapshotContext,
+} from "../terminalOutput.js";
 
 /** WeChat's own article domain — links here are always kept inline (never cited). */
 const WECHAT_HOST = "mp.weixin.qq.com";
@@ -125,6 +148,11 @@ export interface GeneratedArticle {
   linkFlags: LinkFlag[];
   /** Non-fatal advisories (omitted digest, links→citations, remote image found, …). Never silent. */
   warnings: string[];
+}
+
+export interface PreparedWechatArticle {
+  readonly article: GeneratedArticle;
+  readonly inspection: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -859,34 +887,166 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
 // Public API: inspection dump
 // ---------------------------------------------------------------------------
 
-/**
- * Render a GeneratedArticle to a human-readable inspection string (used by
- * --dry-run echo and the draft command's success report). Mirrors X's
- * renderForInspection and Reddit's renderSelfPostForInspection.
- */
-export function renderArticleForInspection(a: GeneratedArticle): string {
+function snapshotNullableFinite(value: unknown): number | null {
+  return value === null ? null : snapshotFiniteNumber(value);
+}
+
+function snapshotWechatImageValidation(
+  value: unknown,
+  expectedSurface: "cover" | "body",
+  context: ClosedSnapshotContext,
+): Readonly<LocalImageValidationResult> {
+  return snapshotClosedRecord(
+    value,
+    [
+      "path", "valid", "extension", "contentType", "sizeBytes", "width", "height",
+      "aspectRatio", "error", "problem", "surface", "maximumBytes", "unverifiedConstraints",
+    ],
+    [],
+    context,
+    (reader) => {
+      const path = snapshotBoundedString(reader.read("path"), GENERATED_DRAFT_TEXT_MAX, context);
+      if (reader.read("valid") !== true || reader.read("surface") !== expectedSurface) {
+        throw new TerminalProjectionError();
+      }
+      const extension = snapshotBoundedString(reader.read("extension"), 32, context);
+      const contentType = reader.read("contentType");
+      if (
+        contentType !== "image/bmp" && contentType !== "image/gif" &&
+        contentType !== "image/jpeg" && contentType !== "image/png" &&
+        contentType !== "image/webp"
+      ) throw new TerminalProjectionError();
+      const sizeBytes = snapshotNullableFinite(reader.read("sizeBytes"));
+      const width = snapshotNullableFinite(reader.read("width"));
+      const height = snapshotNullableFinite(reader.read("height"));
+      const aspectRatio = snapshotNullableFinite(reader.read("aspectRatio"));
+      if (
+        reader.read("error") !== null || reader.read("problem") !== null ||
+        reader.read("maximumBytes") !== null
+      ) throw new TerminalProjectionError();
+      const constraints = snapshotDenseArray(
+        reader.read("unverifiedConstraints"),
+        WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS.length,
+        context,
+        (entry) => snapshotBoundedString(entry, 100, context),
+      );
+      if (
+        constraints.length !== WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS.length ||
+        constraints.some((entry, index) => entry !== WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS[index])
+      ) throw new TerminalProjectionError();
+      return Object.freeze({
+        path,
+        valid: true,
+        extension,
+        contentType,
+        sizeBytes,
+        width,
+        height,
+        aspectRatio,
+        error: null,
+        problem: null,
+        surface: expectedSurface,
+        maximumBytes: null,
+        unverifiedConstraints: constraints as typeof WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS,
+      });
+    },
+  );
+}
+
+function snapshotWechatBodyImages(
+  value: unknown,
+  context: ClosedSnapshotContext,
+): readonly Readonly<BodyImage>[] {
+  return snapshotDenseArray(
+    value,
+    GENERATED_DRAFT_ARRAY_MAX,
+    context,
+    (entry) => snapshotClosedRecord(
+      entry,
+      ["src", "htmlSrc", "path", "validation"],
+      [],
+      context,
+      (reader) => {
+        const src = snapshotBoundedString(reader.read("src"), GENERATED_DRAFT_TEXT_MAX, context);
+        const htmlSrc = snapshotBoundedString(reader.read("htmlSrc"), GENERATED_DRAFT_TEXT_MAX, context);
+        const path = snapshotBoundedString(reader.read("path"), GENERATED_DRAFT_TEXT_MAX, context);
+        const validation = snapshotWechatImageValidation(reader.read("validation"), "body", context);
+        if (validation.path !== path) throw new TerminalProjectionError();
+        return Object.freeze({ src, htmlSrc, path, validation });
+      },
+    ),
+  );
+}
+
+/** Closed, recursively frozen generated DTO shared by terminal and transport. */
+export function snapshotWechatGeneratedArticle(value: unknown): GeneratedArticle {
+  const context = newGeneratedDraftSnapshotContext();
+  return snapshotClosedRecord(
+    value,
+    ["title", "author", "digest", "html", "coverPath", "coverValidation", "bodyImages", "linkFlags", "warnings"],
+    ["sourceUrl"],
+    context,
+    (reader) => {
+      const title = snapshotBoundedString(reader.read("title"), GENERATED_DRAFT_TEXT_MAX, context);
+      if (!title) throw new TerminalProjectionError();
+      const author = snapshotBoundedString(reader.read("author"), GENERATED_DRAFT_TEXT_MAX, context);
+      const digest = snapshotBoundedString(reader.read("digest"), GENERATED_DRAFT_TEXT_MAX, context);
+      const html = snapshotBoundedString(reader.read("html"), GENERATED_DRAFT_TEXT_MAX, context);
+      const coverPath = snapshotBoundedString(reader.read("coverPath"), GENERATED_DRAFT_TEXT_MAX, context);
+      const coverValidation = snapshotWechatImageValidation(reader.read("coverValidation"), "cover", context);
+      if (coverValidation.path !== coverPath) throw new TerminalProjectionError();
+      const sourceUrl = reader.has("sourceUrl")
+        ? snapshotOptionalString(reader.read("sourceUrl"), GENERATED_DRAFT_TEXT_MAX, context)
+        : undefined;
+      const bodyImages = snapshotWechatBodyImages(reader.read("bodyImages"), context);
+      const linkFlags = snapshotGeneratedLinkFlags(reader.read("linkFlags"), context);
+      const warnings = snapshotGeneratedWarnings(reader.read("warnings"), context);
+      return Object.freeze({
+        title,
+        author,
+        digest,
+        html,
+        coverPath,
+        coverValidation,
+        ...(reader.has("sourceUrl") ? { sourceUrl } : {}),
+        bodyImages,
+        linkFlags,
+        warnings,
+      }) as unknown as GeneratedArticle;
+    },
+  );
+}
+
+function renderWechatArticleSnapshot(a: GeneratedArticle): string {
   const out: string[] = [];
   out.push("format: article (article_type=news)");
-  out.push(`title (documented 32 字; server-authoritative measurement): ${a.title}`);
-  out.push(`author: ${a.author || "(none)"}`);
-  out.push(`digest (documented 120 字; omitted => first 54 字): ${a.digest || "(omitted)"}`);
+  out.push(
+    `title (documented 32 字; server-authoritative measurement): ${renderTerminalInline(projectTerminalText(a.title, { lineMode: "inline" }))}`,
+  );
+  out.push(
+    `author: ${a.author ? renderTerminalInline(projectTerminalText(a.author, { lineMode: "inline" })) : "(none)"}`,
+  );
+  out.push(
+    `digest (documented 120 字; omitted => first 54 字): ${a.digest ? renderTerminalInline(projectTerminalText(a.digest, { lineMode: "inline" })) : "(omitted)"}`,
+  );
   out.push("", "── local image validation ──");
   out.push(
-    `cover: ${a.coverPath}`,
+    `cover: ${renderTerminalInline(projectTerminalText(a.coverPath, { lineMode: "inline" }))}`,
     `  ${a.coverValidation.contentType}; ${a.coverValidation.width}x${a.coverValidation.height}; ` +
       `${a.coverValidation.sizeBytes} bytes; aspect ${a.coverValidation.aspectRatio?.toFixed(4)}`,
   );
-  if (a.sourceUrl) out.push(`source url (阅读原文): ${a.sourceUrl}`);
+  if (a.sourceUrl) {
+    out.push(`source url (阅读原文): ${renderTerminalInline(projectTerminalText(a.sourceUrl, { lineMode: "inline" }))}`);
+  }
 
   if (a.bodyImages.length) {
     out.push("", `── body images (${a.bodyImages.length}, uploaded to WeChat on a real run) ──`);
-    for (const img of a.bodyImages) {
-      out.push(
-        img.src === img.path ? `  ${img.src}` : `  ${img.src}  →  ${img.path}`,
-        `    ${img.validation.contentType}; ${img.validation.width}x${img.validation.height}; ` +
-          `${img.validation.sizeBytes} bytes; aspect ${img.validation.aspectRatio?.toFixed(4)}`,
-      );
-    }
+    const images = a.bodyImages.map((img) =>
+      (img.src === img.path ? img.src : `${img.src}  →  ${img.path}`) +
+      `\n${img.validation.contentType}; ${img.validation.width}x${img.validation.height}; ` +
+      `${img.validation.sizeBytes} bytes; aspect ${img.validation.aspectRatio?.toFixed(4)}`
+    ).join("\n");
+    out.push(renderTerminalBlock(projectTerminalText(images, { lineMode: "block" })));
   }
 
   out.push(
@@ -894,17 +1054,35 @@ export function renderArticleForInspection(a: GeneratedArticle): string {
     `server-authoritative/unverified: ${WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS.join(", ")}`,
   );
 
-  out.push("", "── HTML body (inline-styled; <img src> rewritten on a real run) ──", a.html);
+  out.push(
+    "",
+    "── HTML body (canonical HTML remains exact; terminal-safe projection below) ──",
+    renderTerminalBlock(projectTerminalText(a.html, { lineMode: "block" })),
+  );
 
-  if (a.linkFlags.length) {
-    out.push("", "⚠ LINKS:");
-    for (const f of a.linkFlags) {
-      out.push(`  ${f.url}${f.text ? ` (${f.text})` : ""}`, `    ${f.note}`);
-    }
+  const advisorySections = commonAdvisoryText(
+    [],
+    a.linkFlags,
+    a.warnings,
+    "",
+    "⚠ LINKS:",
+  );
+  if (advisorySections.length) {
+    out.push(
+      "",
+      "── advisories (terminal-safe projection) ──",
+      renderTerminalBlock(projectTerminalText(advisorySections.join("\n"), { lineMode: "block" })),
+    );
   }
-  if (a.warnings.length) {
-    out.push("", "⚠ WARNINGS:");
-    for (const w of a.warnings) out.push(`  - ${w}`);
-  }
-  return out.join("\n");
+  return finalizeTerminalDocument(out);
+}
+
+export function prepareWechatArticle(value: unknown): Readonly<PreparedWechatArticle> {
+  const article = snapshotWechatGeneratedArticle(value);
+  const inspection = renderWechatArticleSnapshot(article);
+  return Object.freeze({ article, inspection });
+}
+
+export function renderArticleForInspection(a: GeneratedArticle): string {
+  return prepareWechatArticle(a).inspection;
 }

@@ -922,12 +922,12 @@ test("large blank-line Article inspection redacts code without variadic overflow
   assert.doesNotThrow(() => {
     inspection = renderForInspection(content);
   });
-  assert.ok(
-    inspection.includes(
-      `── article: Large inspection ──\n${expectedTerminalMarkdown}\n` +
-      "[native rich-HTML excluded code blocks: 1]",
-    ),
-  );
+  assert.match(inspection, /── article: Large inspection ──/);
+  assert.match(inspection, /terminal projection truncated/);
+  assert.match(inspection, /originalUtf16CodeUnits=/);
+  assert.match(inspection, /digestNormalization=none/);
+  assert.match(inspection, new RegExp(`LF-normalized exact fence source sha256=${flag.normalizedSourceSha256}`));
+  assert.ok(inspection.length < 100_000, `inspection was not bounded: ${inspection.length}`);
   assert.doesNotMatch(
     inspection,
     /```txt|RAW_LARGE_CODE_CANARY|RAW_SECOND_CODE_CANARY|RangeError|Maximum call stack|\/Users\//,

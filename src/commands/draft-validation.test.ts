@@ -13,7 +13,12 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-import { generateContent, parseArticleBlocks } from "../x/content.js";
+import {
+  generateContent,
+  parseArticleBlocks,
+  renderXArtifactInspection,
+} from "../x/content.js";
+import { generateArticle } from "../wechat/content.js";
 
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 
@@ -394,7 +399,12 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
       `${"reply-prefix ".repeat(30)}\n[code block #1 → screenshot]\n${"reply suffix ".repeat(15).trimEnd()}`,
     );
     for (const post of expectedReplyThread.thread ?? []) {
-      assert.ok(stdinRun.stdout.includes(post.text), `reply dry-run omitted exact row ${post.index}`);
+      for (const line of post.text.split("\n")) {
+        assert.ok(
+          stdinRun.stdout.includes(`│ ${line}`),
+          `reply dry-run omitted framed row ${post.index} line ${JSON.stringify(line)}`,
+        );
+      }
     }
 
     const invalidCases = [
@@ -1004,9 +1014,9 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
     assert.match(emptyMap.stdout, /Empty-map body/);
 
     for (const [name, source, evidence] of [
-      ["scalar", "\ufeff---\rfalse\r---\rScalar body", /---\nfalse\n---\nScalar body/],
-      ["sequence", "\ufeff---\r\n- first\r\n- second\r\n---\r\nSequence body", /---\n- first\n- second\n---\nSequence body/],
-      ["thematic", "\ufeff---\n\nA thematic section\n\n---\n\nMore prose", /---\n\nA thematic section\n\n---\n\nMore prose/],
+      ["scalar", "\ufeff---\rfalse\r---\rScalar body", /│ ---\n│ false\n│ ---\n│ Scalar body/],
+      ["sequence", "\ufeff---\r\n- first\r\n- second\r\n---\r\nSequence body", /│ ---\n│ - first\n│ - second\n│ ---\n│ Sequence body/],
+      ["thematic", "\ufeff---\n\nA thematic section\n\n---\n\nMore prose", /│ ---\n│ \n│ A thematic section\n│ \n│ ---\n│ \n│ More prose/],
     ] as const) {
       const ordinary = runCli(
         fixture,
@@ -1023,7 +1033,7 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
       "---\ntitle: Literal inline content\n---\nInline body", "--dry-run",
     ]);
     assert.equal(literal.status, 0, output(literal));
-    assert.match(literal.stdout, /---\ntitle: Literal inline content\n---\nInline body/);
+    assert.match(literal.stdout, /│ ---\n│ title: Literal inline content\n│ ---\n│ Inline body/);
 
     const literalThreadSource =
       "---\ntitle: Literal inline thread\n---\n" +
@@ -1032,7 +1042,7 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
       "x", "draft", "--format", "thread", "--text", literalThreadSource, "--dry-run",
     ]);
     assert.equal(literalThread.status, 0, output(literalThread));
-    assert.match(literalThread.stdout, /---\ntitle: Literal inline thread\n---/);
+    assert.match(literalThread.stdout, /│ ---\n│ title: Literal inline thread\n│ ---/);
     assert.doesNotMatch(output(literalThread), /PLATFORM_IMPORT_BLOCKED/);
 
     const literalReply = runCli(
@@ -1044,7 +1054,7 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
       undefined,
     );
     assert.equal(literalReply.status, 0, output(literalReply));
-    assert.match(literalReply.stdout, /---\ntitle: Literal inline reply\n---\nReply body/);
+    assert.match(literalReply.stdout, /│ ---\n│ title: Literal inline reply\n│ ---\n│ Reply body/);
     assert.doesNotMatch(output(literalReply), /PLATFORM_IMPORT_BLOCKED/);
 
     const weighted = runCli(
@@ -1706,6 +1716,116 @@ test("valid dry-runs also avoid platform/browser/API imports", () => {
   }
 });
 
+test("local artifact write failures stay bounded and content-free before platform access", async () => {
+  const fixture = createFixture();
+  const rawForgedReceipt = "\n✓ Staged a FORGED draft";
+  const hostileDir = join(
+    fixture.dir,
+    `write-\u001b]0;owned\u0007${rawForgedReceipt}`,
+  );
+  const xFirstWriteError =
+    "\n✗ Local X dry-run artifact write failed. The requested artifact may be absent, partial, or replaced. " +
+    "No browser, profile, reply ledger, or native staging action followed.\n";
+  const xSecondWriteError =
+    "\n✗ Local X Article inspection receipt write failed after the clean content artifact write returned. " +
+    "The clean content artifact may already exist; the inspection receipt may be absent, partial, or replaced. " +
+    "No browser, profile, or native staging action followed.\n";
+  const wechatWriteError =
+    "\n✗ Local WeChat --out artifact write failed. The requested HTML artifact may be absent, partial, or replaced. " +
+    "No token, client, upload, or draft API action followed.\n";
+
+  const assertSafeFailure = (
+    result: SpawnSyncReturns<string>,
+    expectedStderr: string,
+  ): void => {
+    const combined = output(result);
+    assert.equal(result.status, 2, combined);
+    assert.equal(result.signal, null, combined);
+    assert.equal(result.stderr, expectedStderr);
+    assert.ok(result.stderr.length < 400, "write failure receipt must stay bounded");
+    assert.doesNotMatch(combined, /[\u001b\u0007]/u);
+    assert.equal(combined.includes(rawForgedReceipt), false, combined);
+    assert.equal(combined.includes(hostileDir), false, combined);
+    assert.doesNotMatch(combined, /EISDIR|errno|PLATFORM_IMPORT_BLOCKED/);
+  };
+
+  try {
+    mkdirSync(hostileDir);
+
+    const tweetSource = join(hostileDir, "tweet.md");
+    const tweetArtifact = join(hostileDir, "tweet.x-tweet.txt");
+    writeFileSync(tweetSource, "Exact tweet artifact bytes.");
+    mkdirSync(tweetArtifact);
+    const tweetFailure = runCli(fixture, [
+      "x", "draft", "--format", "tweet", "--from", tweetSource, "--dry-run",
+    ]);
+    assertSafeFailure(tweetFailure, xFirstWriteError);
+    assert.equal(readFileSync(tweetSource, "utf8"), "Exact tweet artifact bytes.");
+    assert.equal(readdirSync(tweetArtifact).length, 0);
+
+    const articleSource = join(hostileDir, "article.md");
+    const articleArtifact = join(hostileDir, "article.x-article.md");
+    const articleInspectionArtifact = join(hostileDir, "article.x-article.inspection.txt");
+    const exactArticle = "# Exact Article\n\nBody remains byte exact.\n";
+    writeFileSync(articleSource, exactArticle);
+    mkdirSync(articleInspectionArtifact);
+    const articleFailure = runCli(fixture, [
+      "x", "draft", "--format", "article", "--from", articleSource, "--dry-run",
+    ]);
+    assertSafeFailure(articleFailure, xSecondWriteError);
+    assert.equal(readFileSync(articleArtifact, "utf8"), exactArticle);
+    assert.equal(readdirSync(articleInspectionArtifact).length, 0);
+
+    const cover = join(hostileDir, "cover.png");
+    const wechatFailurePath = join(hostileDir, "wechat-output.html");
+    writeFileSync(cover, png(900, 900));
+    mkdirSync(wechatFailurePath);
+    for (const dryRun of [false, true]) {
+      const result = runCli(fixture, [
+        "wechat", "draft", "--title", "Exact WeChat title", "--text", "Exact WeChat body.",
+        "--cover", cover, "--out", wechatFailurePath,
+        ...(dryRun ? ["--dry-run"] : []),
+      ], undefined, { cwd: fixture.dir });
+      assertSafeFailure(result, wechatWriteError);
+      assert.equal(readdirSync(wechatFailurePath).length, 0);
+    }
+
+    // The failure guards do not change bytes on either successful write path.
+    const successfulTweetSource = join(fixture.dir, "successful-tweet.md");
+    const successfulTweetArtifact = join(fixture.dir, "successful-tweet.x-tweet.txt");
+    const successfulTweetBody = "Successful artifact bytes stay exact.";
+    writeFileSync(successfulTweetSource, successfulTweetBody);
+    const successfulTweet = runCli(fixture, [
+      "x", "draft", "--format", "tweet", "--from", successfulTweetSource, "--dry-run",
+    ]);
+    assert.equal(successfulTweet.status, 0, output(successfulTweet));
+    const generatedTweet = await generateContent(successfulTweetBody, { format: "tweet" });
+    assert.equal(
+      readFileSync(successfulTweetArtifact, "utf8"),
+      `${renderXArtifactInspection(generatedTweet)}\n`,
+    );
+
+    const successfulWechatPath = join(fixture.dir, "successful-wechat.html");
+    const successfulWechat = runCli(fixture, [
+      "wechat", "draft", "--title", "Exact WeChat title", "--text", "Exact WeChat body.",
+      "--cover", cover, "--out", successfulWechatPath, "--dry-run",
+    ], undefined, { cwd: fixture.dir });
+    assert.equal(successfulWechat.status, 0, output(successfulWechat));
+    const generatedWechat = generateArticle("Exact WeChat body.", {
+      title: "Exact WeChat title",
+      authorFallback: "",
+      cover,
+      baseDir: fixture.dir,
+    });
+    assert.equal(readFileSync(successfulWechatPath, "utf8"), generatedWechat.html);
+
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
 test("LinkedIn file/stdin frontmatter is stripped, inline text stays literal, and malformed input fails", () => {
   const fixture = createFixture();
   try {
@@ -1809,7 +1929,7 @@ test("Reddit file/stdin frontmatter is exact, literal input stays literal, and f
       assert.equal(fromFile.status, 0, output(fromFile));
       assert.match(fromFile.stdout, /subreddit: r\/from-file/);
       assert.match(fromFile.stdout, /flair \(requested\): Discussion/);
-      assert.match(fromFile.stdout, /\nFrom file\n/);
+      assert.match(fromFile.stdout, /\n│ From file\n/);
       assert.match(fromFile.stdout, /Visible body/);
       assert.doesNotMatch(fromFile.stdout, /title: From file|subreddit: from-file|PLATFORM_IMPORT_BLOCKED/);
     }
@@ -1827,7 +1947,7 @@ test("Reddit file/stdin frontmatter is exact, literal input stays literal, and f
     assert.equal(precedence.status, 0, output(precedence));
     assert.match(precedence.stdout, /subreddit: r\/flag-sub/);
     assert.match(precedence.stdout, /flair \(requested\): Flag flair/);
-    assert.match(precedence.stdout, /\nFlag title\n/);
+    assert.match(precedence.stdout, /\n│ Flag title\n/);
     assert.match(precedence.stdout, /flags: NSFW, spoiler/);
     assert.doesNotMatch(precedence.stdout, /metadata-sub|Metadata title|Metadata flair/);
 
@@ -1870,7 +1990,7 @@ test("Reddit file/stdin frontmatter is exact, literal input stays literal, and f
       "--subreddit", "test", "--dry-run",
     ]);
     assert.equal(commentMapH1.status, 0, output(commentMapH1));
-    assert.match(commentMapH1.stdout, /\nLone CR H1 title\n/);
+    assert.match(commentMapH1.stdout, /\n│ Lone CR H1 title\n/);
     assert.match(commentMapH1.stdout, /Lone CR body/);
     assert.doesNotMatch(commentMapH1.stdout, /empty metadata comment|PLATFORM_IMPORT_BLOCKED/);
 
@@ -1889,7 +2009,7 @@ test("Reddit file/stdin frontmatter is exact, literal input stays literal, and f
       "--subreddit", "test", "--title", "Title", "--dry-run",
     ]);
     assert.equal(lateMapping.status, 0, output(lateMapping));
-    assert.match(lateMapping.stdout, /---\n\nBody\n\nEdit: text/);
+    assert.match(lateMapping.stdout, /│ ---\n│ \n│ Body\n│ \n│ Edit: text/);
     assert.doesNotMatch(lateMapping.stdout, /PLATFORM_IMPORT_BLOCKED/);
 
     const offsetPath = join(fixture.dir, "reddit-code-offset.md");
@@ -1942,12 +2062,12 @@ test("Reddit file/stdin frontmatter is exact, literal input stays literal, and f
       "--subreddit", "test", "--title", "Title", "--dry-run",
     ]);
     assert.equal(scalar.status, 0, output(scalar));
-    assert.match(scalar.stdout, /---\nfalse\n---\nScalar body/);
+    assert.match(scalar.stdout, /│ ---\n│ false\n│ ---\n│ Scalar body/);
     assert.doesNotMatch(scalar.stdout, /\ufeff/);
 
     for (const [name, source, evidence] of [
-      ["sequence", "---\n- ordinary\n- list\n---\nSequence body\n", /---\n- ordinary\n- list\n---\nSequence body/],
-      ["colon-scalar", "---\nKey:value prose\n---\nColon body\n", /---\nKey:value prose\n---\nColon body/],
+      ["sequence", "---\n- ordinary\n- list\n---\nSequence body\n", /│ ---\n│ - ordinary\n│ - list\n│ ---\n│ Sequence body/],
+      ["colon-scalar", "---\nKey:value prose\n---\nColon body\n", /│ ---\n│ Key:value prose\n│ ---\n│ Colon body/],
     ] as const) {
       const ambiguousPath = join(fixture.dir, `reddit-${name}.md`);
       writeFileSync(ambiguousPath, source);
@@ -1964,7 +2084,7 @@ test("Reddit file/stdin frontmatter is exact, literal input stays literal, and f
       "---\nsubreddit: literal-sub\ntitle: Literal title\n---\nLiteral body\n", "--dry-run",
     ]);
     assert.equal(literalMapping.status, 0, output(literalMapping));
-    assert.match(literalMapping.stdout, /---\nsubreddit: literal-sub\ntitle: Literal title\n---\nLiteral body/);
+    assert.match(literalMapping.stdout, /│ ---\n│ subreddit: literal-sub\n│ title: Literal title\n│ ---\n│ Literal body/);
     assert.match(literalMapping.stdout, /subreddit: r\/flag-sub/);
 
     const guidance = runCli(fixture, [

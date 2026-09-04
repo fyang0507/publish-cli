@@ -6,13 +6,28 @@ import {
 } from "./contentInput.js";
 import {
   generateSelfPost,
-  renderSelfPostForInspection,
+  prepareRedditSelfPost,
   preflightSelfPost,
   validateRedditFrontmatter,
   type GeneratedSelfPost,
 } from "../reddit/content.js";
 import { isLocalValidationError, LocalValidationError } from "../capabilities/validation.js";
 import type { StageDraftResult } from "../reddit/draftPoster.js";
+import {
+  TerminalOutputBudget,
+  TerminalProjectionError,
+  createClosedSnapshotContext,
+  emitTerminalOutput,
+  isTerminalProjectionError,
+  projectTerminalText,
+  renderTerminalBlock,
+  renderTerminalErrorMessage,
+  renderTerminalInline,
+  snapshotBoolean,
+  snapshotBoundedString,
+  snapshotClosedRecord,
+  terminalProjectionFailureMessage,
+} from "../terminalOutput.js";
 
 /**
  * `publish reddit draft` — owned-content publisher for the Reddit channel
@@ -55,17 +70,63 @@ export interface RedditStageCommandOutcome {
 }
 
 /** Keep save-confirmation truth and exit semantics independent of browser code. */
-export function classifyRedditStageResult(result: StageDraftResult): RedditStageCommandOutcome {
+export function classifyRedditStageResult(
+  value: StageDraftResult,
+  expectedSubreddit?: string,
+): RedditStageCommandOutcome {
+  const context = createClosedSnapshotContext();
+  const result = snapshotClosedRecord(
+    value,
+    ["kind", "saveStatus", "saved", "verified", "subreddit", "note"],
+    ["flair", "blocked"],
+    context,
+    (reader) => {
+      if (reader.read("kind") !== "self") throw new TerminalProjectionError();
+      const saveStatus = reader.read("saveStatus");
+      if (saveStatus !== "not_attempted" && saveStatus !== "unconfirmed" && saveStatus !== "toast_confirmed") {
+        throw new TerminalProjectionError();
+      }
+      const saved = snapshotBoolean(reader.read("saved"));
+      const verified = snapshotBoolean(reader.read("verified"));
+      const subreddit = snapshotBoundedString(reader.read("subreddit"), 25_000_000, context);
+      if (expectedSubreddit !== undefined && subreddit !== expectedSubreddit) {
+        throw new TerminalProjectionError();
+      }
+      const note = snapshotBoundedString(reader.read("note"), 25_000_000, context);
+      const flair = reader.has("flair") && reader.read("flair") !== undefined
+        ? snapshotBoundedString(reader.read("flair"), 25_000_000, context)
+        : undefined;
+      const blocked = reader.has("blocked") && reader.read("blocked") !== undefined
+        ? snapshotBoundedString(reader.read("blocked"), 25_000_000, context)
+        : undefined;
+      return Object.freeze({
+        kind: "self" as const,
+        saveStatus,
+        saved,
+        verified,
+        subreddit,
+        ...(reader.has("flair") ? { flair } : {}),
+        ...(reader.has("blocked") ? { blocked } : {}),
+        note,
+      });
+    },
+  );
+  const safeSubreddit = renderTerminalInline(projectTerminalText(
+    expectedSubreddit ?? result.subreddit,
+    { lineMode: "inline" },
+  ));
+  const safeNote = renderTerminalInline(projectTerminalText(result.note, { lineMode: "inline" }));
   if (result.blocked) {
-    return { exitCode: 1, stream: "stderr", message: `\n✗ ${result.blocked}` };
+    const blocked = renderTerminalInline(projectTerminalText(result.blocked, { lineMode: "inline" }));
+    return { exitCode: 1, stream: "stderr", message: `\n✗ ${blocked}` };
   }
   if (result.saveStatus === "not_attempted" || !result.saved) {
     return {
       exitCode: 1,
       stream: "stderr",
       message:
-        `\n✗ No Reddit draft was confirmed for r/${result.subreddit} (NEVER posted).\n` +
-        `  ${result.note}`,
+        `\n✗ No Reddit draft was confirmed for r/${safeSubreddit} (NEVER posted).\n` +
+        `  ${safeNote}`,
     };
   }
   if (result.saveStatus === "unconfirmed" || !result.verified) {
@@ -73,18 +134,20 @@ export function classifyRedditStageResult(result: StageDraftResult): RedditStage
       exitCode: 1,
       stream: "stderr",
       message:
-        `\n✗ Reddit draft state for r/${result.subreddit} is UNCONFIRMED (NEVER posted).\n` +
-        `  ${result.note}`,
+        `\n✗ Reddit draft state for r/${safeSubreddit} is UNCONFIRMED (NEVER posted).\n` +
+        `  ${safeNote}`,
     };
   }
   return {
     exitCode: 0,
     stream: "stdout",
     message:
-      `\n✓ Staged a NATIVE Reddit draft (self-post) to r/${result.subreddit}. NEVER posted.\n` +
+      `\n✓ Staged a NATIVE Reddit draft (self-post) to r/${safeSubreddit}. NEVER posted.\n` +
       "  verified by Draft saved toast: yes\n" +
-      (result.flair ? `  flair: ${result.flair}\n` : "") +
-      `  ${result.note}`,
+      (result.flair
+        ? `  flair: ${renderTerminalInline(projectTerminalText(result.flair, { lineMode: "inline" }))}\n`
+        : "") +
+      `  ${safeNote}`,
   };
 }
 
@@ -121,6 +184,9 @@ export function registerRedditDraftCommand(reddit: Command): void {
         "  CLI-owned profile. Never blindly retry (duplicate risk; no draft idempotency ledger).\n",
     )
     .action(async (opts: RedditDraftOptions) => {
+      const output = new TerminalOutputBudget();
+      const emit = (stream: "stdout" | "stderr", message: string) =>
+        emitTerminalOutput(output, stream, message);
       let md: string;
       let frontmatter = {};
       let bodyLineOffset = 0;
@@ -139,15 +205,20 @@ export function registerRedditDraftCommand(reddit: Command): void {
         }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        try {
+          emit("stderr", renderTerminalErrorMessage(error.message));
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
 
       // DETERMINISTIC generation (no LLM). Throws on missing / oversized title —
       // treat as a usage error (exit 2), same tier as resolveContentInput.
       let post: GeneratedSelfPost;
+      let inspection: string;
       try {
-        post = generateSelfPost(md, {
+        const prepared = prepareRedditSelfPost(generateSelfPost(md, {
           subreddit: opts.subreddit,
           title: opts.title,
           flair: opts.flair,
@@ -155,15 +226,30 @@ export function registerRedditDraftCommand(reddit: Command): void {
           spoiler: opts.spoiler,
           frontmatter,
           bodyLineOffset,
-        });
+        }));
+        post = prepared.post;
+        inspection = prepared.inspection;
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
+        if (isTerminalProjectionError(error)) {
+          console.error(terminalProjectionFailureMessage());
+        } else {
+          try {
+            emit("stderr", renderTerminalErrorMessage(error.message));
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
+        }
         process.exit(2);
       }
 
       // Always show the generated post + advisory flags to the operator.
-      console.log(renderSelfPostForInspection(post));
+      try {
+        emit("stdout", inspection);
+      } catch {
+        console.error(terminalProjectionFailureMessage());
+        process.exit(2);
+      }
 
       const subreddit = post.subreddit;
       if (!subreddit) {
@@ -177,7 +263,14 @@ export function registerRedditDraftCommand(reddit: Command): void {
             unit: null,
           },
         );
-        console.error(`\n${error.message}`);
+        emit("stderr", `\n${error.message}`);
+        process.exit(2);
+      }
+      let terminalSubreddit: string;
+      try {
+        terminalSubreddit = renderTerminalInline(projectTerminalText(subreddit, { lineMode: "inline" }));
+      } catch {
+        console.error(terminalProjectionFailureMessage());
         process.exit(2);
       }
 
@@ -186,8 +279,8 @@ export function registerRedditDraftCommand(reddit: Command): void {
       // needs the authenticated browser context, so it is intentionally deferred to
       // the real run — dry-run never launches a browser or requires credentials.
       if (opts.dryRun) {
-        console.log(
-          `\n[dry-run] Deterministic generation + local validation passed for r/${subreddit}. ` +
+        emit("stdout",
+          `\n[dry-run] Deterministic generation + local validation passed for r/${terminalSubreddit}. ` +
             `No browser launched, no draft staged.\n` +
             `  Note: the reader-backed subreddit-rules preflight (flair/title/body/type contract) ` +
             `requires the authenticated browser and is skipped in --dry-run. Re-run without --dry-run ` +
@@ -222,11 +315,20 @@ export function registerRedditDraftCommand(reddit: Command): void {
         ]);
         const preflight = preflightSelfPost(post, { about, postRequirements, flairs });
 
-        for (const w of preflight.warnings) console.log(`  advisory: ${w}`);
+        if (preflight.warnings.length) {
+          emit(
+            "stdout",
+            "  advisories (terminal-safe projection):\n" +
+              renderTerminalBlock(projectTerminalText(preflight.warnings.join("\n"), { lineMode: "block" })),
+          );
+        }
 
         if (!preflight.ok) {
-          console.error(`\n✗ Preflight failed for r/${subreddit}:`);
-          for (const v of preflight.violations) console.error(`  - ${v}`);
+          emit("stderr", `\n✗ Preflight failed for r/${terminalSubreddit}:`);
+          emit(
+            "stderr",
+            renderTerminalBlock(projectTerminalText(preflight.violations.join("\n"), { lineMode: "block" })),
+          );
           exitCode = 1;
         } else {
           // Real run: stage a native draft. Preflight already ran; pass the
@@ -238,14 +340,16 @@ export function registerRedditDraftCommand(reddit: Command): void {
             flairText: preflight.resolvedFlair?.text,
           });
 
-          const outcome = classifyRedditStageResult(result);
-          if (outcome.stream === "stderr") console.error(outcome.message);
-          else console.log(outcome.message);
+          const outcome = classifyRedditStageResult(result, subreddit);
+          emit(outcome.stream, outcome.message);
           exitCode = outcome.exitCode;
         }
       } catch (err) {
-        console.error(`\n✗ Failed to stage the Reddit draft: ${(err as Error).message}`);
-        console.error(
+        const detail = isTerminalProjectionError(err)
+          ? terminalProjectionFailureMessage()
+          : renderTerminalInline(projectTerminalText((err as Error).message, { lineMode: "inline" }));
+        emit("stderr", `\n✗ Failed to stage the Reddit draft: ${detail}`);
+        emit("stderr",
           "  Native draft state is not confirmed. Compare Reddit DRAFTS manually in the same " +
             "CLI-owned profile before any retry; another attempt can duplicate an existing draft " +
             "because Reddit has no draft idempotency ledger. Use --inspect only after that check " +

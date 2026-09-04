@@ -1,12 +1,23 @@
 import { Command } from "commander";
 import { resolve } from "node:path";
-import { generatePost, renderPostForInspection } from "../linkedin/content.js";
+import { generatePost, prepareLinkedInPost } from "../linkedin/content.js";
 import {
   isLocalValidationError,
   validateLinkedInMedia,
   type LinkedInMediaValidationResult,
 } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
+import {
+  TerminalOutputBudget,
+  emitTerminalOutput,
+  finalizeTerminalDocument,
+  isTerminalProjectionError,
+  projectTerminalText,
+  renderTerminalBlock,
+  renderTerminalErrorMessage,
+  renderTerminalInline,
+  terminalProjectionFailureMessage,
+} from "../terminalOutput.js";
 
 /**
  * `publish linkedin draft` — owned-content publisher for the LinkedIn channel.
@@ -50,7 +61,7 @@ function renderMediaValidation(result: LinkedInMediaValidationResult): string {
   const lines = ["", "── local media validation (caller order) ──"];
   for (const [index, item] of result.items.entries()) {
     lines.push(
-      `${index + 1}. ${item.path}`,
+      `${index + 1}. ${renderTerminalInline(projectTerminalText(item.path, { lineMode: "inline" }))}`,
       `   ${item.contentType}; ${item.width}x${item.height}; ${item.sizeBytes} bytes; aspect ${item.aspectRatio?.toFixed(4)}`,
     );
   }
@@ -58,7 +69,7 @@ function renderMediaValidation(result: LinkedInMediaValidationResult): string {
     "   locally verified: readable file, magic/header type, extension match, dimensions, bytes, order",
     `   server-authoritative/unverified: ${result.unverifiedConstraints.join(", ")}`,
   );
-  return lines.join("\n");
+  return finalizeTerminalDocument(lines);
 }
 
 export function registerLinkedInDraftCommand(linkedin: Command): void {
@@ -72,6 +83,9 @@ export function registerLinkedInDraftCommand(linkedin: Command): void {
     .option("--dry-run", "Only generate the post; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .action(async (opts: LinkedInDraftOptions) => {
+      const output = new TerminalOutputBudget();
+      const emit = (stream: "stdout" | "stderr", message: string) =>
+        emitTerminalOutput(output, stream, message);
       let md: string;
       let sourceLineOffset = 0;
       try {
@@ -87,35 +101,66 @@ export function registerLinkedInDraftCommand(linkedin: Command): void {
         }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        try {
+          emit("stderr", renderTerminalErrorMessage(error.message));
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
 
       // Resolve + validate media before content generation or any platform import.
       const media = (opts.media ?? []).map((m) => resolve(m));
+      Object.freeze(media);
       const mediaValidation = validateLinkedInMedia(media);
       if (!mediaValidation.valid) {
-        for (const error of mediaValidation.errors) console.error(error);
+        try {
+          emit(
+            "stderr",
+            renderTerminalBlock(projectTerminalText(mediaValidation.errors.join("\n"), { lineMode: "block" })),
+          );
+        } catch {
+          console.error(terminalProjectionFailureMessage());
+        }
         process.exit(2);
       }
 
       // DETERMINISTIC generation (no LLM).
       let post;
+      let inspection: string;
       try {
-        post = generatePost(md, { bold: opts.bold, sourceLineOffset });
+        const prepared = prepareLinkedInPost(generatePost(md, { bold: opts.bold, sourceLineOffset }));
+        post = prepared.post;
+        inspection = prepared.inspection;
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        console.error(error.message);
+        if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
+        if (isTerminalProjectionError(error)) {
+          console.error(terminalProjectionFailureMessage());
+        } else {
+          try {
+            emit("stderr", renderTerminalErrorMessage(error.message));
+          } catch {
+            console.error(terminalProjectionFailureMessage());
+          }
+        }
         process.exit(2);
       }
 
       // Always show the generated post + advisory flags to the operator.
-      console.log(renderPostForInspection(post));
-      const mediaReport = renderMediaValidation(mediaValidation);
+      let mediaReport: string;
+      try {
+        mediaReport = renderMediaValidation(mediaValidation);
+        output.consume(inspection);
+        if (mediaReport) output.consume(mediaReport);
+      } catch {
+        console.error(terminalProjectionFailureMessage());
+        process.exit(2);
+      }
+      console.log(inspection);
       if (mediaReport) console.log(mediaReport);
 
       if (opts.dryRun) {
-        console.log("\n[dry-run] No browser touched. (Post printed above, no draft staged.)");
+        emit("stdout", "\n[dry-run] No browser touched. (Post printed above, no draft staged.)");
         process.exit(0);
       }
 
@@ -125,15 +170,19 @@ export function registerLinkedInDraftCommand(linkedin: Command): void {
 
       try {
         const result = await stagePost(post, { inspect: opts.inspect, media });
-        console.log(
+        const note = renderTerminalInline(projectTerminalText(result.note, { lineMode: "inline" }));
+        emit("stdout",
           `\n✓ Staged a NATIVE LinkedIn draft (post). NEVER posted.\n` +
             `  verified in drafts: ${result.verified ? "yes" : "unconfirmed"}\n` +
-            `  ${result.note}`,
+            `  ${note}`,
         );
         process.exit(0);
       } catch (err) {
-        console.error(`\n✗ Failed to stage the LinkedIn draft: ${(err as Error).message}`);
-        console.error(
+        const detail = isTerminalProjectionError(err)
+          ? terminalProjectionFailureMessage()
+          : renderTerminalInline(projectTerminalText((err as Error).message, { lineMode: "inline" }));
+        emit("stderr", `\n✗ Failed to stage the LinkedIn draft: ${detail}`);
+        emit("stderr",
           "  Composer selectors may need live calibration — re-run with --inspect to watch the DOM.",
         );
         process.exit(1);
