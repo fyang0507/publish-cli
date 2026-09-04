@@ -484,6 +484,194 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
     assert.match(draftHelp.stdout, /format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism/);
     assert.match(draftHelp.stdout, /supported percent bytes remain exact and are not decoded by safety validation/);
     assert.match(draftHelp.stdout, /URL-looking advisories from excluded code are bounded but never become active anchors/);
+    assert.match(draftHelp.stdout, /publish x info.*owned Article Markdown support matrix and stop conditions/);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("X Article fidelity rejects locally before artifacts, runtime imports, profiles, or state", () => {
+  const fixture = createFixture();
+  try {
+    const validPath = join(fixture.dir, "article-correspondence.md");
+    const validCanonical = [
+      "# Native Title",
+      "",
+      "# First body heading",
+      "",
+      "## Second body heading",
+      "",
+      "Body.",
+    ].join("\n");
+    writeFileSync(
+      validPath,
+      `\ufeff---\r\nprivate: artifact-canary\r\n---\r\n${validCanonical.replace(/\n/gu, "\r\n")}`,
+    );
+    const valid = runCli(fixture, [
+      "x", "draft", "--format", "article", "--from", validPath, "--dry-run",
+    ]);
+    assert.equal(valid.status, 0, output(valid));
+    assert.doesNotMatch(output(valid), /artifact-canary|PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(
+      readFileSync(join(fixture.dir, "article-correspondence.x-article.md"), "utf8"),
+      validCanonical,
+    );
+    assert.match(valid.stdout, /article: Native Title/);
+    assert.match(valid.stdout, /# First body heading/);
+    assert.match(valid.stdout, /## Second body heading/);
+
+    const invalidFiles = [
+      {
+        name: "setext-title",
+        source: "Title\n=====\nRAW_PRIVATE_CANARY",
+        evidence: /Setext underline/,
+      },
+      {
+        name: "nested-fence",
+        source: "# Title\n\n> before\n> ```js\n> RAW_PRIVATE_CANARY\n> ```",
+        evidence: /quote\/list-nested fenced block/,
+      },
+      {
+        name: "body-image",
+        source: "# Title\n\n![RAW_PRIVATE_CANARY](body.png)",
+        evidence: /unsupported image inline/,
+      },
+      {
+        name: "inline-code",
+        source: "# Title\n\n`RAW_PRIVATE_CANARY`",
+        evidence: /unsupported inline_code inline/,
+      },
+      {
+        name: "double-bom",
+        source: "\ufeff\ufeff# RAW_PRIVATE_CANARY\nBody",
+        evidence: /edge characters the native title field cannot preserve/,
+      },
+      {
+        name: "nul-body",
+        source: "# Title\n\na\0RAW_PRIVATE_CANARY",
+        evidence: /U\+0000 at source line 3.*cannot preserve exactly/s,
+      },
+      {
+        name: "heading-unicode-edge",
+        source: "# Title\n\n## RAW_PRIVATE_CANARY\u00a0",
+        evidence: /body heading at source line 3 has edge characters.*cannot preserve exactly/s,
+      },
+      {
+        name: "paragraph-tab-blank",
+        source: "# Title\n\nAlpha\n \t\nRAW_PRIVATE_CANARY",
+        evidence: /spaces\/tabs-only line swallowed into a paragraph at source line 4/,
+      },
+      {
+        name: "list-tab",
+        source: "# Title\n\n- RAW_PRIVATE_CANARY\titem",
+        evidence: /list source contains a tab at source line 3.*can expand before native staging/s,
+      },
+      {
+        name: "list-unicode-edge",
+        source: "# Title\n\n- RAW_PRIVATE_CANARY\u2029",
+        evidence: /list source at line 3 has a parser-trimmed Unicode edge or continuation/s,
+      },
+      {
+        name: "list-unicode-continuation",
+        source: "# Title\n\n- first\n \u2029\n- RAW_PRIVATE_CANARY",
+        evidence: /list source at line 4 has a parser-trimmed Unicode edge or continuation/s,
+      },
+      {
+        name: "link-source-edge",
+        source: "# Title\n\n[RAW_PRIVATE_CANARY](https://example.com/path\u00a0)",
+        evidence: /source-normalized active link at source line 3/,
+      },
+      {
+        name: "link-source-escape",
+        source: "# Title\n\n[RAW_PRIVATE_CANARY](https://example.com/a\\_b)",
+        evidence: /source-normalized active link at source line 3/,
+      },
+    ];
+
+    for (const fixtureCase of invalidFiles) {
+      const sourcePath = join(fixture.dir, `${fixtureCase.name}.md`);
+      const markdownArtifact = join(fixture.dir, `${fixtureCase.name}.x-article.md`);
+      const inspectionArtifact = join(
+        fixture.dir,
+        `${fixtureCase.name}.x-article.inspection.txt`,
+      );
+      writeFileSync(sourcePath, fixtureCase.source);
+      writeFileSync(markdownArtifact, "UNCHANGED_MARKDOWN_SENTINEL");
+      writeFileSync(inspectionArtifact, "UNCHANGED_INSPECTION_SENTINEL");
+
+      for (const dryRun of [false, true]) {
+        const mode = dryRun ? "dry" : "real";
+        const dataDir = join(fixture.dir, `${fixtureCase.name}-${mode}-data`);
+        const repoDir = join(fixture.dir, `${fixtureCase.name}-${mode}-repo`);
+        const result = runCli(
+          fixture,
+          [
+            "x", "draft", "--format", "article", "--from", sourcePath,
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          undefined,
+          { dataDir, repoDir },
+        );
+        assert.equal(result.status, 2, `${fixtureCase.name}/${mode}: ${output(result)}`);
+        assert.equal(result.signal, null);
+        assert.match(output(result), fixtureCase.evidence);
+        assert.doesNotMatch(output(result), /RAW_PRIVATE_CANARY|PLATFORM_IMPORT_BLOCKED/);
+        assert.ok(output(result).length < 1_000);
+        assert.equal(existsSync(dataDir), false);
+        assert.equal(existsSync(repoDir), false);
+        assert.equal(readFileSync(markdownArtifact, "utf8"), "UNCHANGED_MARKDOWN_SENTINEL");
+        assert.equal(readFileSync(inspectionArtifact, "utf8"), "UNCHANGED_INSPECTION_SENTINEL");
+      }
+    }
+
+    for (const [name, stdin, evidence] of [
+      [
+        "unsafe-link",
+        "---\r\nprivate: RAW_PRIVATE_CANARY\r\n---\r\n# Title\r\n\r\n[x](https://user:secret@example.com/path)",
+        /unsafe or unsupported active link at source line 6/,
+      ],
+      [
+        "later-inline",
+        "---\nprivate: RAW_PRIVATE_CANARY\n---\n# Title\n\nVisible\n&amp;",
+        /entity_like_text inline at source line 7/,
+      ],
+      [
+        "source-normalized-link",
+        "---\nprivate: RAW_PRIVATE_CANARY\n---\n# Title\n\n[x](https://example.com/path\u00a0)",
+        /source-normalized active link at source line 6/,
+      ],
+      [
+        "list-unicode-continuation",
+        "---\nprivate: hidden\n---\n# Title\n\n- first\n \u00a0\n- RAW_PRIVATE_CANARY",
+        /list source at line 7 has a parser-trimmed Unicode edge or continuation/,
+      ],
+      [
+        "paragraph-tab-blank",
+        "---\rprivate: hidden\r---\r# Title\r\rAlpha\r\t \rRAW_PRIVATE_CANARY",
+        /spaces\/tabs-only line swallowed into a paragraph at source line 7/,
+      ],
+    ] as const) {
+      for (const dryRun of [false, true]) {
+        const mode = dryRun ? "dry" : "real";
+        const dataDir = join(fixture.dir, `${name}-${mode}-data`);
+        const repoDir = join(fixture.dir, `${name}-${mode}-repo`);
+        const result = runCli(
+          fixture,
+          [
+            "x", "draft", "--format", "article", "--from", "-",
+            ...(dryRun ? ["--dry-run"] : []),
+          ],
+          stdin,
+          { dataDir, repoDir },
+        );
+        assert.equal(result.status, 2, `${name}/${mode}: ${output(result)}`);
+        assert.match(output(result), evidence);
+        assert.doesNotMatch(output(result), /RAW_PRIVATE_CANARY|user:secret|PLATFORM_IMPORT_BLOCKED/);
+        assert.ok(output(result).length < 1_000);
+        assert.equal(existsSync(dataDir), false);
+        assert.equal(existsSync(repoDir), false);
+      }
+    }
   } finally {
     rmSync(fixture.dir, { recursive: true, force: true });
   }
@@ -505,8 +693,8 @@ test("X Article EOF fences stay exact in clean file artifacts and mapped stdin i
         "Visible body.",
         "",
         `${" ".repeat(index)}${index % 2 === 0 ? "```txt" : "~~~ txt"}`,
-        "payload with trailing spaces  ",
-        "  ",
+        `${" ".repeat(index)}payload with trailing spaces  `,
+        " ".repeat(index + 2),
       ];
       const cleanSource = cleanLines.join(newline);
       writeFileSync(

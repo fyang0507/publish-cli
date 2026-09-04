@@ -8,6 +8,7 @@ import {
   renderForInspection,
   type GeneratedContent,
 } from "./content.js";
+import { snapshotXArticleStageInput } from "./articleStageSnapshot.js";
 import {
   htmlFromArticleBlocks,
   stageArticleDraft,
@@ -73,6 +74,8 @@ const EOF_FENCE_CASES: EofFenceCase[] = [
     terminalNewline: true,
   },
 ];
+
+const TILDE_FENCE = String.fromCharCode(126).repeat(3);
 
 function eofSource(fixture: EofFenceCase): string {
   const lines = ["# EOF article", "", "Body before code.", "", fixture.opener, ...fixture.payloadLines];
@@ -143,6 +146,78 @@ test("EOF Article openers retain all valid zero-to-three-space indentation at bo
   }
 });
 
+test("indented backtick and tilde fences apply CommonMark payload deindent for explicit and EOF closure", async () => {
+  for (const [family, marker] of [
+    ["backtick", "```"],
+    ["tilde", TILDE_FENCE],
+  ] as const) {
+    for (let indent = 1; indent <= 3; indent += 1) {
+      const payloadLines = [
+        "zero",
+        " one",
+        `${" ".repeat(indent - 1)}fewer`,
+        `${" ".repeat(indent)}equal`,
+        `${" ".repeat(indent + 2)}more`,
+        "",
+        " ".repeat(indent - 1),
+        " ".repeat(indent),
+        " ".repeat(indent + 2),
+        `${" ".repeat(indent)}\tleading-tab`,
+        `${" ".repeat(indent + 1)}\tspace-then-tab`,
+      ];
+      const expectedCore = payloadLines.map((line) => {
+        let remove = 0;
+        while (remove < indent && line.charCodeAt(remove) === 32) remove += 1;
+        return line.slice(remove);
+      }).join("\n");
+
+      for (const closure of ["explicit", "eof"] as const) {
+        const opener = `${" ".repeat(indent)}${marker}js`;
+        const lines = [
+          `# ${family} ${indent} ${closure}`,
+          "",
+          opener,
+          ...payloadLines,
+          ...(closure === "explicit" ? [`${" ".repeat(indent)}${marker}`] : []),
+        ];
+        const source = lines.join("\n") + (closure === "eof" ? "\n" : "");
+        const expected = expectedCore + (closure === "eof" ? "\n" : "");
+        const generated = await generateContent(source, { format: "article" });
+
+        assert.equal(generated.article?.markdown, source);
+        assert.equal(generated.article?.codeBlockCount, 1);
+        assert.deepEqual(
+          generated.article?.blocks.filter((block) => block.kind === "code"),
+          [{ kind: "code", index: 1, lang: "js", text: expected }],
+        );
+        assert.deepEqual(
+          generated.codeFlags.map(({ index, lang, preview, sourceLine }) => ({
+            index,
+            lang,
+            preview,
+            sourceLine,
+          })),
+          [{ index: 1, lang: "js", preview: "zero", sourceLine: 3 }],
+        );
+
+        const snapshot = snapshotXArticleStageInput(generated, "article");
+        assert.equal(snapshot.markdown, source);
+        assert.equal(snapshot.codeBlockCount, 1);
+        assert.equal(snapshot.receiptCodeBlockCount, 1);
+        assert.equal(snapshot.html, "");
+        assert.equal(snapshot.plain, "");
+
+        const captured: { html?: string; plain?: string } = {};
+        const staged = await stageEofArticle(generated, true, captured);
+        assert.equal(staged.saveMechanism, "article_create_autosave");
+        assert.equal(staged.articleHandoff.codeBlockCount, 1);
+        assert.equal(captured.html, "");
+        assert.equal(captured.plain, "");
+      }
+    }
+  }
+});
+
 test("an explicit block plus a final EOF block keep mixed and shorter markers inside code", async () => {
   const finalPayload = ["alpha", "```", "~~~", "![still-code](body.png)", "omega  "].join("\n");
   const source = [
@@ -184,7 +259,7 @@ test("an explicit block plus a final EOF block keep mixed and shorter markers in
   // invalid info strings, and trailing-text pseudo-closers). This regression
   // only proves #93's EOF flush does not reclassify short/escaped text as fences.
   const ordinary = await generateContent(
-    "# Ordinary\n\n`` short\n\\``` escaped\ninline `tick` stays inline",
+    "# Ordinary\n\n`` short\n\\``` escaped\nfoo_bar_baz and unmatched *marker stay literal",
     { format: "article" },
   );
   assert.equal(ordinary.codeFlags.length, 0);

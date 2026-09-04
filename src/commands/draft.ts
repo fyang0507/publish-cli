@@ -530,6 +530,7 @@ export function registerDraftCommand(x: Command): void {
         "  A valid top-level backtick/tilde fence with 0–3 leading spaces may close explicitly or at end of input. EOF-closed Article code preserves its LF-normalized payload, including trailing spaces and blank/whitespace-only lines, in article.blocks and the clean Markdown dry-run artifact.\n" +
         "  Every recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in verified and unverified handoff receipts for manual Insert → Code or screenshot review.\n" +
         "  File-backed Article dry-runs put the excluded-code count and advisories in a separate .x-article.inspection.txt receipt so inspection metadata cannot become EOF-fenced code payload.\n" +
+        "  Run `publish x info` for the owned Article Markdown support matrix and stop conditions.\n" +
         "\nArticle staging snapshot:\n" +
         "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/code-count snapshot and pre-renders its native HTML/plain inputs.\n" +
         "  Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +

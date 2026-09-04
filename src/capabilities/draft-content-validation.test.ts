@@ -293,19 +293,17 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
     "The transported body remains intact.",
   );
 
-  const article = await generateContent(source, { format: "article" });
-  assert.deepEqual(
-    article.fidelityFlags,
-    [],
-    "tweet/thread omission receipts do not claim X Article image fidelity; issue #5 owns that transport path",
+  await assert.rejects(
+    generateContent(source, { format: "article" }),
+    (error: unknown) => {
+      assert.ok(error instanceof LocalValidationError);
+      assert.equal(error.problem.code, "x_article_inline_unsupported");
+      assert.match(error.message, /unsupported image inline at source line 7/);
+      assert.match(error.message, /No artifact or native draft was created/);
+      return true;
+    },
+    "#58 owns body-image transport; Article generation must reject instead of silently omitting it",
   );
-  assert.match(article.article?.markdown ?? "", /!\[diagram\]\(\.\/diagram\.png\)/);
-  assert.doesNotMatch(
-    JSON.stringify(article.article?.blocks ?? []),
-    /diagram\.png/,
-    "raw inspection Markdown retains the reference, but Article blocks do not transport it (issue #5)",
-  );
-  assert.ok(article.warnings.every((warning) => !/was omitted/.test(warning)));
 
   await assert.rejects(
     generateContent("# Only omitted title", { format: "tweet" }),
