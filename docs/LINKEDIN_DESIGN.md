@@ -178,11 +178,16 @@ output is reproducible and verifiable.
    as a draft?"* → click **Save as draft**. Centralize both. **Never** locate or
    click the **Post** button — it appears in `LI_COMPOSER_SELECTORS` only as a
    documented forbidden selector, exactly as X's `tweetButton` does.
-5. **Verify:** open the drafts list and match the staged text's leading ~40 chars
-   (port `verifyDraftSaved`'s "match the staged prefix, don't trust any row"
-   hardening — the same false-positive trap X hit).
-6. Return `{ format: "post", verified, mediaAttached, note }` with the
-   first-comment-link and hashtag advisories folded into `note`.
+5. **Verify:** reopen the share composer in the same CLI-owned profile and
+   require its complete restored editor text to equal the complete intended
+   text after only line-ending and NFC normalization. Prefixes, substrings,
+   case folding, and whitespace collapse are not proof.
+6. Return the closed result `{ format: "post", saveMechanism,
+   savePhase, verified, mediaAttached }`. Only a coherent `verified` phase exits
+   0. A rejected Save click is delivery-unknown; settle/reopen failure or a
+   negative full-text match is delivered-unverified. Both exit 1 and require a
+   same-profile LinkedIn Drafts comparison before retry. Fixed command receipts
+   carry link/media guidance without rendering browser errors or poster notes.
 
 Every selector lives in one `LI_COMPOSER_SELECTORS` block, commented
 **best-effort / needs live calibration** — LinkedIn's DOM drifts like X's. Per
