@@ -637,6 +637,8 @@ async function stageArticleSnapshot(
   const html = snapshot.html;
   const plainFallback = snapshot.plain;
   const receiptCodeBlockCount = snapshot.receiptCodeBlockCount;
+  const codeAdvisories = snapshot.codeAdvisories;
+  const codeLinkAdvisories = snapshot.codeLinkAdvisories;
   let createBtn: Locator | undefined;
 
   const saved = await runXDraftSaveFlow("article_create_autosave", {
@@ -691,6 +693,8 @@ async function stageArticleSnapshot(
         value: {
           body: "rich_html" as const,
           codeBlockCount: receiptCodeBlockCount,
+          codeAdvisories,
+          codeLinkAdvisories,
           cover,
         },
       };

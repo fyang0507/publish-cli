@@ -131,6 +131,11 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /top-level backtick or tilde fenced block with zero through three leading spaces may close explicitly or at end of input/);
   assert.match(x, /EOF-closed block preserves its LF-normalized code payload, including trailing spaces and blank or whitespace-only lines/);
   assert.match(x, /recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in both verified and unverified Article handoff receipts/);
+  assert.match(x, /80-code-point info projection, a 120-code-point deindented first-line preview, explicit truncation booleans, and SHA-256 of the exact LF-normalized fence slice/);
+  assert.match(x, /EOF-closed slice includes a caller-owned terminal LF/);
+  assert.match(x, /unpaired surrogate in fenced source rejects locally.*valid paired astral scalars remain supported/s);
+  assert.match(x, /terminal inspection replaces each entire excluded fence with its block number and complete digest/);
+  assert.match(x, /URL evidence limited to 512 code points and link-label evidence to 240 code points/);
   assert.match(x, /complete remaining Markdown is canonical.*retains the consumed title line plus every body byte/s);
   assert.match(x, /documented `Plain title` followed immediately by a body line is supported/);
   assert.match(x, /native title content is limited to plain or escaped text with representable edge characters/);
@@ -224,6 +229,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
   assert.match(x, /Article verification reopens the captured canonical edit URL and matches the intended title plus, when present, a body prefix/);
   assert.match(x, /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed title, canonical Markdown, block\/run\/mark\/link, excluded-code, advisory, and count snapshot/);
+  assert.match(x, /reparses canonical Markdown with the same Article parser and requires the complete code-block, code-advisory, and code-link-advisory sets to correspond/);
+  assert.match(x, /More than 10,000 Article code blocks, or more than 1,000,000 UTF-16 code units.*rejects locally/s);
   assert.match(x, /Malformed, throwing\/accessor\/proxy, cyclic, sparse\/oversized, count-inconsistent, or unsafe-active-href structures fail locally with bounded `save_not_attempted` evidence and exit 2/);
   assert.match(x, /format cannot be classified safely, that local failure remains a typed generic `save_not_attempted` boundary and names no Article or composer save mechanism/);
   assert.match(x, /Active hrefs must use exact absolute HTTP\(S\) syntax without credentials, raw whitespace\/control\/format characters, ambiguous backslashes, or unsafe schemes/);
@@ -237,7 +244,8 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Background feed, navigation, modal labels, prefixes, substring matches/);
   assert.match(x, /pre-existing identical visible rows, duplicate post-Save matches/);
   assert.match(x, /no stable native row ID.*does not prove the rendered rows are the complete drafts list or that this run caused the added value/s);
-  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code count, and cover selection\/upload\/ratio\/crop action facts in both verified and unverified receipts; those facts do not prove cover attachment or persistence/);
+  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code count, complete code digest\/truncation facts, bounded code-link provenance\/truncation facts, and cover selection\/upload\/ratio\/crop action facts in both verified and unverified receipts/);
+  assert.match(x, /receipt uses the frozen pre-loader advisory copy after exact returned-handoff comparison/);
   assert.match(x, /Reply target identity is a separate closed fact/);
   assert.match(x, /Live calibration on 2026-09-03 found no exact numeric target-id signal/);
   assert.match(x, /returned real reply Save finalizes `staged-unverified` history and exits 1 even when its content row verifies/);
@@ -679,7 +687,7 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /Matching background\/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows/,
     /no stable native row id and does not prove full-list completeness or causality/,
     /Article success instead requires matching the title and, when present, body prefix/,
-    /returned Article outcome reports bounded body-input, excluded-code, and cover selection\/upload\/ratio\/crop action facts whether verified or unverified; those facts do not prove cover attachment or persistence/i,
+    /returned Article outcome reports bounded body-input, excluded-code count, complete digest\/truncation evidence, bounded code-link provenance\/truncation evidence, and cover selection\/upload\/ratio\/crop action facts whether verified or unverified/i,
     /rejected Save\/Create action has unknown delivery.*returned action without a positive reopen match is unverified/s,
     /Both exit 1 because a draft may exist/,
     /compare X Unsent\/Drafts or X Articles → Drafts manually in the exact CLI-owned profile/,

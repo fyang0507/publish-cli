@@ -478,7 +478,13 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
     assert.match(draftHelp.stdout, /excluded from the native rich-HTML paste/);
     assert.match(draftHelp.stdout, /verified and unverified handoff receipts/);
     assert.match(draftHelp.stdout, /separate \.x-article\.inspection\.txt receipt/);
+    assert.match(draftHelp.stdout, /terminal-safe NFC info \(80 code points\) and deindented preview \(120 code points\)/);
+    assert.match(draftHelp.stdout, /SHA-256 of the exact LF-normalized opener-through-closer source slice/);
+    assert.match(draftHelp.stdout, /Terminal inspection replaces each excluded fence with its block number and digest/);
+    assert.match(draftHelp.stdout, /link advisories carry block provenance.*512\/240 code points/s);
+    assert.match(draftHelp.stdout, /More than 10000 code blocks or 1000000 UTF-16 code units/);
     assert.match(draftHelp.stdout, /Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title\/Markdown\/block\/run\/link\/code-count snapshot/);
+    assert.match(draftHelp.stdout, /reparses canonical Markdown with the same Article parser and requires the complete code block\/advisory\/code-link sets to correspond/);
     assert.match(draftHelp.stdout, /unsafe-active-href Article structures exit 2 locally with save_not_attempted/);
     assert.match(draftHelp.stdout, /runtime and native Save\/autosave failures retain exit 1 semantics/);
     assert.match(draftHelp.stdout, /format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism/);
@@ -707,7 +713,8 @@ test("X Article EOF fences stay exact in clean file artifacts and mapped stdin i
       ]);
       assert.equal(result.status, 0, output(result));
       assert.match(result.stdout, /native rich-HTML excluded code blocks: 1/);
-      assert.match(result.stdout, /CODE BLOCKS.*#1.*line 8/s);
+      assert.match(result.stdout, /CODE BLOCKS.*CODE BLOCK #1 excluded.*sourceLines=8-10/s);
+      assert.match(result.stdout, /LF-normalized exact fence source sha256=[a-f0-9]{64}/);
       assert.match(result.stdout, /Clean content written to/);
       assert.match(result.stdout, /Inspection receipt written to/);
       assert.doesNotMatch(output(result), /artifact-secret|PLATFORM_IMPORT_BLOCKED/);
@@ -726,7 +733,9 @@ test("X Article EOF fences stay exact in clean file artifacts and mapped stdin i
 
       const inspection = readFileSync(inspectionPath, "utf8");
       assert.match(inspection, /^ARTICLE NATIVE RICH-HTML EXCLUDED CODE BLOCK COUNT: 1$/m);
-      assert.match(inspection, /CODE BLOCK #1 \[txt\] \(line 8\) → screenshot on X/);
+      assert.match(inspection, /CODE BLOCK #1 excluded.*sourceLines=8-10/);
+      assert.match(inspection, /closure=end_of_input.*sourceTerminalNewline=false/);
+      assert.match(inspection, /LF-normalized exact fence source sha256=[a-f0-9]{64}/);
       assert.doesNotMatch(inspection, /artifact-secret|PLATFORM_IMPORT_BLOCKED/);
       assert.deepEqual(
         readdirSync(fixture.dir).filter((name) =>
@@ -750,12 +759,116 @@ test("X Article EOF fences stay exact in clean file artifacts and mapped stdin i
     );
     assert.equal(stdin.status, 0, output(stdin));
     assert.match(stdin.stdout, /native rich-HTML excluded code blocks: 1/);
-    assert.match(stdin.stdout, /CODE BLOCKS.*#1 \[js\] line 6/s);
-    assert.match(stdin.stdout, /line\(\)  \n  /);
+    assert.match(stdin.stdout, /CODE BLOCKS.*CODE BLOCK #1 excluded.*sourceLines=6-8/s);
+    assert.match(stdin.stdout, /preview="line\(\)".*truncated=false/);
+    assert.doesNotMatch(stdin.stdout, /line\(\)  \n  /);
     assert.match(stdin.stdout, /No base file — content printed above, no artifact written/);
     assert.doesNotMatch(output(stdin), /stdin-artifact-secret|PLATFORM_IMPORT_BLOCKED/);
     assert.equal(existsSync(stdinData), false);
     assert.equal(existsSync(stdinRepo), false);
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("X Article dry-run keeps canonical code exact but emits only bounded safe shared evidence", () => {
+  const fixture = createFixture();
+  try {
+    const info =
+      `tag\u0007\u009b\u001b\u061c\u2066\u2069\ufeff\u2028\u2029${"i".repeat(30)}` +
+      "INFO_ARTIFACT_HIDDEN";
+    const preview =
+      `value\u0001\u200f\u202a\u202c\u202e\u2029${"p".repeat(90)}` +
+      "PREVIEW_ARTIFACT_HIDDEN";
+    const canonical = [
+      "# Safe dry-run",
+      "",
+      "Visible [outside](https://outside.example/exact).",
+      "",
+      `\`\`\`${info}`,
+      preview,
+      "[code](https://code.example/exact)",
+      "RAW_SECOND_CODE_LINE_CANARY",
+      "```",
+    ].join("\n");
+    const sourcePath = join(fixture.dir, "article-safe-advisory.md");
+    const markdownPath = join(fixture.dir, "article-safe-advisory.x-article.md");
+    const inspectionPath = join(
+      fixture.dir,
+      "article-safe-advisory.x-article.inspection.txt",
+    );
+    writeFileSync(
+      sourcePath,
+      `---\r\nprivate: FRONTMATTER_PRIVATE_CANARY\r\n---\r\n${canonical.replace(/\n/gu, "\r\n")}`,
+    );
+
+    const result = runCli(fixture, [
+      "x", "draft", "--format", "article", "--from", sourcePath, "--dry-run",
+    ]);
+    assert.equal(result.status, 0, output(result));
+    const inspection = readFileSync(inspectionPath, "utf8");
+    assert.match(
+      inspection,
+      /^LINK https:\/\/outside\.example\/exact \(outside\) — Links cost reach — keep this OUT of the opening tweet; move it to a reply or the end of the thread\.$/m,
+    );
+    assert.match(
+      inspection,
+      /^  CODE LINK ADVISORY block=1, url="https:\/\/code\.example\/exact" \(truncated=false\), text="code" \(truncated=false\): URL-looking text came from Article code excluded from native rich HTML; this is inert advisory evidence, not an active link\.$/m,
+    );
+    assert.doesNotMatch(inspection, /^LINK https:\/\/code\.example\/exact/m);
+    const terminalOutput = `${result.stdout}\n${result.stderr}\n${inspection}`;
+    assert.match(terminalOutput, /info=.*truncated=true/);
+    assert.match(terminalOutput, /preview=.*truncated=true/);
+    for (const escape of [
+      "\\u{07}", "\\u{9b}", "\\u{1b}", "\\u{61c}", "\\u{2066}",
+      "\\u{2069}", "\\u{feff}", "\\u{2028}", "\\u{2029}", "\\u{01}",
+      "\\u{200f}", "\\u{202a}", "\\u{202c}", "\\u{202e}",
+    ]) assert.ok(terminalOutput.includes(escape), escape);
+    const stdoutDigest = result.stdout.match(/sha256=([a-f0-9]{64})/)?.[1];
+    const receiptDigest = inspection.match(/sha256=([a-f0-9]{64})/)?.[1];
+    assert.ok(stdoutDigest);
+    assert.equal(receiptDigest, stdoutDigest);
+    assert.doesNotMatch(
+      terminalOutput,
+      /INFO_ARTIFACT_HIDDEN|PREVIEW_ARTIFACT_HIDDEN|RAW_SECOND_CODE_LINE_CANARY|FRONTMATTER_PRIVATE_CANARY|[\u0001\u0007\u009b\u001b\u061c\u200f\u2028\u2029\u202a\u202c\u202e\u2066\u2069\ufeff]|PLATFORM_IMPORT_BLOCKED/u,
+    );
+    assert.equal(readFileSync(markdownPath, "utf8"), canonical);
+    assert.match(readFileSync(markdownPath, "utf8"), /RAW_SECOND_CODE_LINE_CANARY/);
+    assert.deepEqual(readdirSync(fixture.dataDir), []);
+    assert.deepEqual(readdirSync(fixture.repoDir), []);
+  } finally {
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("X Article copied-text overflow rejects before dry-run artifacts or runtime imports", () => {
+  const fixture = createFixture();
+  try {
+    const sourcePath = join(fixture.dir, "article-copied-text-overflow.md");
+    const markdownPath = join(
+      fixture.dir,
+      "article-copied-text-overflow.x-article.md",
+    );
+    const inspectionPath = join(
+      fixture.dir,
+      "article-copied-text-overflow.x-article.inspection.txt",
+    );
+    const source = "# T\n" + Array.from(
+      { length: 10 },
+      () => `\n\`\`\`\n${"a".repeat(999_934)}\n\`\`\`\n`,
+    ).join("");
+    writeFileSync(sourcePath, source);
+
+    const result = runCli(fixture, [
+      "x", "draft", "--format", "article", "--from", sourcePath, "--dry-run",
+    ]);
+    assert.equal(result.status, 2, output(result));
+    assert.match(output(result), /structured text exceeds the local aggregate bound/i);
+    assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED/);
+    assert.equal(existsSync(markdownPath), false);
+    assert.equal(existsSync(inspectionPath), false);
     assert.deepEqual(readdirSync(fixture.dataDir), []);
     assert.deepEqual(readdirSync(fixture.repoDir), []);
   } finally {

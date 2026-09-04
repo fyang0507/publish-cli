@@ -1,4 +1,14 @@
 import { isProxy } from "node:util/types";
+import {
+  articleCodeAdvisoryRenderSize,
+  articleCodeLinkAdvisoryRenderSize,
+  snapshotXArticleCodeAdvisories,
+  snapshotXArticleCodeLinkAdvisories,
+  X_ARTICLE_CODE_ADVISORY_COUNT_MAX,
+  X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS,
+  type ArticleCodeBlockFlag,
+  type ArticleCodeLinkAdvisory,
+} from "./codeAdvisory.js";
 
 /**
  * Closed evidence contract for X draft persistence progress (issue #82).
@@ -302,12 +312,16 @@ export type XArticleCoverHandoff =
 
 export interface XArticleDraftHandoff {
   body: "rich_html";
-  /** Exact until the cap; larger values remain bounded as `many`. */
+  /** Generated #95 handoffs are exact; `many` remains a legacy type only. */
   codeBlockCount: number | "many";
+  /** Complete bounded identity for every code block excluded from native HTML. */
+  codeAdvisories: readonly ArticleCodeBlockFlag[];
+  /** Bounded inert URL-looking facts derived from those excluded blocks. */
+  codeLinkAdvisories: readonly Readonly<ArticleCodeLinkAdvisory>[];
   cover: XArticleCoverHandoff;
 }
 
-export const X_ARTICLE_CODE_BLOCK_COUNT_LIMIT = 10_000;
+export const X_ARTICLE_CODE_BLOCK_COUNT_LIMIT = X_ARTICLE_CODE_ADVISORY_COUNT_MAX;
 export const X_ARTICLE_IMAGE_DIMENSION_LIMIT = 100_000_000;
 
 export type XDraftSaveFailurePhase = Exclude<XDraftSavePhase, "verified">;
@@ -820,14 +834,51 @@ function isArticleDimension(value: unknown): value is number {
     (value as number) <= X_ARTICLE_IMAGE_DIMENSION_LIMIT;
 }
 
-/** Snapshot one Article handoff exactly once and reject contradictory facts. */
-export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHandoff | null {
+function articleHandoffRecord(
+  value: unknown,
+  exactKeys: readonly string[],
+): Map<string, unknown> | null {
   if (typeof value !== "object" || value === null) return null;
   try {
-    const source = value as Record<string, unknown>;
-    const body = source.body;
-    const codeBlockCount = source.codeBlockCount;
-    const coverValue = source.cover;
+    if (isProxy(value) || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+      return null;
+    }
+    const keys = Reflect.ownKeys(value);
+    const expected = new Set<string>(exactKeys);
+    if (
+      keys.length !== exactKeys.length ||
+      keys.some((key) => typeof key !== "string" || !expected.has(key))
+    ) return null;
+    const out = new Map<string, unknown>();
+    for (const key of exactKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) return null;
+      out.set(key, descriptor.value);
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Snapshot one Article handoff exactly once and reject contradictory facts. */
+export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHandoff | null {
+  try {
+    const source = articleHandoffRecord(
+      value,
+      ["body", "codeBlockCount", "codeAdvisories", "codeLinkAdvisories", "cover"],
+    );
+    if (!source) return null;
+    const body = source.get("body");
+    const codeBlockCount = source.get("codeBlockCount");
+    const codeAdvisories = snapshotXArticleCodeAdvisories(source.get("codeAdvisories"));
+    const codeLinkAdvisories = snapshotXArticleCodeLinkAdvisories(
+      source.get("codeLinkAdvisories"),
+    );
+    const coverSource = articleHandoffRecord(
+      source.get("cover"),
+      ["status", "ratio", "width", "height", "crop"],
+    );
     if (
       body !== "rich_html" ||
       !(
@@ -836,17 +887,25 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
           (codeBlockCount as number) >= 0 &&
           (codeBlockCount as number) <= X_ARTICLE_CODE_BLOCK_COUNT_LIMIT)
       ) ||
-      typeof coverValue !== "object" ||
-      coverValue === null
+      codeAdvisories === null ||
+      codeLinkAdvisories === null ||
+      codeBlockCount === "many" ||
+      codeAdvisories.length !== codeBlockCount ||
+      codeLinkAdvisories.some(
+        (advisory) => advisory.codeBlockIndex > codeAdvisories.length,
+      ) ||
+      articleCodeAdvisoryRenderSize(codeAdvisories) +
+          articleCodeLinkAdvisoryRenderSize(codeLinkAdvisories) >
+        X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS ||
+      coverSource === null
     ) return null;
 
-    const coverSource = coverValue as Record<string, unknown>;
     const cover = {
-      status: coverSource.status,
-      ratio: coverSource.ratio,
-      width: coverSource.width,
-      height: coverSource.height,
-      crop: coverSource.crop,
+      status: coverSource.get("status"),
+      ratio: coverSource.get("ratio"),
+      width: coverSource.get("width"),
+      height: coverSource.get("height"),
+      crop: coverSource.get("crop"),
     };
     if (cover.status === "missing") {
       if (
@@ -855,11 +914,13 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
         cover.height !== null ||
         cover.crop !== "not_observed"
       ) return null;
-      return {
+      return Object.freeze({
         body,
         codeBlockCount: codeBlockCount as number | "many",
-        cover: cover as Extract<XArticleCoverHandoff, { status: "missing" }>,
-      };
+        codeAdvisories,
+        codeLinkAdvisories,
+        cover: Object.freeze(cover) as Extract<XArticleCoverHandoff, { status: "missing" }>,
+      });
     }
     if (cover.status !== "upload_incomplete" && cover.status !== "attached") return null;
     if (
@@ -877,18 +938,22 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
     }
     if (cover.status === "upload_incomplete") {
       if (cover.crop !== "not_observed") return null;
-      return {
+      return Object.freeze({
         body,
         codeBlockCount: codeBlockCount as number | "many",
-        cover: cover as Extract<XArticleCoverHandoff, { status: "upload_incomplete" }>,
-      };
+        codeAdvisories,
+        codeLinkAdvisories,
+        cover: Object.freeze(cover) as Extract<XArticleCoverHandoff, { status: "upload_incomplete" }>,
+      });
     }
     if (cover.crop !== "applied" && cover.crop !== "unverified") return null;
-    return {
+    return Object.freeze({
       body,
       codeBlockCount: codeBlockCount as number | "many",
-      cover: cover as Extract<XArticleCoverHandoff, { status: "attached" }>,
-    };
+      codeAdvisories,
+      codeLinkAdvisories,
+      cover: Object.freeze(cover) as Extract<XArticleCoverHandoff, { status: "attached" }>,
+    });
   } catch {
     return null;
   }
