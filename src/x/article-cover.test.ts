@@ -484,7 +484,7 @@ test("post-set settle and observation rejections preserve one-shot cover progres
     );
     assert.equal(unsettled.set, true);
     assert.equal(unsettled.setPhase, "set_returned");
-    assert.equal(unsettled.applyPhase, "not_observed");
+    assert.equal(unsettled.applyPhase, "not_attempted");
     assert.equal(unsettled.observed, false);
     assert.equal(unsettled.verified, null);
     assert.equal(
@@ -493,6 +493,28 @@ test("post-set settle and observation rejections preserve one-shot cover progres
     );
     assert.equal(settleFailure.calls.includes("locate-apply"), false);
     assert.equal(settleFailure.calls.includes("apply-returned"), false);
+
+    const postApplySettleFailure = coverStageDeps({
+      async settleAfterApply() { throw new Error("post-Apply settle rejected"); },
+    });
+    const postApplyUnsettled = await stageArticleCover(
+      {} as Page,
+      cover,
+      postApplySettleFailure.deps,
+    );
+    assert.equal(postApplyUnsettled.set, true);
+    assert.equal(postApplyUnsettled.applyPhase, "returned");
+    assert.equal(postApplyUnsettled.observed, false);
+    assert.equal(postApplyUnsettled.verified, null);
+    assert.equal(
+      postApplySettleFailure.calls.filter((call) => call === "apply-returned").length,
+      1,
+    );
+    assert.equal(
+      postApplySettleFailure.calls.filter((call) => call === "observe-cover").length,
+      1,
+      "only the pre-set baseline observation runs after a rejected post-Apply settle",
+    );
 
     let observationCalls = 0;
     const observationFailure = coverStageDeps({
@@ -552,7 +574,7 @@ test("a rejected exact input set is delivery-unknown and never retried", async (
     const handoff = await stageArticleCover({} as Page, cover, fixture.deps);
     assert.equal(handoff.set, null);
     assert.equal(handoff.setPhase, "set_delivery_unknown");
-    assert.equal(handoff.applyPhase, "not_reached");
+    assert.equal(handoff.applyPhase, "not_attempted");
     assert.equal(handoff.observed, false);
     assert.equal(handoff.verified, null);
     assert.equal(setCalls, 1);
@@ -587,7 +609,7 @@ test("an unavailable or no-longer-calibrated target performs no upload attempt",
       const handoff = await stageArticleCover({} as Page, cover, fixture.deps);
       assert.equal(handoff.set, false, failure);
       assert.equal(handoff.setPhase, "target_unavailable", failure);
-      assert.equal(handoff.applyPhase, "not_reached", failure);
+      assert.equal(handoff.applyPhase, "not_attempted", failure);
       assert.equal(handoff.observed, false, failure);
       assert.equal(setCalls, 0, failure);
       assert.equal(fixture.calls.includes("locate-apply"), false, failure);
@@ -625,7 +647,7 @@ test("missing, ambiguous, or dimension-mismatched crop evidence means no Apply c
       });
       const handoff = await stageArticleCover({} as Page, cover, fixture.deps);
       assert.equal(handoff.set, true, condition);
-      assert.equal(handoff.applyPhase, "not_observed", condition);
+      assert.equal(handoff.applyPhase, "not_attempted", condition);
       assert.equal(handoff.observed, false, condition);
       assert.equal(handoff.verified, null, condition);
       assert.equal(locateCalls, 1, condition);
@@ -690,7 +712,7 @@ test("post-Apply evidence must be observed and match the preloaded natural dimen
   }
 });
 
-test("a rejected Apply click is failed, attempted once, and never observed", async () => {
+test("a rejected Apply click has unknown delivery, is attempted once, and is never retried", async () => {
   const dir = mkdtempSync(join(tmpdir(), "publish-x-cover-apply-rejected-"));
   try {
     const path = join(dir, "cover.png");
@@ -709,7 +731,7 @@ test("a rejected Apply click is failed, attempted once, and never observed", asy
     });
     const handoff = await stageArticleCover({} as Page, cover, fixture.deps);
     assert.equal(handoff.set, true);
-    assert.equal(handoff.applyPhase, "failed");
+    assert.equal(handoff.applyPhase, "delivery_unknown");
     assert.equal(handoff.observed, false);
     assert.equal(handoff.verified, null);
     assert.equal(clickCalls, 1);
@@ -760,7 +782,7 @@ test("stale cover, body media ambiguity, or a pre-existing dialog blocks the set
       const handoff = await stageArticleCover({} as Page, cover, fixture.deps);
       assert.equal(handoff.set, false, name);
       assert.equal(handoff.setPhase, "target_unavailable", name);
-      assert.equal(handoff.applyPhase, "not_reached", name);
+      assert.equal(handoff.applyPhase, "not_attempted", name);
       assert.equal(handoff.observed, false, name);
       assert.equal(setCalls, 0, name);
       assert.equal(fixture.calls.includes("locate-apply"), false, name);

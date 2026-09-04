@@ -299,7 +299,14 @@ export interface XArticleCoverHandoff {
   readonly setPhase: "target_unavailable" | "set_delivery_unknown" | "set_returned";
   /** Browser staging exposes no stable native upload identifier. */
   readonly uploaded: null;
-  readonly applyPhase: "not_reached" | "not_observed" | "failed" | "returned";
+  /**
+   * Closed Apply-interaction provenance. `not_attempted` also covers a missing
+   * or ambiguous Apply control after the exact file-input set returned.
+   * `delivery_unknown` means one exact Apply handle was clicked once and its
+   * promise rejected. Neither state is retried. Canonical two-sided native
+   * persistence may verify the cover later without rewriting this provenance.
+   */
+  readonly applyPhase: "not_attempted" | "delivery_unknown" | "returned";
   /** A cover affordance/preview attributable to this run was observed. */
   readonly observed: boolean;
   /** True only when that cover observation survives reopening the captured edit URL. */
@@ -941,18 +948,21 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
         cover.setPhase !== "set_delivery_unknown" &&
         cover.setPhase !== "set_returned") ||
       cover.uploaded !== null ||
-      (cover.applyPhase !== "not_reached" &&
-        cover.applyPhase !== "not_observed" &&
-        cover.applyPhase !== "failed" &&
+      (cover.applyPhase !== "not_attempted" &&
+        cover.applyPhase !== "delivery_unknown" &&
         cover.applyPhase !== "returned") ||
       typeof cover.observed !== "boolean" ||
       (cover.verified !== true && cover.verified !== false && cover.verified !== null) ||
       ((cover.setPhase === "set_returned") !== (cover.set === true)) ||
       ((cover.setPhase === "target_unavailable") !== (cover.set === false)) ||
       ((cover.setPhase === "set_delivery_unknown") !== (cover.set === null)) ||
-      (cover.set !== true && cover.applyPhase !== "not_reached") ||
+      (cover.set !== true && cover.applyPhase !== "not_attempted") ||
       (cover.verified === true &&
-        !(cover.set === true && cover.applyPhase === "returned" && cover.observed))
+        !(
+          cover.set === true &&
+          cover.setPhase === "set_returned" &&
+          cover.observed
+        ))
     ) return null;
     return Object.freeze({
       body,

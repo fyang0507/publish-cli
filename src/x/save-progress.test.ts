@@ -6,6 +6,7 @@ import { join } from "node:path";
 import type { Locator, Page } from "playwright";
 import {
   snapshotXDraftRowEvidence,
+  snapshotXArticleDraftHandoff,
   XDraftStageError,
   runXDraftSaveFlow,
   xDraftMayExist,
@@ -652,22 +653,89 @@ test("Article verification requires one non-conflicting post-settle canonical ed
   }
 });
 
-test("Article verification repairs only a transient early cover observation miss", async () => {
+test("Article authoritative persistence closes every Apply phase only after a returned set and complete proof", async () => {
   const generated = await generateContent(
     "# Article title\n\nArticle body for reopen matching.",
     { format: "article" },
   );
 
-  for (const coverVerified of [true, false]) {
+  const cases: ReadonlyArray<{
+    name: string;
+    cover: XArticleCoverHandoff;
+    verifyResult: Readonly<{ content: boolean; cover: boolean }>;
+    expectedVerified: boolean;
+    expectedCoverVerified: boolean;
+  }> = [
+    ...(["not_attempted", "delivery_unknown", "returned"] as const).map(
+      (applyPhase) => ({
+        name: `${applyPhase} plus complete native proof`,
+        cover: {
+          ...stagedCover(),
+          applyPhase,
+          observed: false,
+          verified: null,
+        },
+        verifyResult: { content: true, cover: true },
+        expectedVerified: true,
+        expectedCoverVerified: true,
+      }),
+    ),
+    {
+      name: "unknown Apply with missing cover parity",
+      cover: {
+        ...stagedCover(),
+        applyPhase: "delivery_unknown",
+        observed: false,
+        verified: null,
+      },
+      verifyResult: { content: true, cover: false },
+      expectedVerified: false,
+      expectedCoverVerified: false,
+    },
+    {
+      name: "unknown Apply with mismatched content",
+      cover: {
+        ...stagedCover(),
+        applyPhase: "delivery_unknown",
+        observed: false,
+        verified: null,
+      },
+      verifyResult: { content: false, cover: true },
+      expectedVerified: false,
+      expectedCoverVerified: true,
+    },
+    {
+      name: "cover target unavailable despite later positive-looking proof",
+      cover: {
+        ...stagedCover(),
+        set: false,
+        setPhase: "target_unavailable",
+        applyPhase: "not_attempted",
+        observed: false,
+        verified: null,
+      },
+      verifyResult: { content: true, cover: true },
+      expectedVerified: false,
+      expectedCoverVerified: false,
+    },
+    {
+      name: "cover set delivery unknown despite later positive-looking proof",
+      cover: {
+        ...stagedCover(),
+        set: null,
+        setPhase: "set_delivery_unknown",
+        applyPhase: "not_attempted",
+        observed: false,
+        verified: null,
+      },
+      verifyResult: { content: true, cover: true },
+      expectedVerified: false,
+      expectedCoverVerified: false,
+    },
+  ];
+
+  for (const fixture of cases) {
     const events: string[] = [];
-    const earlyUnobservedCover: XArticleCoverHandoff = {
-      ...stagedCover(),
-      set: true,
-      setPhase: "set_returned",
-      applyPhase: "returned",
-      observed: false,
-      verified: null,
-    };
     const result = await stageArticleDraft(
       {} as never,
       {} as Page,
@@ -675,24 +743,87 @@ test("Article verification repairs only a transient early cover observation miss
       ARTICLE_COVER,
       articleDependencies(events, {
         async stageCover() {
-          return earlyUnobservedCover;
+          return fixture.cover;
         },
-        verifyResult: { content: true, cover: coverVerified },
+        verifyResult: fixture.verifyResult,
       }),
     );
 
     assert.equal(
       result.savePhase,
-      coverVerified ? "verified" : "save_delivered_unverified",
+      fixture.expectedVerified ? "verified" : "save_delivered_unverified",
+      fixture.name,
     );
     if (result.saveMechanism !== "article_create_autosave") {
       assert.fail("expected an Article result");
     }
-    assert.equal(result.articleHandoff.cover.set, true);
-    assert.equal(result.articleHandoff.cover.applyPhase, "returned");
-    assert.equal(result.articleHandoff.cover.observed, coverVerified);
-    assert.equal(result.articleHandoff.cover.verified, coverVerified);
-    assert.equal(events.filter((event) => event === "edit:verify").length, 1);
+    assert.equal(result.articleHandoff.cover.set, fixture.cover.set, fixture.name);
+    assert.equal(
+      result.articleHandoff.cover.applyPhase,
+      fixture.cover.applyPhase,
+      fixture.name,
+    );
+    assert.equal(
+      result.articleHandoff.cover.observed,
+      fixture.expectedCoverVerified,
+      fixture.name,
+    );
+    assert.equal(
+      result.articleHandoff.cover.verified,
+      fixture.expectedCoverVerified,
+      fixture.name,
+    );
+    assert.equal(events.filter((event) => event === "edit:verify").length, 1, fixture.name);
+  }
+});
+
+test("Article handoff snapshot accepts the tri-state Apply matrix and rejects contradictory provenance", () => {
+  const handoff = (cover: XArticleCoverHandoff) => ({
+    body: "rich_html" as const,
+    codeBlockCount: 0,
+    codeAdvisories: [],
+    codeLinkAdvisories: [],
+    cover,
+  });
+
+  for (const applyPhase of ["not_attempted", "delivery_unknown", "returned"] as const) {
+    const cover = { ...stagedCover(), applyPhase, observed: true, verified: true };
+    const snapshot = snapshotXArticleDraftHandoff(handoff(cover));
+    assert.equal(snapshot?.cover.applyPhase, applyPhase);
+    assert.equal(snapshot?.cover.verified, true);
+  }
+
+  for (const [name, cover] of [
+    ["unknown Apply without a returned set", {
+      ...stagedCover(),
+      set: false,
+      setPhase: "target_unavailable",
+      applyPhase: "delivery_unknown",
+      observed: false,
+      verified: false,
+    }],
+    ["returned Apply without a returned set", {
+      ...stagedCover(),
+      set: null,
+      setPhase: "set_delivery_unknown",
+      applyPhase: "returned",
+      observed: false,
+      verified: false,
+    }],
+    ["verified cover without observation", {
+      ...stagedCover(),
+      applyPhase: "not_attempted",
+      observed: false,
+      verified: true,
+    }],
+    ["removed legacy Apply state", {
+      ...stagedCover(),
+      applyPhase: "failed",
+      observed: true,
+      verified: true,
+    }],
+  ] as const) {
+    assert.equal(snapshotXArticleDraftHandoff(handoff(cover as XArticleCoverHandoff)), null, name);
   }
 });
 
@@ -926,7 +1057,7 @@ test("unknown Article cover delivery keeps output unverified and bounded", async
       set: null,
       setPhase: "set_delivery_unknown",
       uploaded: null,
-      applyPhase: "not_reached",
+      applyPhase: "not_attempted",
       observed: false,
       verified: null,
     });
@@ -965,7 +1096,7 @@ test("unknown Article cover delivery keeps output unverified and bounded", async
       set: null,
       setPhase: "set_delivery_unknown",
       uploaded: null,
-      applyPhase: "not_reached",
+      applyPhase: "not_attempted",
       observed: false,
       verified: false,
     });

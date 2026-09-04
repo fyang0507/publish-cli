@@ -330,8 +330,15 @@ const ARTICLE_RECEIPT_HANDOFF: XArticleDraftHandoff = Object.freeze({
 
 function articleReceiptOutcome(
   savePhase: "verified" | "save_delivered_unverified",
+  applyPhase: XArticleDraftHandoff["cover"]["applyPhase"] = "returned",
 ): XDraftRealRunOutcome {
   const verified = savePhase === "verified";
+  const articleHandoff = applyPhase === "returned"
+    ? ARTICLE_RECEIPT_HANDOFF
+    : Object.freeze({
+        ...ARTICLE_RECEIPT_HANDOFF,
+        cover: Object.freeze({ ...ARTICLE_RECEIPT_HANDOFF.cover, applyPhase }),
+      });
   return {
     kind: verified ? "staged" : "save_incomplete",
     savePhase,
@@ -340,7 +347,7 @@ function articleReceiptOutcome(
     stream: verified ? "stdout" : "stderr",
     message: `Untrusted legacy prose must not enter the receipt: ${RAW_ARTICLE_RECEIPT_CONTENT}`,
     draftRowEvidence: null,
-    articleHandoff: ARTICLE_RECEIPT_HANDOFF,
+    articleHandoff,
     platformTouched: true,
     nativeReference: "https://x.com/compose/articles/edit/123456789",
   };
@@ -398,4 +405,60 @@ test("verified and unverified X Article receipts retain content-free manual-work
     receipts[0].gotchas.find((gotcha) => /Insert → Code/.test(gotcha)),
     receipts[1].gotchas.find((gotcha) => /Insert → Code/.test(gotcha)),
   );
+});
+
+test("verified X Article JSON receipts retain every Apply phase and independent proof when needed", () => {
+  for (const applyPhase of ["not_attempted", "delivery_unknown", "returned"] as const) {
+    const receipt = receiptForXDraftOutcome(
+      articleReceiptOutcome("verified", applyPhase),
+      "article",
+    );
+    assert.equal(receipt.validation.live.status, "passed", applyPhase);
+    assert.deepEqual(receipt.assets, [VERIFIED_ARTICLE_COVER], applyPhase);
+    const provenance = receipt.gotchas.find((gotcha) =>
+      gotcha.includes(`Apply phase=${applyPhase}`)
+    );
+    assert.ok(provenance, applyPhase);
+    assert.doesNotMatch(provenance, /PRIVATE|selector|cookie|token/u, applyPhase);
+    const independentProof = receipt.gotchas.find((gotcha) =>
+      /Independent two-sided canonical persistence proved the exact cover and full title\/body without claiming Apply returned/.test(gotcha)
+    );
+    assert.equal(independentProof !== undefined, applyPhase !== "returned", applyPhase);
+  }
+});
+
+test("unverified X Article JSON receipts distinguish every bounded Apply phase", () => {
+  const expected = {
+    not_attempted: /phase=not_attempted: no Apply click was invoked/,
+    delivery_unknown: /phase=delivery_unknown: one exact Apply click was invoked once and its promise rejected; delivery is unknown and no retry was attempted/,
+    returned: /phase=returned: one exact Apply click promise fulfilled/,
+  } as const;
+  const facts = new Set<string>();
+
+  for (const applyPhase of ["not_attempted", "delivery_unknown", "returned"] as const) {
+    const receipt = receiptForXDraftOutcome(
+      articleReceiptOutcome("save_delivered_unverified", applyPhase),
+      "article",
+    );
+    const phaseFact = receipt.gotchas.find((gotcha) =>
+      gotcha.includes(`Apply phase=${applyPhase}`)
+    );
+    assert.ok(phaseFact, applyPhase);
+    assert.match(phaseFact, expected[applyPhase], applyPhase);
+    assert.ok(phaseFact.length < 240, applyPhase);
+    assert.doesNotMatch(phaseFact, /PRIVATE|selector|cookie|token/u, applyPhase);
+    facts.add(phaseFact);
+    assert.equal(
+      receipt.gotchas.some((gotcha) => /native draft may exist.*do not retry blindly/i.test(gotcha)),
+      true,
+      applyPhase,
+    );
+    assert.equal(
+      receipt.gotchas.some((gotcha) => /independent two-sided canonical persistence/.test(gotcha)),
+      false,
+      applyPhase,
+    );
+    assert.equal(receipt.remoteResidue[0]?.retryRisk, "duplicate", applyPhase);
+  }
+  assert.equal(facts.size, 3);
 });
