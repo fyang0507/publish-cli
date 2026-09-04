@@ -11,7 +11,11 @@ import {
   validateRedditFrontmatter,
   type GeneratedSelfPost,
 } from "../reddit/content.js";
-import { isLocalValidationError, LocalValidationError } from "../capabilities/validation.js";
+import {
+  isLocalValidationError,
+  LocalValidationError,
+  type LocalValidationProblem,
+} from "../capabilities/validation.js";
 import type { StageDraftResult } from "../reddit/draftPoster.js";
 import {
   TerminalOutputBudget,
@@ -28,6 +32,16 @@ import {
   snapshotClosedRecord,
   terminalProjectionFailureMessage,
 } from "../terminalOutput.js";
+import {
+  createDryRunReceipt,
+  createLocalInputFailureReceipt,
+  createTransportReceipt,
+  emitTransportReceipt,
+  NO_ASSETS,
+  NOT_REACHED_LIVE_VALIDATION,
+  PASSED_LOCAL_VALIDATION,
+  type TransportReceipt,
+} from "../transportReceipt.js";
 
 /**
  * `publish reddit draft` — owned-content publisher for the Reddit channel
@@ -61,12 +75,17 @@ interface RedditDraftOptions extends ContentInputOptions {
   spoiler?: boolean;
   dryRun?: boolean;
   inspect?: boolean;
+  json?: boolean;
 }
 
 export interface RedditStageCommandOutcome {
   exitCode: 0 | 1;
   stream: "stdout" | "stderr";
   message: string;
+  saveStatus: "not_attempted" | "delivery_unknown" | "unconfirmed" | "toast_confirmed";
+  platformTouched: true;
+  blocked: boolean;
+  flair: string | null;
 }
 
 /** Keep save-confirmation truth and exit semantics independent of browser code. */
@@ -83,7 +102,7 @@ export function classifyRedditStageResult(
     (reader) => {
       if (reader.read("kind") !== "self") throw new TerminalProjectionError();
       const saveStatus = reader.read("saveStatus");
-      if (saveStatus !== "not_attempted" && saveStatus !== "unconfirmed" && saveStatus !== "toast_confirmed") {
+      if (saveStatus !== "not_attempted" && saveStatus !== "delivery_unknown" && saveStatus !== "unconfirmed" && saveStatus !== "toast_confirmed") {
         throw new TerminalProjectionError();
       }
       const saved = snapshotBoolean(reader.read("saved"));
@@ -111,6 +130,15 @@ export function classifyRedditStageResult(
       });
     },
   );
+  if (
+    (result.saveStatus === "not_attempted" && (result.saved || result.verified)) ||
+    ((result.saveStatus === "delivery_unknown" || result.saveStatus === "unconfirmed") &&
+      (!result.saved || result.verified)) ||
+    (result.saveStatus === "toast_confirmed" && (!result.saved || !result.verified)) ||
+    (result.blocked !== undefined && result.saveStatus !== "not_attempted")
+  ) {
+    throw new TerminalProjectionError();
+  }
   const safeSubreddit = renderTerminalInline(projectTerminalText(
     expectedSubreddit ?? result.subreddit,
     { lineMode: "inline" },
@@ -118,7 +146,10 @@ export function classifyRedditStageResult(
   const safeNote = renderTerminalInline(projectTerminalText(result.note, { lineMode: "inline" }));
   if (result.blocked) {
     const blocked = renderTerminalInline(projectTerminalText(result.blocked, { lineMode: "inline" }));
-    return { exitCode: 1, stream: "stderr", message: `\n✗ ${blocked}` };
+    return {
+      exitCode: 1, stream: "stderr", message: `\n✗ ${blocked}`,
+      saveStatus: result.saveStatus, platformTouched: true, blocked: true, flair: result.flair ?? null,
+    };
   }
   if (result.saveStatus === "not_attempted" || !result.saved) {
     return {
@@ -127,15 +158,23 @@ export function classifyRedditStageResult(
       message:
         `\n✗ No Reddit draft was confirmed for r/${safeSubreddit} (NEVER posted).\n` +
         `  ${safeNote}`,
+      saveStatus: result.saveStatus,
+      platformTouched: true,
+      blocked: false,
+      flair: result.flair ?? null,
     };
   }
-  if (result.saveStatus === "unconfirmed" || !result.verified) {
+  if (result.saveStatus === "delivery_unknown" || result.saveStatus === "unconfirmed" || !result.verified) {
     return {
       exitCode: 1,
       stream: "stderr",
       message:
         `\n✗ Reddit draft state for r/${safeSubreddit} is UNCONFIRMED (NEVER posted).\n` +
         `  ${safeNote}`,
+      saveStatus: result.saveStatus,
+      platformTouched: true,
+      blocked: false,
+      flair: result.flair ?? null,
     };
   }
   return {
@@ -148,7 +187,99 @@ export function classifyRedditStageResult(
         ? `  flair: ${renderTerminalInline(projectTerminalText(result.flair, { lineMode: "inline" }))}\n`
         : "") +
       `  ${safeNote}`,
+    saveStatus: result.saveStatus,
+    platformTouched: true,
+    blocked: false,
+    flair: result.flair ?? null,
   };
+}
+
+export function receiptForRedditStageOutcome(
+  outcome: RedditStageCommandOutcome,
+  warnings: readonly string[] = [],
+): Readonly<TransportReceipt> {
+  const verified = outcome.saveStatus === "toast_confirmed" && outcome.exitCode === 0;
+  // A non-blocked not_attempted result is returned only after the composer was
+  // populated and the explicit Save Draft affordance could not be resolved.
+  // Preserve the existing duplicate-risk boundary: absence of a click is not
+  // proof that Reddit retained no draft/composer state.
+  const preparedComposerUncertain = outcome.saveStatus === "not_attempted" && !outcome.blocked;
+  const draftPossible = preparedComposerUncertain ||
+    outcome.saveStatus === "delivery_unknown" || outcome.saveStatus === "unconfirmed";
+  return createTransportReceipt({
+    channel: "reddit",
+    action: "draft",
+    format: "self_post",
+    mode: "real",
+    validation: {
+      local: PASSED_LOCAL_VALIDATION,
+      live: outcome.blocked
+        ? { status: "failed", problems: [], notes: ["The live composer surfaced an eligibility block."] }
+        : verified
+          ? { status: "passed", problems: [], notes: [] }
+          : {
+              status: "failed",
+              problems: [],
+              notes: [
+                "The authenticated subreddit preflight passed, but the native save was not positively confirmed.",
+              ],
+            },
+    },
+    warnings,
+    gotchas: draftPossible
+      ? ["A Reddit draft may exist. Compare DRAFTS in the same CLI-owned profile and do not blindly restage because another attempt can duplicate it."]
+      : [],
+    assets: NO_ASSETS,
+    platformTouched: outcome.platformTouched,
+    terminalState: verified
+      ? "native_draft_verified"
+      : draftPossible
+        ? "native_draft_possible"
+        : outcome.blocked ? "platform_rejected" : "no_native_draft",
+    verification: {
+      status: verified ? "verified" : "unverified",
+      strength: verified ? "platform_signal" : "none",
+      nativeReference: null,
+    },
+    remoteResidue: draftPossible
+      ? [
+        ...(preparedComposerUncertain ? [{
+          kind: "composer" as const,
+          state: "prepared_composer_save_not_attempted",
+          assetIndex: null,
+          reference: null,
+          retryRisk: "duplicate" as const,
+        }] : []),
+        {
+          kind: "native_draft",
+          state: outcome.saveStatus,
+          assetIndex: null,
+          reference: null,
+          retryRisk: "duplicate",
+        }]
+      : [],
+    error: verified ? null : {
+      source: "platform",
+      stage: outcome.blocked ? "composer_eligibility" : "save_draft",
+      code: outcome.blocked ? "reddit_eligibility_blocked" : `reddit_${outcome.saveStatus}`,
+      httpStatus: null,
+      sanitizedMessage: outcome.blocked
+        ? "Reddit blocked this draft in the live composer."
+        : "Reddit did not provide positive save confirmation for this attempt.",
+      classification: outcome.saveStatus === "delivery_unknown" ? "unknown" : "known",
+      retryable: null,
+      inputRelated: outcome.blocked ? null : false,
+      suggestedCorrection: draftPossible
+        ? "Inspect Reddit DRAFTS manually in the same CLI-owned profile before deciding whether a separate retry is safe."
+        : outcome.blocked
+          ? "Review the subreddit eligibility requirements before a separate attempt."
+          : "Calibrate the Save Draft affordance before a separate attempt.",
+    },
+    exit: {
+      class: verified ? "success" : "runtime_or_platform_failure",
+      code: outcome.exitCode,
+    },
+  });
 }
 
 export function registerRedditDraftCommand(reddit: Command): void {
@@ -167,6 +298,7 @@ export function registerRedditDraftCommand(reddit: Command): void {
     .option("--spoiler", "Mark the post as a spoiler (flag-only; not accepted in frontmatter)")
     .option("--dry-run", "Generate and validate locally; skips live subreddit preflight and composer")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
+    .option("--json", "Emit one versioned machine-readable transport receipt")
     .addHelpText(
       "after",
       "\nFile/stdin frontmatter:\n" +
@@ -187,6 +319,16 @@ export function registerRedditDraftCommand(reddit: Command): void {
       const output = new TerminalOutputBudget();
       const emit = (stream: "stdout" | "stderr", message: string) =>
         emitTerminalOutput(output, stream, message);
+      const emitLocalFailure = (problem: LocalValidationProblem, message: string) => {
+        emitTransportReceipt(createLocalInputFailureReceipt({
+          channel: "reddit",
+          action: "draft",
+          format: "self_post",
+          mode: opts.dryRun ? "dry_run" : "real",
+          problem,
+          message,
+        }), { json: !!opts.json, budget: output });
+      };
       let md: string;
       let frontmatter = {};
       let bodyLineOffset = 0;
@@ -205,11 +347,7 @@ export function registerRedditDraftCommand(reddit: Command): void {
         }
       } catch (error) {
         if (!isLocalValidationError(error)) throw error;
-        try {
-          emit("stderr", renderTerminalErrorMessage(error.message));
-        } catch {
-          console.error(terminalProjectionFailureMessage());
-        }
+        emitLocalFailure(error.problem, error.message);
         process.exit(2);
       }
 
@@ -231,23 +369,24 @@ export function registerRedditDraftCommand(reddit: Command): void {
         inspection = prepared.inspection;
       } catch (error) {
         if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
-        if (isTerminalProjectionError(error)) {
-          console.error(terminalProjectionFailureMessage());
-        } else {
-          try {
-            emit("stderr", renderTerminalErrorMessage(error.message));
-          } catch {
-            console.error(terminalProjectionFailureMessage());
-          }
-        }
+        if (isLocalValidationError(error)) emitLocalFailure(error.problem, error.message);
+        else emitLocalFailure({
+          phase: "local", code: "terminal_projection_failed", field: "text",
+          actual: "unsafe_or_oversized", expected: "bounded Unicode-scalar terminal evidence",
+          unit: "utf16_code_units",
+        }, terminalProjectionFailureMessage());
         process.exit(2);
       }
 
       // Always show the generated post + advisory flags to the operator.
       try {
-        emit("stdout", inspection);
+        if (!opts.json) emit("stdout", inspection);
       } catch {
-        console.error(terminalProjectionFailureMessage());
+        emitLocalFailure({
+          phase: "local", code: "terminal_projection_failed", field: "text",
+          actual: "unsafe_or_oversized", expected: "bounded Unicode-scalar terminal evidence",
+          unit: "utf16_code_units",
+        }, terminalProjectionFailureMessage());
         process.exit(2);
       }
 
@@ -263,14 +402,18 @@ export function registerRedditDraftCommand(reddit: Command): void {
             unit: null,
           },
         );
-        emit("stderr", `\n${error.message}`);
+        emitLocalFailure(error.problem, error.message);
         process.exit(2);
       }
       let terminalSubreddit: string;
       try {
         terminalSubreddit = renderTerminalInline(projectTerminalText(subreddit, { lineMode: "inline" }));
       } catch {
-        console.error(terminalProjectionFailureMessage());
+        emitLocalFailure({
+          phase: "local", code: "terminal_projection_failed", field: "target",
+          actual: "unsafe_or_oversized", expected: "bounded Unicode-scalar subreddit",
+          unit: "utf16_code_units",
+        }, terminalProjectionFailureMessage());
         process.exit(2);
       }
 
@@ -279,35 +422,34 @@ export function registerRedditDraftCommand(reddit: Command): void {
       // needs the authenticated browser context, so it is intentionally deferred to
       // the real run — dry-run never launches a browser or requires credentials.
       if (opts.dryRun) {
-        emit("stdout",
-          `\n[dry-run] Deterministic generation + local validation passed for r/${terminalSubreddit}. ` +
-            `No browser launched, no draft staged.\n` +
-            `  Note: the reader-backed subreddit-rules preflight (flair/title/body/type contract) ` +
-            `requires the authenticated browser and is skipped in --dry-run. Re-run without --dry-run ` +
-            `to validate against the live subreddit contract before staging.`,
-        );
+        emitTransportReceipt(createDryRunReceipt({
+          channel: "reddit",
+          action: "draft",
+          format: "self_post",
+          warnings: post.warnings,
+          gotchas: [
+            "The authenticated subreddit rules/flair/title/body/type preflight was skipped.",
+            "Inline body images are not uploaded or verified by this text-only command.",
+          ],
+          liveNotes: ["The authenticated subreddit preflight and native composer were intentionally skipped."],
+        }), { json: !!opts.json, budget: output });
         process.exit(0);
       }
 
-      // From here on the shared Reddit session may be opened; run closeSession()
-      // exactly once at the end (reader + composer share getBrowserContext).
-      const { BrowserRedditReader } = await import("../reddit/reader.js");
-      const { closeSession } = await import("../reddit/session.js");
-      const { env } = await import("../config.js");
-
-      // The preflight reads hit Reddit's headless-403 fingerprint wall on the same
-      // hosts as inspect/search (design #4), so honor REDDIT_READS_HEADFUL here too —
-      // otherwise `draft` would fail preflight on a host where reads were made to
-      // work. (No silent headless→headful auto-retry mid-draft: the composer shares
-      // this session, so we pick the mode up front instead.)
-      const headful = !!opts.inspect || env.REDDIT_READS_HEADFUL;
-
-      let exitCode = 0;
+      let finalReceipt: Readonly<TransportReceipt> | null = null;
+      let closeSession: (() => Promise<void>) | null = null;
+      let platformTouched = false;
+      let stageInvoked = false;
       try {
-        const reader = new BrowserRedditReader({ inspect: headful });
+        const readerModule = await import("../reddit/reader.js");
+        const sessionModule = await import("../reddit/session.js");
+        const { env } = await import("../config.js");
+        closeSession = sessionModule.closeSession;
+        const headful = !!opts.inspect || env.REDDIT_READS_HEADFUL;
+        const reader = new readerModule.BrowserRedditReader({ inspect: headful });
+        platformTouched = true;
         await reader.init();
 
-        // Reader-backed preflight (§4) — the same reads the composer would need.
         const [about, flairs, postRequirements] = await Promise.all([
           reader.fetchAbout(subreddit),
           reader.fetchFlairs(subreddit),
@@ -315,51 +457,106 @@ export function registerRedditDraftCommand(reddit: Command): void {
         ]);
         const preflight = preflightSelfPost(post, { about, postRequirements, flairs });
 
-        if (preflight.warnings.length) {
-          emit(
-            "stdout",
-            "  advisories (terminal-safe projection):\n" +
-              renderTerminalBlock(projectTerminalText(preflight.warnings.join("\n"), { lineMode: "block" })),
-          );
-        }
-
         if (!preflight.ok) {
-          emit("stderr", `\n✗ Preflight failed for r/${terminalSubreddit}:`);
-          emit(
-            "stderr",
-            renderTerminalBlock(projectTerminalText(preflight.violations.join("\n"), { lineMode: "block" })),
-          );
-          exitCode = 1;
+          finalReceipt = createTransportReceipt({
+            channel: "reddit", action: "draft", format: "self_post", mode: "real",
+            validation: {
+              local: PASSED_LOCAL_VALIDATION,
+              live: { status: "failed", problems: [], notes: preflight.violations },
+            },
+            warnings: [...post.warnings, ...preflight.warnings],
+            gotchas: [], assets: NO_ASSETS, platformTouched: true,
+            terminalState: "platform_rejected",
+            verification: { status: "unverified", strength: "none", nativeReference: null },
+            remoteResidue: [],
+            error: {
+              source: "platform", stage: "subreddit_preflight", code: "reddit_preflight_rejected",
+              httpStatus: null, sanitizedMessage: "The live subreddit preflight rejected this draft.",
+              classification: "known", retryable: null, inputRelated: null,
+              suggestedCorrection: "Review the structured live-validation notes and correct the input without an automatic retry.",
+            },
+            exit: { class: "runtime_or_platform_failure", code: 1 },
+          });
         } else {
-          // Real run: stage a native draft. Preflight already ran; pass the
-          // resolved flair id straight through to the composer.
           const { stageDraft } = await import("../reddit/draftPoster.js");
+          stageInvoked = true;
           const result = await stageDraft(post, {
             inspect: headful,
             flairId: preflight.resolvedFlair?.id,
             flairText: preflight.resolvedFlair?.text,
           });
-
           const outcome = classifyRedditStageResult(result, subreddit);
-          emit(outcome.stream, outcome.message);
-          exitCode = outcome.exitCode;
+          finalReceipt = receiptForRedditStageOutcome(
+            outcome,
+            [...post.warnings, ...preflight.warnings],
+          );
         }
-      } catch (err) {
-        const detail = isTerminalProjectionError(err)
-          ? terminalProjectionFailureMessage()
-          : renderTerminalInline(projectTerminalText((err as Error).message, { lineMode: "inline" }));
-        emit("stderr", `\n✗ Failed to stage the Reddit draft: ${detail}`);
-        emit("stderr",
-          "  Native draft state is not confirmed. Compare Reddit DRAFTS manually in the same " +
-            "CLI-owned profile before any retry; another attempt can duplicate an existing draft " +
-            "because Reddit has no draft idempotency ledger. Use --inspect only after that check " +
-            "if selector calibration is still needed.",
-        );
-        exitCode = 1;
+      } catch {
+        const nativeStateUnknown = stageInvoked;
+        finalReceipt = createTransportReceipt({
+          channel: "reddit", action: "draft", format: "self_post", mode: "real",
+          validation: {
+            local: PASSED_LOCAL_VALIDATION,
+            live: platformTouched
+              ? { status: "failed", problems: [], notes: ["The live Reddit operation did not complete."] }
+              : NOT_REACHED_LIVE_VALIDATION,
+          },
+          warnings: post.warnings,
+          gotchas: nativeStateUnknown
+            ? ["A native Reddit draft may exist. Compare DRAFTS in the same CLI-owned profile and do not blindly retry."]
+            : [],
+          assets: NO_ASSETS,
+          platformTouched,
+          terminalState: nativeStateUnknown ? "native_draft_possible" : "no_native_draft",
+          verification: { status: "unverified", strength: "none", nativeReference: null },
+          remoteResidue: nativeStateUnknown
+            ? [{ kind: "native_draft", state: "stage_result_unknown", assetIndex: null, reference: null, retryRisk: "duplicate" }]
+            : [],
+          error: {
+            source: platformTouched ? "platform" : "runtime",
+            stage: stageInvoked ? "native_stage_result" : "reddit_runtime_initialization",
+            code: stageInvoked ? "reddit_stage_result_unknown" : "reddit_runtime_unavailable",
+            httpStatus: null,
+            sanitizedMessage: stageInvoked
+              ? "Reddit staging was invoked but did not produce a usable closed result."
+              : "The Reddit runtime or live preflight could not complete.",
+            classification: "unknown", retryable: null, inputRelated: null,
+            suggestedCorrection: nativeStateUnknown
+              ? "Inspect Reddit DRAFTS manually in the same CLI-owned profile before deciding whether a separate retry is safe."
+              : "Resolve the runtime or live preflight failure before a separate attempt.",
+          },
+          exit: { class: "runtime_or_platform_failure", code: 1 },
+        });
       } finally {
-        await closeSession();
+        if (closeSession !== null) {
+          try {
+            await closeSession();
+          } catch {
+            if (finalReceipt?.exit.code === 0) {
+              finalReceipt = createTransportReceipt({
+                channel: "reddit", action: "draft", format: "self_post", mode: "real",
+                validation: finalReceipt.validation,
+                warnings: finalReceipt.warnings,
+                gotchas: ["The native draft verified, but the local browser-session cleanup did not complete."],
+                assets: finalReceipt.assets,
+                platformTouched: true,
+                terminalState: "native_draft_verified",
+                verification: finalReceipt.verification,
+                remoteResidue: [{ kind: "local_state", state: "session_cleanup_failed", assetIndex: null, reference: null, retryRisk: "duplicate" }],
+                error: {
+                  source: "runtime", stage: "session_cleanup", code: "reddit_session_cleanup_failed",
+                  httpStatus: null, sanitizedMessage: "The Reddit draft verified, but session cleanup failed.",
+                  classification: "known", retryable: false, inputRelated: false,
+                  suggestedCorrection: "Do not restage; review the existing native draft and repair session cleanup separately.",
+                },
+                exit: { class: "runtime_or_platform_failure", code: 1 },
+              });
+            }
+          }
+        }
       }
 
-      process.exit(exitCode);
+      emitTransportReceipt(finalReceipt!, { json: !!opts.json, budget: output });
+      process.exit(finalReceipt!.exit.code);
     });
 }

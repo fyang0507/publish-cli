@@ -305,7 +305,7 @@ All commands live under the **`publish`** binary (built with **commander**).
 |---|---|
 | `publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private\|--public] [--limit <n>] [--dry-run] [--json] [--inspect]` | Build/populate the account-watch List from the accounts `--handle` follows (default: logged-in `X_USERNAME`), then read `member_count` back to verify. Precursor to `watch --x-list`. Never posts (writes List membership only). |
 | `publish x watch [--query <q>...] [--x-list <id>...] [--persona <text>] [--config <watch.yaml>] [--no-triage] [--json] [--inspect]` | Read recent posts from watched queries/Lists (by driving the session's shared logged-in browser and capturing X's `SearchTimeline` / `ListLatestTweetsTimeline` GraphQL responses), dedupe in SQLite, triage with the cheap Gemini model, emit ranked follow-up candidates (human text by default, machine JSON with `--json`). Accounts are watched via a List, not one-by-one. X is anti-headless, so unattended runs currently need `--inspect` (headful). |
-| `publish x draft --from <base.md> --format <tweet\|thread\|article> [--long] [--dry-run] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Never posts. `--dry-run` generates content only (no browser); `--inspect` runs headful for calibration. |
+| `publish x draft --from <base.md> --format <tweet\|thread\|article> [--long] [--dry-run] [--json] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Never posts. `--dry-run` generates content only (no browser); `--json` emits one channel-independent transport receipt; `--inspect` runs headful for calibration. |
 | `publish --help` | Must work and list the above commands and options. |
 
 **Flag notes**
@@ -315,6 +315,20 @@ All commands live under the **`publish`** binary (built with **commander**).
 - `--long` raises the tweet limit to the configurable Premium long-post cap.
 - `--dry-run` (`draft x`) generates content without touching the browser; reports where content was written.
 - `--inspect` (both commands' browser paths) runs headful so a human can watch/calibrate drift-prone selectors.
+
+All content-bearing transport commands—X draft/reply, LinkedIn draft, Reddit
+draft, and WeChat draft—accept `--json` and emit one
+`publish.transport-receipt/v1` document. This is one-operation evidence, not a
+cross-channel workflow state model. Human and JSON renderers consume the same
+immutable facts: validation, warnings/gotchas, ordered asset stages,
+platform-touch status, terminal draft state, verification/native reference,
+partial residue, explicit `published:false`, sanitized failure details, and exit
+classification. Large ordered evidence sets use bounded listed entries plus
+total/omitted counts and a SHA-256 identity of the exact full set; asset summaries
+also retain complete requested/resolved/set/uploaded/observed/verified counts.
+Exit 0 is limited to a valid dry-run or positively verified
+stage; runtime/platform/state failures use 1; parser/local caller errors use 2
+before state, browser, or API access.
 
 **Auth is implicit.** Both commands obtain the shared logged-in browser via `getBrowserContext()`, which calls `ensureSession()` first; it auto-logs-in from `.env` credentials only if the persistent profile is invalid. There is no cookie-paste step and no per-command login flag. (The watcher reads by capturing X's GraphQL responses in that browser, not via harvested cookies — see §6.2.)
 

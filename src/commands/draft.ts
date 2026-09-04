@@ -18,7 +18,9 @@ import {
   type ArticleCodeBlockFlag,
   type ArticleCodeLinkAdvisory,
 } from "../x/codeAdvisory.js";
-import { isLocalValidationError } from "../capabilities/validation.js";
+import {
+  type LocalValidationProblem,
+} from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
 import {
   isXDraftRowEvidenceCompatible,
@@ -45,12 +47,24 @@ import {
 import {
   TerminalOutputBudget,
   emitTerminalOutput,
-  isTerminalProjectionError,
   projectTerminalText,
   renderTerminalErrorMessage,
   renderTerminalInline,
   terminalProjectionFailureMessage,
 } from "../terminalOutput.js";
+import {
+  createDryRunReceipt,
+  createLocalInputFailureReceipt,
+  createPreStageRuntimeFailureReceipt,
+  createTransportReceipt,
+  emitTransportReceipt,
+  NO_ASSETS,
+  NOT_REACHED_LIVE_VALIDATION,
+  PASSED_LOCAL_VALIDATION,
+  type ReceiptAsset,
+  type TransportReceipt,
+} from "../transportReceipt.js";
+import { classifyXPreStageFailure } from "./xPreStageFailure.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -82,6 +96,7 @@ interface DraftXOptions {
   long?: boolean;
   dryRun?: boolean;
   inspect?: boolean;
+  json?: boolean;
 }
 
 export interface XDraftRealRunInput {
@@ -107,6 +122,8 @@ export interface XDraftRealRunOutcome {
   message: string;
   draftRowEvidence: XDraftRowEvidence | null;
   articleHandoff: XArticleDraftHandoff | null;
+  platformTouched: boolean;
+  nativeReference: string | null;
 }
 
 function unclassifiedSnapshotFailure(
@@ -120,6 +137,8 @@ function unclassifiedSnapshotFailure(
     stream: "stderr",
     draftRowEvidence: null,
     articleHandoff: null,
+    platformTouched: false,
+    nativeReference: null,
     message:
       "\n✗ X draft staging stopped before any native Save/Create action was invoked. NEVER posted.\n" +
       `  Local X staging input snapshot validation failed closed before format/mechanism classification (reason=${reason}).\n` +
@@ -134,6 +153,7 @@ function nativeDraftLocation(format: GeneratedContent["format"]): string {
 function beforeSaveFailure(
   format: GeneratedContent["format"],
   snapshotFailure?: XArticleStageSnapshotFailure,
+  platformTouched = false,
 ): XDraftRealRunOutcome {
   const mechanism = format === "article" ? "Article Create/autosave" : "composer Save";
   return {
@@ -144,6 +164,8 @@ function beforeSaveFailure(
     stream: "stderr",
     draftRowEvidence: null,
     articleHandoff: null,
+    platformTouched,
+    nativeReference: null,
     message:
       `\n✗ X ${format} draft staging stopped before the native ${mechanism} action was invoked. NEVER posted.\n` +
       (snapshotFailure
@@ -158,6 +180,7 @@ function uncertainSaveOutcome(
   phase: "save_delivery_unknown" | "save_delivered_unverified",
   draftRowEvidence: XDraftRowEvidence | null = null,
   articleHandoff: XArticleDraftHandoff | null = null,
+  nativeReference: string | null = null,
 ): XDraftRealRunOutcome {
   const location = nativeDraftLocation(format);
   const fact = phase === "save_delivery_unknown"
@@ -171,6 +194,8 @@ function uncertainSaveOutcome(
     stream: "stderr",
     draftRowEvidence,
     articleHandoff,
+    platformTouched: true,
+    nativeReference,
     message:
       `\n✗ ${fact} for the X ${format} draft. NEVER posted.\n` +
       (format !== "article" && draftRowEvidence?.status === "unverified"
@@ -252,6 +277,8 @@ function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
       stream: "stdout",
       draftRowEvidence: result.draftRowEvidence,
       articleHandoff: result.articleHandoff,
+      platformTouched: true,
+      nativeReference: result.nativeReference ?? null,
       message:
         `\n✓ Staged a NATIVE X draft (${result.format}, ${count}). NEVER posted.\n` +
         "  persistence verified by reopening the captured canonical Article edit URL: yes\n" +
@@ -267,6 +294,8 @@ function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
     stream: "stdout",
     draftRowEvidence: result.draftRowEvidence,
     articleHandoff: null,
+    platformTouched: true,
+    nativeReference: null,
     message:
       `\n✓ Native X Save action returned (${result.format}, ${count}). NEVER posted.\n` +
       "  scoped-row observation: positive\n" +
@@ -374,6 +403,8 @@ export async function executeXDraftRealRun(
       stream: "stderr",
       draftRowEvidence: null,
       articleHandoff: null,
+      platformTouched: false,
+      nativeReference: null,
       message:
         "\n✗ Could not initialize the X draft staging runtime. No native Save/autosave action was invoked. NEVER posted.\n" +
         "  Verify the local installation and runtime dependencies before a separate retry.",
@@ -390,6 +421,8 @@ export async function executeXDraftRealRun(
       stream: "stderr",
       draftRowEvidence: null,
       articleHandoff: null,
+      platformTouched: false,
+      nativeReference: null,
       message:
         "\n✗ Could not initialize the X draft staging runtime. No native Save/autosave action was invoked. NEVER posted.\n" +
         "  Verify the local installation and runtime dependencies before a separate retry.",
@@ -415,7 +448,7 @@ export async function executeXDraftRealRun(
         return uncertainSaveOutcome(format, "save_delivery_unknown");
       }
       return stageError.savePhase === "save_not_attempted"
-        ? beforeSaveFailure(format)
+        ? beforeSaveFailure(format, undefined, true)
         : uncertainSaveOutcome(format, stageError.savePhase);
     }
     // Once the staging function was invoked, an untyped exception carries no
@@ -449,6 +482,24 @@ export async function executeXDraftRealRun(
         articleHandoff: snapshotXArticleDraftHandoff(
           (returned as StageDraftResult & { articleHandoff?: unknown }).articleHandoff,
         ),
+        nativeReference: (() => {
+          const descriptor = Object.getOwnPropertyDescriptor(returned, "nativeReference");
+          if (!descriptor) return null;
+          if (!("value" in descriptor) || !descriptor.enumerable || typeof descriptor.value !== "string") {
+            throw new Error("Invalid Article native reference.");
+          }
+          try {
+            const parsed = new URL(descriptor.value);
+            return parsed.protocol === "https:" && parsed.hostname === "x.com" &&
+                parsed.username === "" && parsed.password === "" && parsed.port === "" &&
+                /^\/compose\/articles\/edit\/\d+$/.test(parsed.pathname) &&
+                `${parsed.origin}${parsed.pathname}` === descriptor.value
+              ? descriptor.value
+              : null;
+          } catch {
+            return null;
+          }
+        })(),
       };
       if (
         candidate.format !== format ||
@@ -500,7 +551,178 @@ export async function executeXDraftRealRun(
         "save_delivered_unverified",
         result.draftRowEvidence,
         result.saveMechanism === "article_create_autosave" ? result.articleHandoff : null,
+        result.saveMechanism === "article_create_autosave" ? result.nativeReference ?? null : null,
       );
+}
+
+function xArticleAssets(outcome: XDraftRealRunOutcome): readonly ReceiptAsset[] {
+  const cover = outcome.articleHandoff?.cover;
+  if (!cover) return NO_ASSETS;
+  if (cover.status === "missing") {
+    // Automatic discovery found no cover to request from the native chooser.
+    // Keep the expected slot explicit without claiming any asset action occurred.
+    return [{
+      index: 0,
+      role: "cover",
+      requested: false,
+      resolved: false,
+      set: false,
+      uploaded: false,
+      observed: false,
+      verified: false,
+      remoteReference: null,
+    }];
+  }
+  const set = cover.status === "attached" ? true : null;
+  const observed = cover.status === "attached" && cover.crop === "applied" ? true : null;
+  return [{
+    index: 0,
+    role: "cover",
+    requested: true,
+    resolved: true,
+    set,
+    uploaded: null,
+    observed,
+    // X's text reopen verification does not establish cover persistence.
+    verified: null,
+    remoteReference: null,
+  }];
+}
+
+function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
+  const handoff = outcome.articleHandoff;
+  if (handoff === null) return [];
+  const gotchas: string[] = [];
+  const count = handoff.codeBlockCount;
+  if (count === "many" || count > 0) {
+    const countLabel = count === "many"
+      ? `More than ${X_ARTICLE_CODE_BLOCK_COUNT_LIMIT}`
+      : String(count);
+    gotchas.push(
+      `${countLabel} X Article code block${count === 1 ? " was" : "s were"} intentionally excluded from the native rich-HTML input; add ${count === 1 ? "it" : "them"} manually with Insert → Code or as ${count === 1 ? "a screenshot" : "screenshots"}.`,
+    );
+  }
+  if (handoff.cover.status === "missing") {
+    gotchas.push(
+      "No X Article cover was resolved or staged; add the intended cover and verify it manually in the native draft.",
+    );
+  }
+  return gotchas;
+}
+
+export function receiptForXDraftOutcome(
+  outcome: XDraftRealRunOutcome,
+  format: XFormat,
+  warnings: readonly string[] = [],
+): Readonly<TransportReceipt> {
+  const verified = outcome.kind === "staged" && outcome.savePhase === "verified";
+  const saveMayExist = outcome.savePhase === "save_delivery_unknown" ||
+    outcome.savePhase === "save_delivered_unverified";
+  const localInvalid = outcome.exitCode === 2;
+  const terminalState = localInvalid
+    ? "input_rejected" as const
+    : verified
+      ? "native_draft_verified" as const
+      : outcome.savePhase === "save_delivered_unverified"
+        ? "native_draft_unverified" as const
+        : outcome.savePhase === "save_delivery_unknown"
+          ? "native_draft_possible" as const
+          : "no_native_draft" as const;
+  const error = outcome.exitCode === 0 ? null : {
+    source: localInvalid ? "local" as const : outcome.kind === "stage_runtime_failed" ? "runtime" as const : "platform" as const,
+    stage: localInvalid
+      ? "staging_input_snapshot"
+      : outcome.savePhase ?? "staging_runtime",
+    code: localInvalid
+      ? "x_staging_input_invalid"
+      : outcome.kind === "stage_runtime_failed"
+        ? "x_staging_runtime_unavailable"
+        : `x_${outcome.savePhase}`,
+    httpStatus: null,
+    sanitizedMessage: localInvalid
+      ? "The closed X staging input failed local validation."
+      : outcome.kind === "stage_runtime_failed"
+        ? "The X staging runtime could not be initialized."
+        : "The X native draft outcome was not positively verified.",
+    classification: outcome.savePhase === "save_delivery_unknown" ? "unknown" as const : "known" as const,
+    retryable: null,
+    inputRelated: localInvalid ? true : null,
+    suggestedCorrection: saveMayExist
+      ? "Compare the native draft manually in the exact CLI-owned X profile before deciding whether a separate retry is safe. Never retry blindly."
+      : localInvalid
+        ? "Regenerate a valid closed staging request before retrying."
+        : "Resolve the local runtime or calibrated composer failure before a separate retry.",
+  };
+  return createTransportReceipt({
+    channel: "x",
+    action: "draft",
+    format,
+    mode: "real",
+    validation: {
+      local: localInvalid
+        ? {
+            status: "failed",
+            problems: [{
+              phase: "local",
+              code: "x_staging_input_invalid",
+              field: "text",
+              actual: "invalid_closed_snapshot",
+              expected: "a valid immutable X staging input",
+              unit: null,
+            }],
+            notes: [],
+          }
+        : PASSED_LOCAL_VALIDATION,
+      live: verified
+        ? { status: "passed", problems: [], notes: [] }
+        : outcome.platformTouched
+          ? { status: "failed", problems: [], notes: ["Native persistence was not positively verified."] }
+          : NOT_REACHED_LIVE_VALIDATION,
+    },
+    warnings,
+    gotchas: [
+      ...(saveMayExist
+        ? ["A native draft may exist; use same-profile manual comparison and do not retry blindly."]
+        : []),
+      ...xArticleGotchas(outcome),
+    ],
+    assets: xArticleAssets(outcome),
+    platformTouched: outcome.platformTouched,
+    terminalState,
+    verification: {
+      status: verified ? "verified" : localInvalid ? "not_applicable" : "unverified",
+      strength: verified
+        ? format === "article" ? "exact_content_reopen" : "scoped_row_delta"
+        : "none",
+      nativeReference: outcome.nativeReference,
+    },
+    remoteResidue: saveMayExist
+      ? [{
+          kind: "native_draft",
+          state: outcome.savePhase,
+          assetIndex: null,
+          reference: outcome.nativeReference,
+          retryRisk: "duplicate",
+        }]
+      : outcome.platformTouched && outcome.savePhase === "save_not_attempted"
+        ? [{
+            kind: "composer",
+            state: "composer_residue_unknown",
+            assetIndex: null,
+            reference: null,
+            retryRisk: "unknown",
+          }]
+        : [],
+    error,
+    exit: {
+      class: outcome.exitCode === 0
+        ? "success"
+        : outcome.exitCode === 2
+          ? "invalid_caller_input"
+          : "runtime_or_platform_failure",
+      code: outcome.exitCode,
+    },
+  });
 }
 
 const productionXDraftRealRunDependencies: XDraftRealRunDependencies = {
@@ -576,6 +798,7 @@ export function registerDraftCommand(x: Command): void {
     .option("--long", "Use the local 25,000-code-point guard for Premium long posts; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
+    .option("--json", "Emit one versioned machine-readable transport receipt")
     .addHelpText(
       "after",
       "\nFile/stdin frontmatter:\n" +
@@ -618,21 +841,80 @@ export function registerDraftCommand(x: Command): void {
       const output = new TerminalOutputBudget();
       const emit = (stream: "stdout" | "stderr", message: string) =>
         emitTerminalOutput(output, stream, message);
+      const emitLocalFailure = (problem: LocalValidationProblem, message: string) => {
+        emitTransportReceipt(createLocalInputFailureReceipt({
+          channel: "x",
+          action: "draft",
+          format: VALID_FORMATS.includes(opts.format as XFormat) ? opts.format : "unknown",
+          mode: opts.dryRun ? "dry_run" : "real",
+          problem,
+          message,
+        }), { json: !!opts.json, budget: output });
+      };
       const format = opts.format as XFormat;
       if (!VALID_FORMATS.includes(format)) {
-        try {
-          const supplied = renderTerminalInline(projectTerminalText(opts.format, { lineMode: "inline" }));
-          emit("stderr", `Invalid --format "${supplied}". Expected one of: ${VALID_FORMATS.join(" | ")}.`);
-        } catch {
-          console.error(terminalProjectionFailureMessage());
-        }
+        emitLocalFailure({
+          phase: "local",
+          code: "x_format_invalid",
+          field: "source",
+          actual: "unsupported_format",
+          expected: VALID_FORMATS.join(" | "),
+          unit: null,
+        }, `Invalid --format. Expected one of: ${VALID_FORMATS.join(" | ")}.`);
         process.exit(2);
       }
+      const stopForPreStageFailure = (
+        error: unknown,
+        stage: string,
+        code: string,
+      ): never => {
+        const classified = classifyXPreStageFailure(error);
+        if (classified.kind === "local_validation") {
+          let problem: LocalValidationProblem | null = null;
+          let message: string | null = null;
+          try {
+            problem = classified.error.problem;
+            message = classified.error.message;
+          } catch {
+            // A hostile wrapper around a branded error is an unknown runtime failure.
+          }
+          if (problem !== null && typeof message === "string") {
+            emitLocalFailure(problem, message);
+            process.exit(2);
+          }
+        } else if (classified.kind === "terminal_projection") {
+          emitLocalFailure({
+            phase: "local",
+            code: "terminal_projection_failed",
+            field: "text",
+            actual: "unsafe_or_oversized",
+            expected: "bounded Unicode-scalar content",
+            unit: "utf16_code_units",
+          }, terminalProjectionFailureMessage());
+          process.exit(2);
+        }
+
+        emitTransportReceipt(createPreStageRuntimeFailureReceipt({
+          action: "draft",
+          format,
+          mode: opts.dryRun ? "dry_run" : "real",
+          stage,
+          code,
+        }), { json: !!opts.json, budget: output });
+        process.exit(1);
+      };
 
       // Articles are long-form structured markdown (headings, blocks, inline
       // runs) — no business on a command line. Require a file for that format.
       if (format === "article" && opts.text !== undefined) {
-        console.error("--text is for tweet/thread only. Use --from <base.md> for --format article.");
+        emitLocalFailure({
+          phase: "local",
+          code: "x_article_inline_text_unsupported",
+          field: "source",
+          actual: "--text",
+          expected: "--from <base.md> for an X Article",
+          unit: null,
+        }, "--text is for tweet/thread only. Use --from <base.md> for --format article.");
         process.exit(2);
       }
 
@@ -653,13 +935,11 @@ export function registerDraftCommand(x: Command): void {
           sourceLineOffset = split.bodyLineOffset;
         }
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        try {
-          emit("stderr", renderTerminalErrorMessage(error.message));
-        } catch {
-          console.error(terminalProjectionFailureMessage());
-        }
-        process.exit(2);
+        return stopForPreStageFailure(
+          error,
+          "content_input",
+          "x_content_input_runtime_failed",
+        );
       }
       // A real file base path (not stdin) — used to locate an article's hero
       // asset and to place the --dry-run artifact. Undefined for --text/stdin.
@@ -676,17 +956,11 @@ export function registerDraftCommand(x: Command): void {
         content = prepared.content;
         inspection = prepared.inspection;
       } catch (error) {
-        if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
-        if (isTerminalProjectionError(error)) {
-          console.error(terminalProjectionFailureMessage());
-        } else {
-          try {
-            emit("stderr", renderTerminalErrorMessage(error.message));
-          } catch {
-            console.error(terminalProjectionFailureMessage());
-          }
-        }
-        process.exit(2);
+        return stopForPreStageFailure(
+          error,
+          "content_generation",
+          "x_content_generation_runtime_failed",
+        );
       }
 
       let dryRunArtifacts: {
@@ -696,10 +970,11 @@ export function registerDraftCommand(x: Command): void {
         inspectionBody?: string;
         receipt: string;
       } | null = null;
+      let dryRunNoArtifactReceipt: string | null = null;
       // Project caller paths and reserve the complete pre-runtime transcript
       // before exposing content or writing any artifact.
       try {
-        output.consume(inspection);
+        if (!opts.json) output.consume(inspection);
         if (opts.dryRun && basePath) {
           const contentPath = artifactPath(basePath, format);
           const terminalContentPath = renderTerminalInline(projectTerminalText(
@@ -715,7 +990,7 @@ export function registerDraftCommand(x: Command): void {
             const receipt =
               `\n[dry-run] No browser touched. Clean content written to:\n  ${terminalContentPath}\n` +
               `Inspection receipt written to:\n  ${terminalInspectionPath}`;
-            output.consume(receipt);
+            if (!opts.json) output.consume(receipt);
             dryRunArtifacts = {
               contentPath,
               contentBody: artifactBody(content),
@@ -725,7 +1000,7 @@ export function registerDraftCommand(x: Command): void {
             };
           } else {
             const receipt = `\n[dry-run] No browser touched. Content written to:\n  ${terminalContentPath}`;
-            output.consume(receipt);
+            if (!opts.json) output.consume(receipt);
             dryRunArtifacts = {
               contentPath,
               contentBody: artifactBody(content),
@@ -733,13 +1008,21 @@ export function registerDraftCommand(x: Command): void {
             };
           }
         } else if (opts.dryRun) {
-          output.consume("\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)");
+          if (!opts.json) {
+            dryRunNoArtifactReceipt =
+              "\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)";
+            output.consume(dryRunNoArtifactReceipt);
+          }
         }
-      } catch {
-        console.error(terminalProjectionFailureMessage());
-        process.exit(2);
+      } catch (error) {
+        return stopForPreStageFailure(
+          error,
+          "terminal_preparation",
+          "x_terminal_preparation_runtime_failed",
+        );
       }
-      console.log(inspection);
+      if (!opts.json) console.log(inspection);
+      if (dryRunNoArtifactReceipt !== null) console.log(dryRunNoArtifactReceipt);
 
       if (opts.dryRun) {
         // Write an artifact only when there's a base file to write beside it;
@@ -748,30 +1031,62 @@ export function registerDraftCommand(x: Command): void {
           try {
             writeFileSync(dryRunArtifacts.contentPath, dryRunArtifacts.contentBody, "utf-8");
           } catch {
-            emit(
-              "stderr",
-              "\n✗ Local X dry-run artifact write failed. The requested artifact may be absent, partial, or replaced. " +
-                "No browser, profile, reply ledger, or native staging action followed.",
-            );
-            process.exit(2);
+            emitTransportReceipt(createTransportReceipt({
+              channel: "x", action: "draft", format, mode: "dry_run",
+              validation: { local: PASSED_LOCAL_VALIDATION, live: NOT_REACHED_LIVE_VALIDATION },
+              warnings: content.warnings,
+              gotchas: ["The requested local artifact may be absent, partial, or replaced."],
+              assets: NO_ASSETS,
+              platformTouched: false,
+              terminalState: "unknown",
+              verification: { status: "not_applicable", strength: "local_only", nativeReference: null },
+              remoteResidue: [{ kind: "artifact", state: "write_failed_or_partial", assetIndex: null, reference: null, retryRisk: "none" }],
+              error: {
+                source: "runtime", stage: "artifact_write", code: "x_artifact_write_failed", httpStatus: null,
+                sanitizedMessage: "The local X dry-run artifact write failed.", classification: "known",
+                retryable: null, inputRelated: false,
+                suggestedCorrection: "Inspect the requested local artifact path before a separate write attempt.",
+              },
+              exit: { class: "runtime_or_platform_failure", code: 1 },
+            }), { json: !!opts.json, budget: output });
+            process.exit(1);
           }
           if (dryRunArtifacts.inspectionPath && dryRunArtifacts.inspectionBody !== undefined) {
             try {
               writeFileSync(dryRunArtifacts.inspectionPath, dryRunArtifacts.inspectionBody, "utf-8");
             } catch {
-              emit(
-                "stderr",
-                "\n✗ Local X Article inspection receipt write failed after the clean content artifact write returned. " +
-                  "The clean content artifact may already exist; the inspection receipt may be absent, partial, or replaced. " +
-                  "No browser, profile, or native staging action followed.",
-              );
-              process.exit(2);
+              emitTransportReceipt(createTransportReceipt({
+                channel: "x", action: "draft", format, mode: "dry_run",
+                validation: { local: PASSED_LOCAL_VALIDATION, live: NOT_REACHED_LIVE_VALIDATION },
+                warnings: content.warnings,
+                gotchas: ["The clean content artifact exists, but the inspection receipt may be absent, partial, or replaced."],
+                assets: NO_ASSETS,
+                platformTouched: false,
+                terminalState: "unknown",
+                verification: { status: "not_applicable", strength: "local_only", nativeReference: null },
+                remoteResidue: [{ kind: "artifact", state: "content_written_inspection_failed", assetIndex: null, reference: null, retryRisk: "none" }],
+                error: {
+                  source: "runtime", stage: "inspection_artifact_write", code: "x_inspection_artifact_write_failed", httpStatus: null,
+                  sanitizedMessage: "The local X Article inspection receipt write failed after the content artifact returned.", classification: "known",
+                  retryable: null, inputRelated: false,
+                  suggestedCorrection: "Inspect both local artifact paths before a separate write attempt.",
+                },
+                exit: { class: "runtime_or_platform_failure", code: 1 },
+              }), { json: !!opts.json, budget: output });
+              process.exit(1);
             }
           }
-          console.log(dryRunArtifacts.receipt);
-        } else {
-          console.log("\n[dry-run] No browser touched. (No base file — content printed above, no artifact written.)");
+          if (!opts.json) console.log(dryRunArtifacts.receipt);
         }
+        emitTransportReceipt(createDryRunReceipt({
+          channel: "x",
+          action: "draft",
+          format,
+          warnings: content.warnings,
+          gotchas: format === "article" && content.article?.codeBlockCount
+            ? ["Article code blocks require manual Insert → Code or screenshot handling."]
+            : [],
+        }), { json: !!opts.json, budget: output });
         process.exit(0);
       }
 
@@ -779,7 +1094,10 @@ export function registerDraftCommand(x: Command): void {
         { content, inspect: opts.inspect, basePath },
         productionXDraftRealRunDependencies,
       );
-      emit(outcome.stream, outcome.message);
+      emitTransportReceipt(receiptForXDraftOutcome(outcome, format, content.warnings), {
+        json: !!opts.json,
+        budget: output,
+      });
       process.exit(outcome.exitCode);
     });
 }

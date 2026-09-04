@@ -33,11 +33,13 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { Blob } from "node:buffer";
+import { isProxy } from "node:util/types";
 import { fetch, FormData, type RequestInit } from "undici";
 import { createEgress, type EgressHandle } from "./egress.js";
 import { env, peekDataPaths } from "../config.js";
 import {
   assertWechatLocalImage,
+  sanitizeServerMessage,
   type WeChatImageSurface,
 } from "../capabilities/validation.js";
 
@@ -58,16 +60,128 @@ export interface TokenCacheEvidence {
   expired: boolean;
 }
 
-/** Thrown when WeChat returns a non-zero errcode. */
+const WECHAT_API_ERROR_INSTANCES = new WeakSet<object>();
+const WECHAT_REQUEST_ERROR_INSTANCES = new WeakSet<object>();
+
+export type WeChatRequestErrorCode =
+  | "transport_failure"
+  | "invalid_json_response"
+  | "invalid_response_shape"
+  | "unexpected_http_status"
+  | "missing_response_field";
+
+/** Thrown only when WeChat returned a well-formed, explicit non-zero errcode. */
 export class WeChatApiError extends Error {
+  readonly errcode: number;
+  readonly errmsg: string;
+  readonly endpoint: string;
+  readonly httpStatus: number | null;
+
   constructor(
-    public readonly errcode: number,
-    public readonly errmsg: string,
-    public readonly endpoint: string, // e.g. "/cgi-bin/draft/add"
+    errcode: number,
+    errmsg: string,
+    endpoint: string, // e.g. "/cgi-bin/draft/add"
+    httpStatus: number | null = null,
   ) {
-    super(`WeChat ${endpoint} failed: ${errcode} ${errmsg}`);
+    const safeMessage = sanitizeServerMessage(typeof errmsg === "string" ? errmsg : "") ||
+      "WeChat rejected the request without a usable message.";
+    const safeEndpoint = endpoint.split("?", 1)[0] || "wechat_api";
+    super(`WeChat ${safeEndpoint} rejected the request (${errcode}): ${safeMessage}`);
     this.name = "WeChatApiError";
+    this.errcode = Number.isSafeInteger(errcode) ? errcode : -1;
+    this.errmsg = safeMessage;
+    this.endpoint = safeEndpoint;
+    this.httpStatus = Number.isSafeInteger(httpStatus) ? httpStatus : null;
+    WECHAT_API_ERROR_INSTANCES.add(this);
+    Object.freeze(this);
   }
+}
+
+/**
+ * Content-free failure for a request whose delivery or returned representation
+ * cannot be proven. Raw response bodies, headers, URLs-with-tokens, and fetch
+ * exception messages never cross this boundary.
+ */
+export class WeChatRequestError extends Error {
+  readonly endpoint: string;
+  readonly httpStatus: number | null;
+  readonly code: WeChatRequestErrorCode;
+
+  constructor(endpoint: string, httpStatus: number | null, code: WeChatRequestErrorCode) {
+    const safeEndpoint = endpoint.split("?", 1)[0] || "wechat_api";
+    super(`WeChat ${safeEndpoint} returned no trustworthy completion evidence (${code}).`);
+    this.name = "WeChatRequestError";
+    this.endpoint = safeEndpoint;
+    this.httpStatus = Number.isSafeInteger(httpStatus) ? httpStatus : null;
+    this.code = code;
+    WECHAT_REQUEST_ERROR_INSTANCES.add(this);
+    Object.freeze(this);
+  }
+}
+
+export type WeChatClientFailureSnapshot = Readonly<
+  | {
+      kind: "api_rejection";
+      endpoint: string;
+      code: string;
+      httpStatus: number | null;
+      sanitizedMessage: string;
+    }
+  | {
+      kind: "delivery_unknown";
+      endpoint: string;
+      code: WeChatRequestErrorCode;
+      httpStatus: number | null;
+      sanitizedMessage: string;
+    }
+>;
+
+/** Snapshot only genuine locally-created client failures without invoking accessors. */
+export function snapshotWeChatClientFailure(error: unknown): WeChatClientFailureSnapshot | null {
+  if ((typeof error !== "object" && typeof error !== "function") || error === null) return null;
+  try {
+    if (isProxy(error)) return null;
+    if (WECHAT_API_ERROR_INSTANCES.has(error)) {
+      const errcode = Object.getOwnPropertyDescriptor(error, "errcode")?.value;
+      const errmsg = Object.getOwnPropertyDescriptor(error, "errmsg")?.value;
+      const endpoint = Object.getOwnPropertyDescriptor(error, "endpoint")?.value;
+      const httpStatus = Object.getOwnPropertyDescriptor(error, "httpStatus")?.value;
+      if (
+        !Number.isSafeInteger(errcode) || typeof errmsg !== "string" ||
+        typeof endpoint !== "string" ||
+        (httpStatus !== null && !Number.isSafeInteger(httpStatus))
+      ) return null;
+      return Object.freeze({
+        kind: "api_rejection",
+        endpoint,
+        code: String(errcode),
+        httpStatus,
+        sanitizedMessage: sanitizeServerMessage(errmsg) || "WeChat rejected the request.",
+      });
+    }
+    if (WECHAT_REQUEST_ERROR_INSTANCES.has(error)) {
+      const code = Object.getOwnPropertyDescriptor(error, "code")?.value;
+      const endpoint = Object.getOwnPropertyDescriptor(error, "endpoint")?.value;
+      const httpStatus = Object.getOwnPropertyDescriptor(error, "httpStatus")?.value;
+      if (
+        (code !== "transport_failure" && code !== "invalid_json_response" &&
+          code !== "invalid_response_shape" && code !== "unexpected_http_status" &&
+          code !== "missing_response_field") ||
+        typeof endpoint !== "string" ||
+        (httpStatus !== null && !Number.isSafeInteger(httpStatus))
+      ) return null;
+      return Object.freeze({
+        kind: "delivery_unknown",
+        endpoint,
+        code,
+        httpStatus,
+        sanitizedMessage: "WeChat request delivery or the returned completion evidence is unknown.",
+      });
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 export interface DraftArticle {
@@ -171,8 +285,8 @@ function readImageForUpload(
   let validation;
   try {
     validation = assertWechatLocalImage(localPath, surface);
-  } catch (error) {
-    throw new Error(`[wechat-client] ${label}: ${(error as Error).message}`);
+  } catch {
+    throw new Error(`[wechat-client] ${label} no longer passes the local image validation snapshot.`);
   }
   const blob = new Blob(
     [readFileSync(localPath)],
@@ -190,16 +304,46 @@ class WeChatClientImpl implements WeChatClient {
    * => WeChatApiError; the error endpoint drops the query string so the access_token
    * never leaks into an error message.
    */
-  private async request(path: string, init: RequestInit): Promise<any> {
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      ...(this.egress.dispatcher ? { dispatcher: this.egress.dispatcher } : {}),
-    });
-    const json = (await res.json()) as any;
-    if (json && json.errcode && json.errcode !== 0) {
-      throw new WeChatApiError(json.errcode, json.errmsg ?? "", path.split("?")[0]);
+  private async request(
+    path: string,
+    init: RequestInit,
+  ): Promise<{ json: Record<string, unknown>; httpStatus: number }> {
+    const endpoint = path.split("?", 1)[0] || "wechat_api";
+    let res;
+    try {
+      res = await fetch(`${API_BASE}${path}`, {
+        ...init,
+        ...(this.egress.dispatcher ? { dispatcher: this.egress.dispatcher } : {}),
+      });
+    } catch {
+      throw new WeChatRequestError(endpoint, null, "transport_failure");
     }
-    return json;
+
+    let decoded: unknown;
+    try {
+      decoded = await res.json();
+    } catch {
+      throw new WeChatRequestError(endpoint, res.status, "invalid_json_response");
+    }
+    if (typeof decoded !== "object" || decoded === null || Array.isArray(decoded)) {
+      throw new WeChatRequestError(endpoint, res.status, "invalid_response_shape");
+    }
+    const json = decoded as Record<string, unknown>;
+    if (json.errcode !== undefined && json.errcode !== 0) {
+      if (!Number.isSafeInteger(json.errcode)) {
+        throw new WeChatRequestError(endpoint, res.status, "invalid_response_shape");
+      }
+      throw new WeChatApiError(
+        json.errcode as number,
+        typeof json.errmsg === "string" ? json.errmsg : "",
+        endpoint,
+        res.status,
+      );
+    }
+    if (!res.ok) {
+      throw new WeChatRequestError(endpoint, res.status, "unexpected_http_status");
+    }
+    return { json, httpStatus: res.status };
   }
 
   async ensureToken(force = false): Promise<string> {
@@ -209,7 +353,7 @@ class WeChatClientImpl implements WeChatClient {
         return cached.access_token;
       }
     }
-    const json = await this.request("/cgi-bin/stable_token", {
+    const { json, httpStatus } = await this.request("/cgi-bin/stable_token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -219,8 +363,8 @@ class WeChatClientImpl implements WeChatClient {
         force_refresh: false,
       }),
     });
-    if (typeof json.access_token !== "string" || !json.access_token) {
-      throw new Error(`[wechat-client] stable_token returned no access_token: ${JSON.stringify(json)}`);
+    if (typeof json.access_token !== "string" || !json.access_token || json.access_token.length > 8_192) {
+      throw new WeChatRequestError("/cgi-bin/stable_token", httpStatus, "missing_response_field");
     }
     const expiresIn = typeof json.expires_in === "number" ? json.expires_in : 7200;
     writeTokenCache({ access_token: json.access_token, expires_at: Date.now() + expiresIn * 1000 });
@@ -232,12 +376,12 @@ class WeChatClientImpl implements WeChatClient {
     const { blob, filename } = readImageForUpload(localPath, "body image", "body");
     const form = new FormData();
     form.append("media", blob, filename);
-    const json = await this.request(`/cgi-bin/media/uploadimg?access_token=${encodeURIComponent(token)}`, {
+    const { json, httpStatus } = await this.request(`/cgi-bin/media/uploadimg?access_token=${encodeURIComponent(token)}`, {
       method: "POST",
       body: form,
     });
-    if (typeof json.url !== "string" || !json.url) {
-      throw new Error(`[wechat-client] media/uploadimg returned no url: ${JSON.stringify(json)}`);
+    if (typeof json.url !== "string" || !json.url || json.url.length > 8_192) {
+      throw new WeChatRequestError("/cgi-bin/media/uploadimg", httpStatus, "missing_response_field");
     }
     return json.url;
   }
@@ -247,26 +391,26 @@ class WeChatClientImpl implements WeChatClient {
     const { blob, filename } = readImageForUpload(localPath, "cover image", "cover");
     const form = new FormData();
     form.append("media", blob, filename);
-    const json = await this.request(
+    const { json, httpStatus } = await this.request(
       `/cgi-bin/material/add_material?access_token=${encodeURIComponent(token)}&type=image`,
       { method: "POST", body: form },
     );
-    if (typeof json.media_id !== "string" || !json.media_id) {
-      throw new Error(`[wechat-client] material/add_material returned no media_id: ${JSON.stringify(json)}`);
+    if (typeof json.media_id !== "string" || !json.media_id || json.media_id.length > 8_192) {
+      throw new WeChatRequestError("/cgi-bin/material/add_material", httpStatus, "missing_response_field");
     }
     return json.media_id;
   }
 
   async addDraft(payload: DraftAddPayload): Promise<string> {
     const token = await this.ensureToken();
-    const json = await this.request(`/cgi-bin/draft/add?access_token=${encodeURIComponent(token)}`, {
+    const { json, httpStatus } = await this.request(`/cgi-bin/draft/add?access_token=${encodeURIComponent(token)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       // WeChat expects UTF-8 JSON; JSON.stringify keeps non-ASCII as \uXXXX which the API accepts.
       body: JSON.stringify(payload),
     });
-    if (typeof json.media_id !== "string" || !json.media_id) {
-      throw new Error(`[wechat-client] draft/add returned no media_id: ${JSON.stringify(json)}`);
+    if (typeof json.media_id !== "string" || !json.media_id || json.media_id.length > 8_192) {
+      throw new WeChatRequestError("/cgi-bin/draft/add", httpStatus, "missing_response_field");
     }
     return json.media_id;
   }
@@ -306,7 +450,8 @@ class WeChatClientImpl implements WeChatClient {
       // A cached token can be revoked server-side before its declared expiry.
       // Refresh once through the normal credential exchange, report the repair,
       // then repeat the same harmless authenticated GET. Never loop indefinitely.
-      if (err instanceof WeChatApiError && (err.errcode === 40014 || err.errcode === 42001)) {
+      const failure = snapshotWeChatClientFailure(err);
+      if (failure?.kind === "api_rejection" && (failure.code === "40014" || failure.code === "42001")) {
         try {
           token = await this.ensureToken(true);
           tokenRefreshed = true;
@@ -332,23 +477,25 @@ class WeChatClientImpl implements WeChatClient {
 
   /** Map an error onto a CheckResult stage: 40164 => ip, 40013/40125 => credentials, else token/unknown. */
   private classifyFailure(err: unknown, egressDescription: string): CheckResult {
-    if (err instanceof WeChatApiError) {
-      if (err.errcode === 40164) {
+    const failure = snapshotWeChatClientFailure(err);
+    if (failure?.kind === "api_rejection") {
+      const errcode = Number(failure.code);
+      if (errcode === 40164) {
         return {
           ok: false,
           stage: "ip",
-          errcode: err.errcode,
-          errmsg: err.errmsg,
-          egressIp: parseEgressIpFrom40164(err.errmsg) ?? undefined,
+          errcode,
+          errmsg: failure.sanitizedMessage,
+          egressIp: parseEgressIpFrom40164(failure.sanitizedMessage) ?? undefined,
           egressDescription,
         };
       }
-      if (err.errcode === 40013 || err.errcode === 40125) {
-        return { ok: false, stage: "credentials", errcode: err.errcode, errmsg: err.errmsg, egressDescription };
+      if (errcode === 40013 || errcode === 40125) {
+        return { ok: false, stage: "credentials", errcode, errmsg: failure.sanitizedMessage, egressDescription };
       }
-      return { ok: false, stage: "token", errcode: err.errcode, errmsg: err.errmsg, egressDescription };
+      return { ok: false, stage: "token", errcode, errmsg: failure.sanitizedMessage, egressDescription };
     }
-    if (err instanceof TypeError || (err instanceof Error && /fetch|connect|network|socket|timeout|dns|proxy/i.test(err.message))) {
+    if (failure?.kind === "delivery_unknown") {
       return { ok: false, stage: "network", errmsg: "Network or egress connection failed", egressDescription };
     }
     return { ok: false, stage: "unknown", errmsg: "Unclassified API probe failure", egressDescription };

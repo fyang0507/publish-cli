@@ -34,10 +34,12 @@ import { getBrowserContext, type EnsureSessionOptions } from "./session.js";
 import { tolerantLocator, optionalLocator, typeText } from "../x/draftPoster.js";
 import { snapshotLinkedInGeneratedPost, type GeneratedPost } from "./content.js";
 import {
+  createLinkedInMediaStageEvidence,
   LINKEDIN_DRAFT_SAVE_MECHANISM,
   linkedInDraftStageError,
   runLinkedInDraftSaveFlow,
   type LinkedInDraftSaveFlowResult,
+  type LinkedInDraftStageProgress,
   type LinkedInDraftStageResult,
 } from "./saveProgress.js";
 
@@ -96,7 +98,9 @@ export const LI_COMPOSER_SELECTORS = {
     '//button[normalize-space()="Next"]',
     '//button[normalize-space()="Done"]',
   ],
-  // A rendered image thumbnail inside the composer — a signal media attached.
+  // Candidate preview selectors retained for future live calibration. They are
+  // intentionally unused here: a generic preview is not attributable evidence
+  // for every caller-ordered image and must not promote `set` to `observed`.
   mediaAttachedSignal: [
     'div.share-images',
     "img.share-creation-state__preview-image",
@@ -199,10 +203,10 @@ async function resolveHiddenFileInput(page: Page): Promise<Locator | null> {
 }
 
 /**
- * Attach media files to the open composer. LinkedIn feed images are ratio-flexible,
- * so (unlike X's 5:2 hero) there is NO ratio gate. Returns the number of files
- * attached (0 if the control didn't resolve). Best-effort — degrades gracefully
- * and never throws.
+ * Hand media files to the open composer. LinkedIn feed images are ratio-flexible,
+ * so (unlike X's 5:2 hero) there is NO ratio gate. A returned setInputFiles call
+ * proves only that the requested files were set on the chooser/input. It does not
+ * prove that LinkedIn rendered, attached, ordered, cropped, or persisted them.
  *
  * Two robust paths (mirrors X's uploadHeroImage), neither of which depends on the
  * file input being VISIBLE:
@@ -211,49 +215,79 @@ async function resolveHiddenFileInput(page: Page): Promise<Locator | null> {
  *   2. Fall back to resolving the hidden input[type=file] with a state:"attached"
  *      wait (NOT visible) and calling setInputFiles directly.
  */
-async function attachMedia(page: Page, media: string[]): Promise<number> {
-  if (media.length === 0) return 0;
+export interface LinkedInMediaSetDependencies {
+  acquireChooser(page: Page): Promise<{ setFiles(paths: string[]): Promise<void> } | null>;
+  resolveFileInput(page: Page): Promise<{ setInputFiles(paths: string[]): Promise<void> } | null>;
+  finishSelection(page: Page): Promise<void>;
+}
 
-  // Path 1: click the visible media button and capture the file chooser. This is
-  // the most robust path because it never touches the (hidden) input's visibility.
-  const mediaBtn = await optionalLocator(page, LI_COMPOSER_SELECTORS.mediaButton, 3_000);
-  if (mediaBtn) {
+const productionLinkedInMediaSetDependencies: LinkedInMediaSetDependencies = {
+  async acquireChooser(page) {
+    const mediaBtn = await optionalLocator(page, LI_COMPOSER_SELECTORS.mediaButton, 3_000);
+    if (!mediaBtn) return null;
     try {
       const [chooser] = await Promise.all([
         page.waitForEvent("filechooser", { timeout: 5_000 }),
         mediaBtn.click(),
       ]);
-      await chooser.setFiles(media);
-      const next1 = await optionalLocator(page, LI_COMPOSER_SELECTORS.mediaNextButton, 5_000);
-      if (next1) await next1.click().catch(() => {});
-      await page.waitForTimeout(750);
-      return media.length;
+      return chooser;
     } catch {
-      // File chooser didn't fire (clicking the button may just reveal a hidden
-      // input in this layout) — fall through to the hidden-input path below.
+      // No file-setting call was invoked, so the hidden-input path remains safe.
+      return null;
     }
+  },
+  resolveFileInput(page) {
+    return resolveHiddenFileInput(page);
+  },
+  async finishSelection(page) {
+    const next = await optionalLocator(page, LI_COMPOSER_SELECTORS.mediaNextButton, 5_000);
+    if (next) await next.click().catch(() => {});
+    await page.waitForTimeout(750);
+  },
+};
+
+export async function setComposerMedia(
+  page: Page,
+  media: string[],
+  updateSetState: (state: boolean | null) => void,
+  deps: LinkedInMediaSetDependencies = productionLinkedInMediaSetDependencies,
+): Promise<boolean> {
+  if (media.length === 0) return true;
+
+  // Path 1: acquire the visible button's chooser. Fallback is safe only when
+  // acquisition fails before any file-setting call is invoked.
+  const chooser = await deps.acquireChooser(page);
+  if (chooser) {
+    updateSetState(null);
+    try {
+      await chooser.setFiles(media);
+    } catch {
+      // The rejected call may already have taken effect. Preserve unknown set
+      // state and never attempt the hidden input automatically.
+      return false;
+    }
+    updateSetState(true);
+    await deps.finishSelection(page);
+    return true;
   }
 
   // Path 2: drive the hidden input[type=file] directly. setInputFiles works on
   // hidden inputs; we just must NOT gate the lookup on visibility.
-  const fileInput = await resolveHiddenFileInput(page);
-  if (!fileInput) return 0;
+  const fileInput = await deps.resolveFileInput(page);
+  if (!fileInput) return false;
 
   try {
     // The input accepts multiple files; set them all in order in one call.
+    updateSetState(null);
     await fileInput.setInputFiles(media);
+    updateSetState(true);
   } catch {
-    return 0;
+    return false;
   }
 
-  // The media editor dialog raises a Next/Done affordance to return to the
-  // composer with the image(s) attached. Optional — some flows attach inline.
-  const next = await optionalLocator(page, LI_COMPOSER_SELECTORS.mediaNextButton, 5_000);
-  if (next) await next.click().catch(() => {});
-  await page.waitForTimeout(750);
+  await deps.finishSelection(page);
 
-  // Confirm a preview rendered; if not, still report the count we set.
-  return media.length;
+  return true;
 }
 
 /**
@@ -375,12 +409,25 @@ export async function stagePost(
   content = snapshotLinkedInGeneratedPost(content);
   const text = content.text;
   if (!text.trim()) throw new Error("No content to stage (empty LinkedIn post).");
-  const media = opts.media ?? [];
+  const media = [...(opts.media ?? [])];
+  let mediaEvidence = createLinkedInMediaStageEvidence(media.length);
+  let platformTouched = false;
+  let composerModified = false;
+  const progress = (): LinkedInDraftStageProgress => Object.freeze({
+    platformTouched,
+    composerModified,
+    media: mediaEvidence,
+  });
+  const updateMediaSetState = (set: boolean | null): void => {
+    mediaEvidence = createLinkedInMediaStageEvidence(media.length, set);
+  };
 
   let page: Page | undefined;
   try {
-    let mediaAttached: number;
     try {
+      // The session call itself may touch the persistent browser profile before
+      // rejecting, so mark the platform boundary before awaiting it.
+      platformTouched = true;
       const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
       page = await ctx.newPage();
       const editor = await openComposer(page);
@@ -388,28 +435,36 @@ export async function stagePost(
       // LinkedIn AUTO-RESTORES the most recent saved draft into the composer editor
       // (verified live). Clear it so every run types one clean post.
       await editor.press(`${modifier()}+a`);
+      // From this point a rejection may leave changed text in the native
+      // composer. The receipt must retain that unknown residue.
+      composerModified = true;
       await editor.press("Backspace");
       await typeText(page, editor, text);
 
-      mediaAttached = await attachMedia(page, media);
-      if (mediaAttached !== media.length) {
-        throw new Error("LinkedIn did not attach every requested media file.");
+      const allMediaSet = await setComposerMedia(page, media, updateMediaSetState);
+      if (!allMediaSet) {
+        throw new Error("LinkedIn did not accept every requested media file-setting call.");
       }
     } catch (error) {
-      throw linkedInDraftStageError(error, "save_not_attempted");
+      throw linkedInDraftStageError(error, "save_not_attempted", progress());
     }
 
-    const saved = await saveAsDraftLinkedIn(
-      page,
-      () => verifyDraftSaved(page as Page, text),
-    );
+    let saved: LinkedInDraftSaveFlowResult<string>;
+    try {
+      saved = await saveAsDraftLinkedIn(
+        page,
+        () => verifyDraftSaved(page as Page, text),
+      );
+    } catch (error) {
+      throw linkedInDraftStageError(error, "save_delivery_unknown", progress());
+    }
 
     return {
       format: "post",
       saveMechanism: LINKEDIN_DRAFT_SAVE_MECHANISM,
       savePhase: saved.savePhase,
       verified: saved.savePhase === "verified",
-      mediaAttached,
+      ...progress(),
     };
   } finally {
     // Close only the page we opened; leave the persistent context alive so the

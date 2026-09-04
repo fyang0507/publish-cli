@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   executeReplyRealRun,
   executeReplyReservationRecovery,
+  receiptForXReplyOutcome,
   type ReplyLedgerPort,
   type ReplyRealRunDependencies,
   type ReplyRealRunInput,
@@ -1553,7 +1554,7 @@ test("recovery never loads X and distinguishes cleared, missing, active, failed,
   const missing = createHarness();
   const missingOutcome = await executeReplyReservationRecovery(TARGET_ID, missing.deps);
   assert.equal(missingOutcome.kind, "reservation_missing");
-  assert.equal(missingOutcome.exitCode, 2);
+  assert.equal(missingOutcome.exitCode, 1);
 
   const active = createHarness({
     recovery: { kind: "reservation_blocked", reservation: RESERVATION, state: "active" },
@@ -1578,4 +1579,39 @@ test("recovery never loads X and distinguishes cleared, missing, active, failed,
   assert.equal(closeOutcome.exitCode, 1);
   assert.match(closeOutcome.message, /clear returned.*did not close cleanly/s);
   assert.doesNotMatch(closeOutcome.message, /✓|RAW_CLOSE_ERROR_WITH_PRIVATE_PATH/);
+});
+
+test("reply receipts retain prepared-composer, reservation, release, and close evidence", async () => {
+  const uncertainHarness = createHarness({
+    stageFailurePhase: "save_delivery_unknown",
+  });
+  const uncertainOutcome = await executeReplyRealRun(input(), uncertainHarness.deps);
+  const uncertainReceipt = receiptForXReplyOutcome(uncertainOutcome, "reply");
+  assert.equal(uncertainReceipt.terminalState, "native_draft_possible");
+  assert.ok(uncertainReceipt.remoteResidue.some((entry) =>
+    entry.kind === "composer" && entry.state === "prepared_composer_state_unknown"));
+  assert.ok(uncertainReceipt.remoteResidue.some((entry) =>
+    entry.kind === "local_state" && entry.state === "reservation_retained"));
+  assert.match(uncertainReceipt.gotchas.join("\n"), /--force cannot bypass it/);
+
+  const releaseFailedHarness = createHarness({
+    stageFailurePhase: "save_not_attempted",
+    releaseFails: true,
+  });
+  const releaseFailedOutcome = await executeReplyRealRun(input(), releaseFailedHarness.deps);
+  const releaseFailedReceipt = receiptForXReplyOutcome(releaseFailedOutcome, "reply");
+  assert.equal(releaseFailedReceipt.terminalState, "no_native_draft");
+  assert.ok(releaseFailedReceipt.remoteResidue.some((entry) =>
+    entry.kind === "composer" && entry.state === "prepared_composer_state_unknown"));
+  assert.ok(releaseFailedReceipt.remoteResidue.some((entry) =>
+    entry.kind === "local_state" && entry.state === "reservation_not_released"));
+
+  const closeFailedHarness = createHarness({
+    stageFailurePhase: "save_delivery_unknown",
+    closeFails: true,
+  });
+  const closeFailedOutcome = await executeReplyRealRun(input(), closeFailedHarness.deps);
+  const closeFailedReceipt = receiptForXReplyOutcome(closeFailedOutcome, "reply");
+  assert.ok(closeFailedReceipt.remoteResidue.some((entry) =>
+    entry.kind === "local_state" && entry.state === "ledger_close_failed"));
 });

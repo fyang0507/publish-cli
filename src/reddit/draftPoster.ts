@@ -277,7 +277,7 @@ export interface StageDraftResult {
    * callers must require manual inspection and must not retry blindly. This is
    * deliberately smaller than the versioned receipt planned in issue #34.
    */
-  saveStatus: "not_attempted" | "unconfirmed" | "toast_confirmed";
+  saveStatus: "not_attempted" | "delivery_unknown" | "unconfirmed" | "toast_confirmed";
   /**
    * Whether the "Save Draft" affordance resolved and was clicked. FALSE means the
    * CLI did not click a save control and no native draft was confirmed; it does
@@ -542,18 +542,25 @@ export async function saveDraftReddit(
 ): Promise<{
   clicked: boolean;
   confirmed: boolean;
+  deliveryUnknown: boolean;
   toastBeforeClick: RedditToastPreclickState;
 }> {
   const save = await locate(page, REDDIT_COMPOSER_SELECTORS.saveDraftButton, 6_000);
   if (!save) {
     // The "Save Draft" affordance didn't appear — do NOT guess another button
     // (a wrong click could post). Bail. NEVER fall through to Post.
-    return { clicked: false, confirmed: false, toastBeforeClick: "not_checked" };
+    return { clicked: false, confirmed: false, deliveryUnknown: false, toastBeforeClick: "not_checked" };
   }
   // A toast already visible cannot prove causality for this click. Snapshot its
   // absence first; confirmation requires an absent-before / visible-after edge.
   const toastBeforeClick = await probeToast(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast);
-  await save.click();
+  try {
+    await save.click();
+  } catch {
+    // Playwright can reject after dispatch; the platform may have received the
+    // save. Preserve that boundary instead of pretending Save was not attempted.
+    return { clicked: true, confirmed: false, deliveryUnknown: true, toastBeforeClick };
+  }
   // Probe the "Draft saved" toast right after the click. Only an absent-before /
   // visible-after transition is attributed to this attempt; the drafts modal can
   // show a stale list too (see saveConfirmToast). Missing/ambiguous evidence means
@@ -562,6 +569,7 @@ export async function saveDraftReddit(
   return {
     clicked: true,
     confirmed: toastBeforeClick === "absent" && !!toast,
+    deliveryUnknown: false,
     toastBeforeClick,
   };
 }
@@ -598,6 +606,7 @@ export function describeRedditSaveAttempt(
   clicked: boolean,
   confirmed: boolean,
   toastBeforeClick: RedditToastPreclickState = "not_checked",
+  deliveryUnknown = false,
 ): string {
   if (!clicked) {
     return (
@@ -606,6 +615,13 @@ export function describeRedditSaveAttempt(
       "DRAFTS manually in the same CLI-owned profile before deciding any next action. Do not " +
       "rerun automatically or blindly: Reddit has no draft idempotency ledger and another " +
       "attempt could duplicate an existing draft."
+    );
+  }
+  if (deliveryUnknown) {
+    return (
+      `The "Save Draft" click was invoked exactly once for r/${subreddit}, but delivery is unknown. ` +
+      "A native draft may exist. Compare Reddit DRAFTS manually in the same CLI-owned profile and " +
+      "do not rerun automatically or blindly because another attempt can create a duplicate."
     );
   }
   if (!confirmed) {
@@ -711,11 +727,12 @@ export async function stageDraft(
     const {
       clicked: saved,
       confirmed: verified,
+      deliveryUnknown,
       toastBeforeClick,
     } = await saveDraftReddit(page);
 
     const noteParts: string[] = [
-      describeRedditSaveAttempt(sub, saved, verified, toastBeforeClick),
+      describeRedditSaveAttempt(sub, saved, verified, toastBeforeClick, deliveryUnknown),
     ];
     if (!markdown) {
       noteParts.push(
@@ -738,7 +755,11 @@ export async function stageDraft(
 
     return {
       kind: "self",
-      saveStatus: !saved ? "not_attempted" : verified ? "toast_confirmed" : "unconfirmed",
+      saveStatus: !saved
+        ? "not_attempted"
+        : deliveryUnknown
+          ? "delivery_unknown"
+          : verified ? "toast_confirmed" : "unconfirmed",
       saved,
       verified,
       subreddit: sub,

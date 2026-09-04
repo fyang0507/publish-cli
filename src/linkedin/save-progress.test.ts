@@ -4,11 +4,15 @@ import type { Locator, Page } from "playwright";
 import {
   sameLinkedInReopenedDraftText,
   saveAsDraftLinkedIn,
+  setComposerMedia,
+  type LinkedInMediaSetDependencies,
   type SaveAsDraftLinkedInDependencies,
 } from "./draftPoster.js";
 import {
+  createLinkedInMediaStageEvidence,
   LinkedInDraftStageError,
   snapshotLinkedInDraftStageError,
+  snapshotLinkedInDraftStageResult,
 } from "./saveProgress.js";
 
 const RAW_CANARY =
@@ -176,10 +180,143 @@ test("only branded LinkedIn stage errors carry phase evidence", () => {
   assert.deepEqual(snapshotLinkedInDraftStageError(genuine), {
     savePhase: "save_delivery_unknown",
     saveMechanism: "composer_close_save",
+    platformTouched: true,
+    composerModified: true,
+    media: [],
   });
   assert.equal(snapshotLinkedInDraftStageError({
     savePhase: "save_not_attempted",
     saveMechanism: "composer_close_save",
     message: RAW_CANARY,
   }), null);
+});
+
+test("LinkedIn stage snapshots retain ordered set-only media evidence", () => {
+  const media = createLinkedInMediaStageEvidence(2, true);
+  const result = snapshotLinkedInDraftStageResult({
+    format: "post",
+    saveMechanism: "composer_close_save",
+    savePhase: "verified",
+    verified: true,
+    platformTouched: true,
+    composerModified: true,
+    media,
+  }, 2);
+  assert.deepEqual(result?.media, [
+    { index: 0, requested: true, resolved: true, set: true, observed: null, verified: null },
+    { index: 1, requested: true, resolved: true, set: true, observed: null, verified: null },
+  ]);
+  assert.equal(Object.isFrozen(result?.media), true);
+  assert.equal(Object.isFrozen(result?.media[0]), true);
+
+  assert.equal(snapshotLinkedInDraftStageResult({
+    format: "post",
+    saveMechanism: "composer_close_save",
+    savePhase: "verified",
+    verified: true,
+    platformTouched: true,
+    composerModified: true,
+    media: [{ ...media[0], observed: true }],
+  }, 1), null, "file-setting must not manufacture UI observation");
+
+  assert.equal(snapshotLinkedInDraftStageResult({
+    format: "post",
+    saveMechanism: "composer_close_save",
+    savePhase: "verified",
+    verified: true,
+    platformTouched: false,
+    composerModified: false,
+    media: createLinkedInMediaStageEvidence(1, true),
+  }, 1), null, "set media requires a touched and modified composer");
+});
+
+test("typed failures preserve composer and media progress without raw details", () => {
+  const error = new LinkedInDraftStageError("save_not_attempted", {
+    platformTouched: true,
+    composerModified: true,
+    media: createLinkedInMediaStageEvidence(2, null),
+  });
+  Object.defineProperty(error, "cause", { value: new Error(RAW_CANARY) });
+  assert.deepEqual(snapshotLinkedInDraftStageError(error, 2), {
+    savePhase: "save_not_attempted",
+    saveMechanism: "composer_close_save",
+    platformTouched: true,
+    composerModified: true,
+    media: [
+      { index: 0, requested: true, resolved: true, set: null, observed: null, verified: null },
+      { index: 1, requested: true, resolved: true, set: null, observed: null, verified: null },
+    ],
+  });
+});
+
+test("a rejected chooser set call is never retried through the hidden input", async () => {
+  const events: string[] = [];
+  const states: Array<boolean | null> = [];
+  const deps: LinkedInMediaSetDependencies = {
+    async acquireChooser() {
+      events.push("chooser:acquired");
+      return {
+        async setFiles() {
+          events.push("chooser:set:possibly-effective");
+          throw new Error(RAW_CANARY);
+        },
+      };
+    },
+    async resolveFileInput() {
+      events.push("hidden:resolved");
+      return {
+        async setInputFiles() {
+          events.push("hidden:set");
+        },
+      };
+    },
+    async finishSelection() {
+      events.push("selection:finished");
+    },
+  };
+  const completed = await setComposerMedia(
+    {} as Page,
+    ["/safe/a.png"],
+    (state) => states.push(state),
+    deps,
+  );
+  assert.equal(completed, false);
+  assert.deepEqual(states, [null]);
+  assert.deepEqual(events, ["chooser:acquired", "chooser:set:possibly-effective"]);
+});
+
+test("hidden input fallback runs only when no chooser setting was invoked", async () => {
+  const events: string[] = [];
+  const states: Array<boolean | null> = [];
+  const deps: LinkedInMediaSetDependencies = {
+    async acquireChooser() {
+      events.push("chooser:unavailable");
+      return null;
+    },
+    async resolveFileInput() {
+      events.push("hidden:resolved");
+      return {
+        async setInputFiles() {
+          events.push("hidden:set");
+        },
+      };
+    },
+    async finishSelection() {
+      events.push("selection:finished");
+    },
+  };
+  const completed = await setComposerMedia(
+    {} as Page,
+    ["/safe/a.png"],
+    (state) => states.push(state),
+    deps,
+  );
+  assert.equal(completed, true);
+  assert.deepEqual(states, [null, true]);
+  assert.deepEqual(events, [
+    "chooser:unavailable",
+    "hidden:resolved",
+    "hidden:set",
+    "selection:finished",
+  ]);
 });

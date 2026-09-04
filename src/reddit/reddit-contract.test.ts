@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Locator, Page } from "playwright";
 import { splitLeadingFrontmatter } from "../commands/contentInput.js";
-import { classifyRedditStageResult } from "../commands/reddit-draft.js";
+import {
+  classifyRedditStageResult,
+  receiptForRedditStageOutcome,
+} from "../commands/reddit-draft.js";
 import { LocalValidationError } from "../capabilities/validation.js";
 import {
   generateSelfPost,
@@ -438,7 +441,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
       return "absent";
     },
   );
-  assert.deepEqual(result, { clicked: true, confirmed: false, toastBeforeClick: "absent" });
+  assert.deepEqual(result, { clicked: true, confirmed: false, deliveryUnknown: false, toastBeforeClick: "absent" });
   assert.equal(clickCount, 1);
   assert.equal(locateCount, 2);
   assert.equal(presenceChecks, 1);
@@ -458,7 +461,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
     },
     async () => "absent",
   );
-  assert.deepEqual(fresh, { clicked: true, confirmed: true, toastBeforeClick: "absent" });
+  assert.deepEqual(fresh, { clicked: true, confirmed: true, deliveryUnknown: false, toastBeforeClick: "absent" });
 
   let staleLocateCount = 0;
   const stale = await saveDraftReddit(
@@ -469,7 +472,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
     },
     async () => "present",
   );
-  assert.deepEqual(stale, { clicked: true, confirmed: false, toastBeforeClick: "present" });
+  assert.deepEqual(stale, { clicked: true, confirmed: false, deliveryUnknown: false, toastBeforeClick: "present" });
   assert.match(describeRedditSaveAttempt("agents", true, false, "present"), /already existed before/);
   assert.match(describeRedditSaveAttempt("agents", true, false, "present"), /could not be attributed/);
 
@@ -485,6 +488,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
   assert.deepEqual(inconclusive, {
     clicked: true,
     confirmed: false,
+    deliveryUnknown: false,
     toastBeforeClick: "inconclusive",
   });
   assert.match(
@@ -515,6 +519,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
   assert.deepEqual(hiddenFirstVisibleSecond, {
     clicked: true,
     confirmed: false,
+    deliveryUnknown: false,
     toastBeforeClick: "present",
   });
   assert.deepEqual(nthCalls, [0, 1]);
@@ -536,6 +541,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
   assert.deepEqual(defaultFreshTransition, {
     clicked: true,
     confirmed: true,
+    deliveryUnknown: false,
     toastBeforeClick: "absent",
   });
 
@@ -553,6 +559,7 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
   assert.deepEqual(failedProbe, {
     clicked: true,
     confirmed: false,
+    deliveryUnknown: false,
     toastBeforeClick: "inconclusive",
   });
 
@@ -564,9 +571,23 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
       return null;
     },
   );
-  assert.deepEqual(absent, { clicked: false, confirmed: false, toastBeforeClick: "not_checked" });
+  assert.deepEqual(absent, { clicked: false, confirmed: false, deliveryUnknown: false, toastBeforeClick: "not_checked" });
   assert.equal(absentLocateCount, 1);
   assert.equal(clickCount, 7);
+
+  const rejectedClick = await saveDraftReddit(
+    {} as Page,
+    async () => ({ click: async () => { throw new Error("dispatched then detached"); } } as unknown as Locator),
+    async () => "absent",
+  );
+  assert.deepEqual(rejectedClick, {
+    clicked: true,
+    confirmed: false,
+    deliveryUnknown: true,
+    toastBeforeClick: "absent",
+  });
+  assert.match(describeRedditSaveAttempt("agents", true, false, "absent", true), /delivery is unknown/i);
+  assert.match(describeRedditSaveAttempt("agents", true, false, "absent", true), /do not rerun/i);
 });
 
 test("Reddit command maps only a toast-confirmed save to success", () => {
@@ -621,4 +642,35 @@ test("Reddit command maps only a toast-confirmed save to success", () => {
   assert.equal(confirmed.exitCode, 0);
   assert.equal(confirmed.stream, "stdout");
   assert.match(confirmed.message, /verified by Draft saved toast: yes/);
+});
+
+test("Reddit receipt retains populated-composer uncertainty when Save Draft is unresolved", () => {
+  const notAttempted = classifyRedditStageResult({
+    kind: "self",
+    saveStatus: "not_attempted",
+    saved: false,
+    verified: false,
+    subreddit: "agents",
+    note: describeRedditSaveAttempt("agents", false, false),
+  });
+  const receipt = receiptForRedditStageOutcome(notAttempted);
+  assert.equal(receipt.terminalState, "native_draft_possible");
+  assert.ok(receipt.remoteResidue.some((entry) =>
+    entry.kind === "composer" && entry.state === "prepared_composer_save_not_attempted"));
+  assert.ok(receipt.remoteResidue.some((entry) =>
+    entry.kind === "native_draft" && entry.retryRisk === "duplicate"));
+  assert.match(receipt.gotchas.join("\n"), /same CLI-owned profile/);
+  assert.match(receipt.gotchas.join("\n"), /do not blindly restage/);
+
+  const blocked = receiptForRedditStageOutcome(classifyRedditStageResult({
+    kind: "self",
+    saveStatus: "not_attempted",
+    saved: false,
+    verified: false,
+    subreddit: "agents",
+    blocked: "restricted",
+    note: "Restricted before content entry.",
+  }));
+  assert.equal(blocked.terminalState, "platform_rejected");
+  assert.equal(blocked.remoteResidue.length, 0);
 });

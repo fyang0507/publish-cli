@@ -289,6 +289,8 @@ export type StageDraftResult = StageDraftResultBase & (
       savePhase: XDraftReturnedSavePhase;
       draftRowEvidence: Extract<XDraftRowEvidence, { status: "not_applicable" }>;
       articleHandoff: XArticleDraftHandoff;
+      /** Captured canonical edit URL when the platform exposed one. */
+      nativeReference?: string;
     }
 );
 
@@ -691,6 +693,7 @@ async function stageArticleSnapshot(
       return {
         verified,
         value: {
+          nativeReference: editUrl,
           body: "rich_html" as const,
           codeBlockCount: receiptCodeBlockCount,
           codeAdvisories,
@@ -701,7 +704,13 @@ async function stageArticleSnapshot(
     },
   });
 
-  const articleHandoff = snapshotXArticleDraftHandoff(saved.value);
+  const articleHandoff = snapshotXArticleDraftHandoff({
+    body: saved.value.body,
+    codeBlockCount: saved.value.codeBlockCount,
+    codeAdvisories: saved.value.codeAdvisories,
+    codeLinkAdvisories: saved.value.codeLinkAdvisories,
+    cover: saved.value.cover,
+  });
   if (!articleHandoff) {
     // This is after Create returned; a malformed internal handoff cannot safely
     // become a successful command receipt.
@@ -715,6 +724,9 @@ async function stageArticleSnapshot(
     savePhase: saved.savePhase,
     draftRowEvidence: xDraftRowEvidenceNotApplicable(),
     articleHandoff,
+    ...(saved.value.nativeReference === null
+      ? {}
+      : { nativeReference: saved.value.nativeReference }),
     note: "Closed Article review facts are available in articleHandoff.",
   };
 }

@@ -7,7 +7,7 @@ import {
 } from "../x/content.js";
 import {
   extractTweetId,
-  isLocalValidationError,
+  type LocalValidationProblem,
 } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
 import {
@@ -37,12 +37,23 @@ import {
 import {
   TerminalOutputBudget,
   emitTerminalOutput,
-  isTerminalProjectionError,
   projectTerminalText,
   renderTerminalErrorMessage,
   renderTerminalInline,
   terminalProjectionFailureMessage,
 } from "../terminalOutput.js";
+import {
+  createDryRunReceipt,
+  createLocalInputFailureReceipt,
+  createPreStageRuntimeFailureReceipt,
+  createTransportReceipt,
+  emitTransportReceipt,
+  NO_ASSETS,
+  NOT_REACHED_LIVE_VALIDATION,
+  PASSED_LOCAL_VALIDATION,
+  type TransportReceipt,
+} from "../transportReceipt.js";
+import { classifyXPreStageFailure } from "./xPreStageFailure.js";
 
 /**
  * `publish x reply` — request a NATIVE X REPLY draft for an existing tweet
@@ -81,6 +92,7 @@ interface ReplyXOptions {
   inspect?: boolean;
   force?: boolean;
   recoverStaleReservationAfterConfirmingNoDraft?: boolean;
+  json?: boolean;
 }
 
 export interface ReplyLedgerPort {
@@ -144,6 +156,8 @@ export interface ReplyRealRunOutcome {
   reservationRelease?: "released" | "not_released";
   /** Historical ledger status for duplicate preflight; never this run's Save phase. */
   priorStatus?: string;
+  /** Local ledger cleanup failed after the primary outcome was classified. */
+  ledgerClose?: "failed";
 }
 
 const RECOVER_RESERVATION_FLAG = "--recover-stale-reservation-after-confirming-no-draft";
@@ -152,7 +166,7 @@ function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
   if (prior.status === "staged-unverified") {
     return {
       kind: "duplicate",
-      exitCode: 2,
+      exitCode: 1,
       stream: "stderr",
       savePhase: null,
       saveMechanism: null,
@@ -167,7 +181,7 @@ function duplicateOutcome(prior: ReplyLedgerEntry): ReplyRealRunOutcome {
   }
   return {
     kind: "duplicate",
-    exitCode: 2,
+    exitCode: 1,
     stream: "stderr",
     savePhase: null,
     saveMechanism: null,
@@ -191,7 +205,7 @@ function reservationBlockedOutcome(
   if (claim.state === "active") {
     return {
       kind: "reservation_active",
-      exitCode: 2,
+      exitCode: 1,
       stream: "stderr",
       savePhase: null,
       saveMechanism: null,
@@ -205,7 +219,7 @@ function reservationBlockedOutcome(
   if (claim.state === "stale") {
     return {
       kind: "reservation_stale",
-      exitCode: 2,
+      exitCode: 1,
       stream: "stderr",
       savePhase: null,
       saveMechanism: null,
@@ -278,7 +292,7 @@ function reservationRecoveryOutcome(result: ReplyReservationRecovery, targetTwee
   if (result.kind === "missing") {
     return {
       kind: "reservation_missing",
-      exitCode: 2,
+      exitCode: 1,
       stream: "stderr",
       savePhase: null,
       saveMechanism: null,
@@ -508,6 +522,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
   if (outcome.kind === "ledger_persistence_failed") {
     return {
       ...outcome,
+      ledgerClose: "failed",
       message: `${outcome.message}\n  Closing the reply ledger also failed; cleanup was attempted once and was not retried.`,
     };
   }
@@ -520,6 +535,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
       saveMechanism: null,
       draftRowEvidence: null,
       replyTargetEvidence: null,
+      ledgerClose: "failed",
       message:
         "\n✗ The stale reservation clear returned, but the reply ledger did not close cleanly. No native staging was attempted.\n" +
         "  Inspect the local durable state before any reply action; do not stage or use --force while recovery state is uncertain.",
@@ -530,6 +546,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
       return {
         ...outcome,
         exitCode: 1,
+        ledgerClose: "failed",
         message:
           `${outcome.message}\n` +
           "  No new native staging was attempted, but the reply ledger failed to close. Repair the local durable state before any reply action.",
@@ -539,6 +556,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
     return {
       ...outcome,
       exitCode: 1,
+      ledgerClose: "failed",
       message:
         `${duplicateFact}\n` +
         "  No new native staging was attempted, but the reply ledger failed to close.\n" +
@@ -552,6 +570,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
       : "The owner-matched reservation was not confirmed released, and the reply ledger also failed to close; durable state is uncertain.";
     return {
       ...outcome,
+      ledgerClose: "failed",
       message:
         `${stageFact}\n` +
         `  ${releaseFact}\n` +
@@ -562,6 +581,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
     const stageFact = outcome.message.split("\n").slice(0, 3).join("\n");
     return {
       ...outcome,
+      ledgerClose: "failed",
       message:
         `${stageFact}\n` +
         "  The reservation remains, and the reply ledger also failed to close.\n" +
@@ -571,6 +591,7 @@ function withLedgerCloseFailure(outcome: ReplyRealRunOutcome): ReplyRealRunOutco
   return {
     ...outcome,
     exitCode: 1,
+    ledgerClose: "failed",
     message: `${outcome.message}\n  The reply ledger also failed to close; repair durable state before any reply action.`,
   };
 }
@@ -1053,6 +1074,238 @@ export async function executeReplyReservationRecovery(
   return closeFailed ? withLedgerCloseFailure(outcome) : outcome;
 }
 
+function replyPlatformTouched(kind: ReplyRealRunOutcome["kind"]): boolean {
+  return kind === "native_stage_not_attempted" ||
+    kind === "native_stage_uncertain" ||
+    kind === "stage_result_inconclusive" ||
+    kind === "ledger_persistence_failed" ||
+    kind === "staged_unverified" ||
+    kind === "staged";
+}
+
+export function receiptForXReplyOutcome(
+  outcome: ReplyRealRunOutcome,
+  format: "reply" | "reply_thread",
+  warnings: readonly string[] = [],
+  mode: "real" | "recovery" = "real",
+): Readonly<TransportReceipt> {
+  const platformTouched = replyPlatformTouched(outcome.kind);
+  const verified = outcome.kind === "staged" && outcome.savePhase === "verified";
+  const contentRowVerified = outcome.draftRowEvidence?.status === "verified";
+  const recovered = outcome.kind === "reservation_recovered";
+  const localInvalid = outcome.kind === "reply_input_invalid";
+  const priorAttemptMayHaveDraft =
+    outcome.kind === "reservation_active" ||
+    outcome.kind === "reservation_stale" ||
+    outcome.kind === "reservation_ambiguous" ||
+    outcome.kind === "duplicate";
+  const draftPossible = outcome.savePhase === "save_delivery_unknown" ||
+    outcome.savePhase === "save_delivered_unverified" ||
+    outcome.kind === "stage_result_inconclusive" ||
+    outcome.kind === "ledger_persistence_failed" ||
+    priorAttemptMayHaveDraft;
+  const preparedComposerUncertain = outcome.kind === "native_stage_not_attempted" ||
+    outcome.kind === "native_stage_uncertain" ||
+    outcome.kind === "stage_result_inconclusive";
+  const reservationRetained = outcome.kind === "native_stage_uncertain" ||
+    outcome.kind === "stage_result_inconclusive" ||
+    outcome.reservationRelease === "not_released";
+  const releaseEvidencePresent = outcome.reservationRelease !== undefined;
+  const stateFailure = outcome.kind === "duplicate" ||
+    outcome.kind.startsWith("reservation_") ||
+    outcome.kind === "ledger_preflight_failed" ||
+    outcome.kind === "ledger_persistence_failed" ||
+    reservationRetained || outcome.ledgerClose === "failed";
+  const terminalState = localInvalid
+    ? "input_rejected" as const
+    : recovered
+      ? "local_state_updated" as const
+      : verified
+        ? "native_draft_verified" as const
+        : outcome.savePhase === "save_delivered_unverified"
+          ? "native_draft_unverified" as const
+          : draftPossible
+            ? "native_draft_possible" as const
+            : "no_native_draft" as const;
+  const error = outcome.exitCode === 0 ? null : {
+    source: localInvalid
+      ? "local" as const
+      : stateFailure
+        ? "state" as const
+        : outcome.kind === "stage_runtime_failed"
+          ? "runtime" as const
+          : "platform" as const,
+    stage: stateFailure ? "reply_ledger" : outcome.savePhase ?? "reply_staging",
+    code: `x_reply_${outcome.kind}`,
+    httpStatus: null,
+    sanitizedMessage: stateFailure
+      ? "The X reply ledger or reservation state blocked a safe staging outcome."
+      : localInvalid
+        ? "The closed X reply input failed local validation."
+        : "The X reply draft outcome was not positively verified.",
+    classification: outcome.kind === "stage_result_inconclusive" ||
+        outcome.savePhase === "save_delivery_unknown"
+      ? "unknown" as const
+      : "known" as const,
+    retryable: null,
+    inputRelated: localInvalid ? true : stateFailure ? false : null,
+    suggestedCorrection: draftPossible || outcome.kind === "staged_unverified"
+      ? "Compare X Unsent/Drafts manually in the exact CLI-owned profile. If a matching draft exists or comparison is uncertain, do not retry or use --force."
+      : stateFailure
+        ? "Inspect or resolve the durable reply-ledger state before any staging attempt."
+        : localInvalid
+          ? "Regenerate a valid closed reply request before retrying."
+          : "Resolve the local runtime or calibrated composer failure before a separate retry.",
+  };
+  const residue = [];
+  if (draftPossible || outcome.kind === "staged_unverified") {
+    residue.push({
+      kind: "native_draft" as const,
+      state: outcome.savePhase ?? "save_outcome_unknown",
+      assetIndex: null,
+      reference: null,
+      retryRisk: "duplicate" as const,
+    });
+  }
+  if (preparedComposerUncertain) {
+    residue.push({
+      kind: "composer" as const,
+      state: "prepared_composer_state_unknown",
+      assetIndex: null,
+      reference: null,
+      retryRisk: draftPossible ? "duplicate" as const : "unknown" as const,
+    });
+  }
+  const genericStateResidue = outcome.kind === "duplicate" ||
+    outcome.kind.startsWith("reservation_") ||
+    outcome.kind === "ledger_preflight_failed" ||
+    outcome.kind === "ledger_persistence_failed" ||
+    outcome.kind === "staged_unverified";
+  if (genericStateResidue) {
+    residue.push({
+      kind: "local_state" as const,
+      state: outcome.priorStatus ?? outcome.kind,
+      assetIndex: null,
+      reference: null,
+      retryRisk: outcome.kind === "staged_unverified" || outcome.kind === "duplicate"
+        ? "duplicate" as const
+        : "unknown" as const,
+    });
+  }
+  if (releaseEvidencePresent) {
+    residue.push({
+      kind: "local_state" as const,
+      state: outcome.reservationRelease === "released"
+        ? "reservation_released"
+        : "reservation_not_released",
+      assetIndex: null,
+      reference: null,
+      retryRisk: outcome.reservationRelease === "released" ? "none" as const : "unknown" as const,
+    });
+  } else if (reservationRetained) {
+    residue.push({
+      kind: "local_state" as const,
+      state: "reservation_retained",
+      assetIndex: null,
+      reference: null,
+      retryRisk: "duplicate" as const,
+    });
+  }
+  if (outcome.ledgerClose === "failed") {
+    residue.push({
+      kind: "local_state" as const,
+      state: "ledger_close_failed",
+      assetIndex: null,
+      reference: null,
+      retryRisk: "unknown" as const,
+    });
+  }
+  return createTransportReceipt({
+    channel: "x",
+    action: "reply",
+    format,
+    mode,
+    validation: {
+      local: localInvalid
+        ? {
+            status: "failed",
+            problems: [{
+              phase: "local", code: "x_reply_input_invalid", field: "text",
+              actual: "invalid_closed_snapshot", expected: "a valid immutable reply request", unit: null,
+            }],
+            notes: [],
+          }
+        : PASSED_LOCAL_VALIDATION,
+      live: verified
+        ? { status: "passed", problems: [], notes: [] }
+        : platformTouched
+          ? {
+              status: "failed",
+              problems: [],
+              notes: contentRowVerified
+                ? ["The intended first reply row had scoped-row persistence evidence, but exact reply-target identity did not verify."]
+                : ["Content persistence and exact reply-target identity did not both verify."],
+            }
+          : NOT_REACHED_LIVE_VALIDATION,
+    },
+    warnings,
+    gotchas: recovered
+      ? [
+          "Only the stale local reservation was cleared; no native staging was attempted.",
+          "Recovery relies on the operator confirming that the prior process stopped and that no matching reply draft exists in the exact CLI-owned profile used by that run. Native drafts were neither verified nor deleted.",
+        ]
+      : draftPossible || outcome.kind === "staged_unverified"
+        ? [
+            "A native reply draft may exist; manually compare X Unsent/Drafts in the exact CLI-owned profile before any retry.",
+            "If a matching draft exists or the comparison is uncertain, do not retry or use --force.",
+            ...(outcome.kind === "duplicate"
+              ? ["Only after confidently finding no matching draft may a separate --force run intentionally bypass finalized history."]
+              : []),
+            ...(outcome.kind === "reservation_active"
+              ? ["Another run may still be staging; wait for its owner to finish because --force cannot bypass a reservation."]
+              : []),
+            ...(outcome.kind === "reservation_stale"
+              ? [`Only after confirming no matching reply draft exists may ${RECOVER_RESERVATION_FLAG} clear the stale local claim; recovery never stages.`]
+              : []),
+            ...(outcome.kind === "reservation_ambiguous"
+              ? ["Repair and inspect the ambiguous local reservation state before any reply action."]
+              : []),
+            ...(reservationRetained
+              ? ["The owner reservation remains; --force cannot bypass it. Inspect native drafts and recover the claim only through the explicit stale-reservation procedure."]
+              : []),
+          ]
+        : outcome.reservationRelease === "not_released"
+          ? ["The owner reservation was not confirmed released; --force cannot bypass it, so inspect and repair local durable state before any reply action."]
+          : outcome.reservationRelease === "released"
+            ? ["The owner-matched reservation release was confirmed after typed evidence that native Save was not invoked."]
+            : outcome.ledgerClose === "failed"
+              ? ["The reply ledger did not close cleanly; inspect and repair local durable state before any reply action."]
+              : [],
+    assets: NO_ASSETS,
+    platformTouched,
+    terminalState,
+    verification: {
+      status: verified ? "verified" : platformTouched ? "unverified" : "not_applicable",
+      strength: verified
+        ? "content_and_target"
+        : contentRowVerified
+          ? "scoped_row_delta"
+          : "none",
+      nativeReference: null,
+    },
+    remoteResidue: residue,
+    error,
+    exit: {
+      class: outcome.exitCode === 0
+        ? "success"
+        : outcome.exitCode === 2
+          ? "invalid_caller_input"
+          : "runtime_or_platform_failure",
+      code: outcome.exitCode,
+    },
+  });
+}
+
 const productionReplyRealRunDependencies: ReplyRealRunDependencies = {
   async openLedger() {
     const { ReplyLedger } = await import("../db.js");
@@ -1078,6 +1331,7 @@ export function registerReplyCommand(x: Command): void {
     .option("--dry-run", "Locally validate syntax/content, generate, and render; skips browser and reply ledger")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
     .option("--force", "Real runs only: bypass finalized history, never any reservation")
+    .option("--json", "Emit one versioned machine-readable transport receipt")
     .option(
       RECOVER_RESERVATION_FLAG,
       "Attest the prior process stopped and exact originating profile has no matching draft; clear an eligible 24h-old claim and exit",
@@ -1137,6 +1391,60 @@ export function registerReplyCommand(x: Command): void {
       const output = new TerminalOutputBudget();
       const emit = (stream: "stdout" | "stderr", message: string) =>
         emitTerminalOutput(output, stream, message);
+      const receiptMode = opts.recoverStaleReservationAfterConfirmingNoDraft
+        ? "recovery"
+        : opts.dryRun ? "dry_run" : "real";
+      const emitLocalFailure = (problem: LocalValidationProblem, message: string) => {
+        emitTransportReceipt(createLocalInputFailureReceipt({
+          channel: "x",
+          action: "reply",
+          format: "reply",
+          mode: receiptMode,
+          problem,
+          message,
+        }), { json: !!opts.json, budget: output });
+      };
+      const stopForPreStageFailure = (
+        error: unknown,
+        stage: string,
+        code: string,
+        localMessagePrefix = "",
+      ): never => {
+        const classified = classifyXPreStageFailure(error);
+        if (classified.kind === "local_validation") {
+          let problem: LocalValidationProblem | null = null;
+          let message: string | null = null;
+          try {
+            problem = classified.error.problem;
+            message = classified.error.message;
+          } catch {
+            // A hostile wrapper around a branded error is an unknown runtime failure.
+          }
+          if (problem !== null && typeof message === "string") {
+            emitLocalFailure(problem, `${localMessagePrefix}${message}`);
+            process.exit(2);
+          }
+        } else if (classified.kind === "terminal_projection") {
+          emitLocalFailure({
+            phase: "local",
+            code: "terminal_projection_failed",
+            field: "text",
+            actual: "unsafe_or_oversized",
+            expected: "bounded Unicode-scalar content",
+            unit: "utf16_code_units",
+          }, terminalProjectionFailureMessage());
+          process.exit(2);
+        }
+
+        emitTransportReceipt(createPreStageRuntimeFailureReceipt({
+          action: "reply",
+          format: "reply",
+          mode: receiptMode,
+          stage,
+          code,
+        }), { json: !!opts.json, budget: output });
+        process.exit(1);
+      };
       if (opts.recoverStaleReservationAfterConfirmingNoDraft) {
         const conflicts = [
           opts.text !== undefined ? "--text" : undefined,
@@ -1147,11 +1455,14 @@ export function registerReplyCommand(x: Command): void {
           opts.force ? "--force" : undefined,
         ].filter((flag): flag is string => flag !== undefined);
         if (conflicts.length > 0) {
-          emit("stderr",
-            `${RECOVER_RESERVATION_FLAG} is recovery-only and accepts only --to; remove ${conflicts.join(
-              ", ",
-            )}. No reply-ledger or browser state was accessed.`,
-          );
+          emitLocalFailure({
+            phase: "local",
+            code: "x_reply_recovery_flag_conflict",
+            field: "source",
+            actual: "recovery_with_staging_flags",
+            expected: `${RECOVER_RESERVATION_FLAG} with --to only`,
+            unit: null,
+          }, `${RECOVER_RESERVATION_FLAG} is recovery-only and accepts only --to; remove conflicting staging flags. No reply-ledger or browser state was accessed.`);
           process.exit(2);
           return;
         }
@@ -1160,23 +1471,22 @@ export function registerReplyCommand(x: Command): void {
         try {
           recoveryTargetId = extractTweetId(opts.to);
         } catch (error) {
-          try {
-            emit("stderr", `Invalid --to: ${renderTerminalInline(projectTerminalText(
-              (error as Error).message,
-              { lineMode: "inline" },
-            ))}`);
-          } catch {
-            console.error(terminalProjectionFailureMessage());
-          }
-          process.exit(2);
-          return;
+          return stopForPreStageFailure(
+            error,
+            "target_validation",
+            "x_reply_target_validation_runtime_failed",
+            "Invalid --to: ",
+          );
         }
 
         const outcome = await executeReplyReservationRecovery(
           recoveryTargetId,
           productionReplyRealRunDependencies,
         );
-        emit(outcome.stream, outcome.message);
+        emitTransportReceipt(receiptForXReplyOutcome(outcome, "reply", [], "recovery"), {
+          json: !!opts.json,
+          budget: output,
+        });
         process.exit(outcome.exitCode);
         return;
       }
@@ -1187,16 +1497,12 @@ export function registerReplyCommand(x: Command): void {
       try {
         replyToId = extractTweetId(opts.to);
       } catch (err) {
-        try {
-          emit("stderr", `Invalid --to: ${renderTerminalInline(projectTerminalText(
-            (err as Error).message,
-            { lineMode: "inline" },
-          ))}`);
-        } catch {
-          console.error(terminalProjectionFailureMessage());
-        }
-        process.exit(2);
-        return;
+        return stopForPreStageFailure(
+          err,
+          "target_validation",
+          "x_reply_target_validation_runtime_failed",
+          "Invalid --to: ",
+        );
       }
 
       // Resolve content (inline --text or --from file/stdin) only after target
@@ -1218,13 +1524,11 @@ export function registerReplyCommand(x: Command): void {
           sourceLineOffset = split.bodyLineOffset;
         }
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        try {
-          emit("stderr", renderTerminalErrorMessage(error.message));
-        } catch {
-          console.error(terminalProjectionFailureMessage());
-        }
-        process.exit(2);
+        return stopForPreStageFailure(
+          error,
+          "content_input",
+          "x_reply_content_input_runtime_failed",
+        );
       }
 
       // DETERMINISTIC generation. A reply is a single tweet by default; if the
@@ -1238,14 +1542,21 @@ export function registerReplyCommand(x: Command): void {
           sourceLineOffset,
         });
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        if (error.problem.code !== "x_text_too_long") {
+        const classified = classifyXPreStageFailure(error);
+        let isSinglePostOverflow = false;
+        if (classified.kind === "local_validation") {
           try {
-            emit("stderr", renderTerminalErrorMessage(error.message));
+            isSinglePostOverflow = classified.error.problem.code === "x_text_too_long";
           } catch {
-            console.error(terminalProjectionFailureMessage());
+            // Fall through to the fixed unexpected-runtime receipt.
           }
-          process.exit(2);
+        }
+        if (!isSinglePostOverflow) {
+          return stopForPreStageFailure(
+            error,
+            "content_generation",
+            "x_reply_content_generation_runtime_failed",
+          );
         }
         overflowed = true;
         try {
@@ -1255,13 +1566,11 @@ export function registerReplyCommand(x: Command): void {
             sourceLineOffset,
           });
         } catch (threadError) {
-          if (!isLocalValidationError(threadError)) throw threadError;
-          try {
-            emit("stderr", renderTerminalErrorMessage(threadError.message));
-          } catch {
-            console.error(terminalProjectionFailureMessage());
-          }
-          process.exit(2);
+          return stopForPreStageFailure(
+            threadError,
+            "content_generation",
+            "x_reply_thread_generation_runtime_failed",
+          );
         }
       }
       let inspection: string;
@@ -1269,34 +1578,41 @@ export function registerReplyCommand(x: Command): void {
         const prepared = prepareXTerminalContent(content);
         content = prepared.content;
         inspection = prepared.inspection;
-        output.consume(inspection);
+        if (!opts.json) output.consume(inspection);
       } catch (error) {
-        if (!isTerminalProjectionError(error)) throw error;
-        console.error(terminalProjectionFailureMessage());
-        process.exit(2);
+        return stopForPreStageFailure(
+          error,
+          "terminal_preparation",
+          "x_reply_terminal_preparation_runtime_failed",
+        );
       }
-      if (overflowed) {
+      if (overflowed && !opts.json) {
         emit("stdout",
           `[note] Reply content exceeds the single-post limit — generated a ${content.thread?.length ?? 0}-post reply thread without truncating the normalized reply prose.`,
         );
       }
 
-      emit("stdout", `Replying to tweet ${replyToId}:\n`);
-      console.log(inspection);
+      if (!opts.json) {
+        emit("stdout", `Replying to tweet ${replyToId}:\n`);
+        console.log(inspection);
+      }
 
       // A valid dry-run is deliberately state-free. In particular, return
       // BEFORE importing db.js: that module loads better-sqlite3 and constructing
       // ReplyLedger creates profile/data-repository directories plus publish.db.
       // The real run below remains authoritative for duplicate prevention.
       if (opts.dryRun) {
-        emit("stdout",
-          `\n[dry-run] Local content validation and generation passed for syntactically valid reply target ${replyToId}. No draft was staged.\n` +
-            "  No browser opened; no profile, data-repository, or SQLite runtime state was read or written.\n" +
-            "  Target ID/URL syntax was validated locally. Target existence, visibility, and reply eligibility were not " +
-            "verified; X remains authoritative for those checks during a real run.\n" +
-            "  Reply-ledger claim/finalization was skipped. A real run first claims the normalized target and may " +
-            "refuse finalized history unless --force is explicitly supplied; --force never bypasses an in-flight or retained reservation.",
-        );
+        emitTransportReceipt(createDryRunReceipt({
+          channel: "x",
+          action: "reply",
+          format: overflowed ? "reply_thread" : "reply",
+          warnings: content.warnings,
+          gotchas: [
+            "Target syntax was validated locally; target existence, visibility, and reply eligibility remain unverified.",
+            "The reply ledger was skipped; --force never bypasses an in-flight or retained reservation.",
+          ],
+          liveNotes: ["X target checks, reply-ledger state, and native staging were intentionally skipped."],
+        }), { json: !!opts.json, budget: output });
         process.exit(0);
       }
 
@@ -1310,7 +1626,11 @@ export function registerReplyCommand(x: Command): void {
         },
         productionReplyRealRunDependencies,
       );
-      emit(outcome.stream, outcome.message);
+      emitTransportReceipt(receiptForXReplyOutcome(
+        outcome,
+        overflowed ? "reply_thread" : "reply",
+        content.warnings,
+      ), { json: !!opts.json, budget: output });
       process.exit(outcome.exitCode);
     });
 }
