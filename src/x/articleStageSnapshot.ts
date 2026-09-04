@@ -1,12 +1,37 @@
+import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
 import type {
   ArticleBlock,
-  CodeBlockFlag,
   GeneratedContent,
   InlineRun,
   LinkFlag,
   XFormat,
 } from "./content.js";
+import { parseXArticleMarkdown } from "./articleMarkdown.js";
+import {
+  articleCodeAdvisoryRenderSize,
+  articleCodeLinkAdvisoryRenderSize,
+  collectXArticleCodeLinkAdvisories,
+  isTerminalSafeBoundedCodeEvidence,
+  sameXArticleCodeAdvisories,
+  sameXArticleCodeLinkAdvisories,
+  terminalSafeBoundedArticleCodeEvidence,
+  unpairedSurrogateOffset,
+  X_ARTICLE_CODE_ADVISORY_COUNT_MAX,
+  X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS,
+  X_ARTICLE_CODE_LINK_TEXT_MAX_CODE_POINTS,
+  X_ARTICLE_CODE_LINK_URL_MAX_CODE_POINTS,
+  X_ARTICLE_CODE_LINK_NOTE,
+  X_CODE_INFO_MAX_CODE_POINTS,
+  X_CODE_PREVIEW_MAX_CODE_POINTS,
+  type ArticleCodeBlockFlag,
+  type ArticleCodeLinkAdvisory,
+  type ArticleCodeLinkSource,
+} from "./codeAdvisory.js";
+import {
+  X_ARTICLE_STAGE_TEXT_MAX_CODE_UNITS,
+  xArticleStageCopiedTextCodeUnits,
+} from "./articleStageTextBudget.js";
 import {
   X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
   XDraftStageError,
@@ -27,7 +52,6 @@ const MAX_BLOCKS = 50_000;
 const MAX_RUNS_PER_BLOCK = 50_000;
 const MAX_TOTAL_RUNS = 200_000;
 const MAX_TEXT_CODE_UNITS = 1_000_000;
-const MAX_TOTAL_TEXT_CODE_UNITS = 20_000_000;
 const MAX_FLAGS = 50_000;
 const MAX_WARNINGS = 50_000;
 const MAX_URL_CODE_UNITS = 8_192;
@@ -105,6 +129,8 @@ export interface XArticleStageSnapshot {
   readonly plain: string;
   readonly codeBlockCount: number;
   readonly receiptCodeBlockCount: number | "many";
+  readonly codeAdvisories: readonly ArticleCodeBlockFlag[];
+  readonly codeLinkAdvisories: readonly Readonly<ArticleCodeLinkAdvisory>[];
 }
 
 export interface XNonArticleStageSnapshot {
@@ -482,7 +508,7 @@ function boundedString(
   if (value.length > maximum) fail("oversized_structure");
   if (countTowardTotal) {
     context.totalTextCodeUnits += value.length;
-    if (context.totalTextCodeUnits > MAX_TOTAL_TEXT_CODE_UNITS) {
+    if (context.totalTextCodeUnits > X_ARTICLE_STAGE_TEXT_MAX_CODE_UNITS) {
       fail("oversized_structure");
     }
   }
@@ -651,22 +677,124 @@ function snapshotBlocks(value: unknown, context: SnapshotContext): SnapshotBlock
   return { blocks: Object.freeze(blocks) as ArticleBlock[], codeBlocks, hrefs };
 }
 
-function snapshotCodeFlags(value: unknown, context: SnapshotContext): CodeBlockFlag[] {
-  return Object.freeze(
-    withDenseArray(value, MAX_FLAGS, context, (entry) =>
+function snapshotCodeFlags(
+  value: unknown,
+  context: SnapshotContext,
+): readonly ArticleCodeBlockFlag[] {
+  const flags = Object.freeze(
+    withDenseArray(value, X_ARTICLE_CODE_ADVISORY_COUNT_MAX, context, (entry) =>
       withPlainRecord(
         entry,
-        ["index", "preview", "sourceLine"],
-        ["lang"],
+        [
+          "kind",
+          "index",
+          "lang",
+          "preview",
+          "sourceLine",
+          "sourceEndLine",
+          "sourceLineCount",
+          "markdownStartLine",
+          "markdownEndLine",
+          "fence",
+          "closure",
+          "sourceTerminalNewline",
+          "infoString",
+          "infoStringTruncated",
+          "previewTruncated",
+          "digestNormalization",
+          "normalizedSourceSha256",
+        ],
+        [],
         context,
-        (reader): CodeBlockFlag => Object.freeze({
-          index: positiveSafeInteger(reader.read("index")),
-          lang: optionalString(reader, "lang", MAX_TEXT_CODE_UNITS, context),
-          preview: boundedString(reader.read("preview"), MAX_TEXT_CODE_UNITS, context),
-          sourceLine: positiveSafeInteger(reader.read("sourceLine")),
-        }),
+        (reader): ArticleCodeBlockFlag => {
+          if (reader.read("kind") !== "article_code_block") fail("invalid_value");
+          const index = positiveSafeInteger(reader.read("index"));
+          const rawLang = reader.read("lang");
+          const lang = rawLang === undefined
+            ? undefined
+            : boundedString(
+                rawLang,
+                X_CODE_INFO_MAX_CODE_POINTS * 2,
+                context,
+              );
+          const preview = boundedString(
+            reader.read("preview"),
+            X_CODE_PREVIEW_MAX_CODE_POINTS * 2,
+            context,
+          );
+          const sourceLine = positiveSafeInteger(reader.read("sourceLine"));
+          const sourceEndLine = positiveSafeInteger(reader.read("sourceEndLine"));
+          const sourceLineCount = positiveSafeInteger(reader.read("sourceLineCount"));
+          const markdownStartLine = positiveSafeInteger(reader.read("markdownStartLine"));
+          const markdownEndLine = positiveSafeInteger(reader.read("markdownEndLine"));
+          const fence = reader.read("fence");
+          const closure = reader.read("closure");
+          const sourceTerminalNewline = reader.read("sourceTerminalNewline");
+          const rawInfo = reader.read("infoString");
+          const infoString = rawInfo === null
+            ? null
+            : boundedString(
+                rawInfo,
+                X_CODE_INFO_MAX_CODE_POINTS * 2,
+                context,
+              );
+          const infoStringTruncated = reader.read("infoStringTruncated");
+          const previewTruncated = reader.read("previewTruncated");
+          const digestNormalization = reader.read("digestNormalization");
+          const normalizedSourceSha256 = boundedString(
+            reader.read("normalizedSourceSha256"),
+            64,
+            context,
+          );
+          if (
+            sourceEndLine < sourceLine ||
+            markdownEndLine < markdownStartLine ||
+            sourceLineCount !== sourceEndLine - sourceLine + 1 ||
+            sourceLineCount !== markdownEndLine - markdownStartLine + 1 ||
+            (fence !== "backtick" && fence !== "tilde") ||
+            (closure !== "explicit" && closure !== "end_of_input") ||
+            typeof sourceTerminalNewline !== "boolean" ||
+            (closure === "explicit" &&
+              (sourceTerminalNewline || sourceLineCount < 2)) ||
+            typeof infoStringTruncated !== "boolean" ||
+            typeof previewTruncated !== "boolean" ||
+            !isTerminalSafeBoundedCodeEvidence(preview, X_CODE_PREVIEW_MAX_CODE_POINTS) ||
+            digestNormalization !== "lf_normalized_exact_fence_source" ||
+            !/^[a-f0-9]{64}$/u.test(normalizedSourceSha256) ||
+            (infoString === null
+              ? lang !== undefined || infoStringTruncated
+              : lang !== infoString || infoString.length === 0 ||
+                !isTerminalSafeBoundedCodeEvidence(
+                  infoString,
+                  X_CODE_INFO_MAX_CODE_POINTS,
+                ))
+          ) fail("invalid_value");
+          return Object.freeze({
+            kind: "article_code_block",
+            index,
+            lang,
+            preview,
+            sourceLine,
+            sourceEndLine,
+            sourceLineCount,
+            markdownStartLine,
+            markdownEndLine,
+            fence,
+            closure,
+            sourceTerminalNewline,
+            infoString,
+            infoStringTruncated,
+            previewTruncated,
+            digestNormalization: "lf_normalized_exact_fence_source",
+            normalizedSourceSha256,
+          });
+        },
       )),
-  ) as CodeBlockFlag[];
+  ) as readonly ArticleCodeBlockFlag[];
+  if (articleCodeAdvisoryRenderSize(flags) > X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS) {
+    fail("oversized_structure");
+  }
+  return flags;
 }
 
 function snapshotLinkFlags(value: unknown, context: SnapshotContext): LinkFlag[] {
@@ -675,16 +803,84 @@ function snapshotLinkFlags(value: unknown, context: SnapshotContext): LinkFlag[]
       withPlainRecord(
         entry,
         ["url", "note"],
-        ["text"],
+        [
+          "text",
+          "advisorySource",
+          "codeBlockIndex",
+          "urlTruncated",
+          "textTruncated",
+        ],
         context,
-        (reader): LinkFlag => Object.freeze({
-          // Link flags are advisory source evidence and may describe URL-looking
-          // text inside excluded code. Only InlineRun.href becomes an active
-          // editor anchor and therefore receives safeHref validation.
-          url: boundedString(reader.read("url"), MAX_URL_CODE_UNITS, context),
-          text: optionalString(reader, "text", MAX_TEXT_CODE_UNITS, context),
-          note: boundedString(reader.read("note"), MAX_TEXT_CODE_UNITS, context),
-        }),
+        (reader): LinkFlag => {
+          const codeDerived = reader.has("advisorySource");
+          const url = boundedString(
+            reader.read("url"),
+            codeDerived
+              ? X_ARTICLE_CODE_LINK_URL_MAX_CODE_POINTS * 2
+              : MAX_URL_CODE_UNITS,
+            context,
+          );
+          const text = optionalString(
+            reader,
+            "text",
+            codeDerived
+              ? X_ARTICLE_CODE_LINK_TEXT_MAX_CODE_POINTS * 2
+              : MAX_TEXT_CODE_UNITS,
+            context,
+          );
+          const note = boundedString(
+            reader.read("note"),
+            codeDerived ? X_ARTICLE_CODE_LINK_NOTE.length : MAX_TEXT_CODE_UNITS,
+            context,
+          );
+          if (!codeDerived) {
+            if (
+              reader.has("codeBlockIndex") ||
+              reader.has("urlTruncated") ||
+              reader.has("textTruncated")
+            ) fail("unexpected_property");
+            return Object.freeze({
+              url,
+              ...(reader.has("text") ? { text } : {}),
+              note,
+            });
+          }
+          if (
+            reader.read("advisorySource") !== "excluded_article_code" ||
+            !reader.has("codeBlockIndex") ||
+            !reader.has("urlTruncated") ||
+            !reader.has("textTruncated")
+          ) fail("invalid_value");
+          const codeBlockIndex = positiveSafeInteger(reader.read("codeBlockIndex"));
+          const urlTruncated = reader.read("urlTruncated");
+          const textTruncated = reader.read("textTruncated");
+          if (
+            typeof urlTruncated !== "boolean" ||
+            typeof textTruncated !== "boolean" ||
+            (reader.has("text") && text === undefined) ||
+            note !== X_ARTICLE_CODE_LINK_NOTE ||
+            !/^https?:\/\/\S+$/u.test(url) ||
+            !isTerminalSafeBoundedCodeEvidence(
+              url,
+              X_ARTICLE_CODE_LINK_URL_MAX_CODE_POINTS,
+            ) ||
+            (text === undefined
+              ? textTruncated
+              : text.length === 0 || !isTerminalSafeBoundedCodeEvidence(
+                  text,
+                  X_ARTICLE_CODE_LINK_TEXT_MAX_CODE_POINTS,
+                ))
+          ) fail("invalid_value");
+          return Object.freeze({
+            url,
+            ...(reader.has("text") ? { text } : {}),
+            note,
+            advisorySource: "excluded_article_code",
+            codeBlockIndex,
+            urlTruncated,
+            textTruncated,
+          });
+        },
       )),
   ) as LinkFlag[];
 }
@@ -698,29 +894,212 @@ function snapshotWarnings(value: unknown, context: SnapshotContext): string[] {
 
 function verifyCodeCorrespondence(
   blocks: Array<Extract<ArticleBlock, { kind: "code" }>>,
-  flags: CodeBlockFlag[],
+  flags: readonly ArticleCodeBlockFlag[],
   declared: number,
-): void {
+  markdown: string,
+): ArticleCodeLinkSource[] {
   if (declared !== blocks.length || flags.length !== blocks.length) {
     fail("accounting_mismatch");
   }
+  const markdownLines = markdown.split("\n");
+  const physicalLineCount = markdownLines.length - (markdown.endsWith("\n") ? 1 : 0);
+  let previousMarkdownEnd = 0;
+  let sourceOffset: number | null = null;
+  const codeLinkSources: ArticleCodeLinkSource[] = [];
   for (let index = 0; index < blocks.length; index += 1) {
     const block = blocks[index];
     const flag = flags[index];
+    const nextOffset = flag.sourceLine - flag.markdownStartLine;
     if (
       block.index !== index + 1 ||
       flag.index !== block.index ||
-      flag.lang !== block.lang
+      flag.lang !== block.lang ||
+      nextOffset < 0 ||
+      !Number.isSafeInteger(nextOffset) ||
+      (sourceOffset !== null && nextOffset !== sourceOffset) ||
+      flag.markdownStartLine <= previousMarkdownEnd ||
+      flag.markdownEndLine > physicalLineCount
     ) {
       fail("accounting_mismatch");
     }
+    sourceOffset = nextOffset;
+    previousMarkdownEnd = flag.markdownEndLine;
+    let digestSource = markdownLines
+      .slice(flag.markdownStartLine - 1, flag.markdownEndLine)
+      .join("\n");
+    if (flag.sourceTerminalNewline) digestSource += "\n";
+    if (unpairedSurrogateOffset(digestSource) !== -1) fail("invalid_value");
+    const sourceLines = digestSource.endsWith("\n")
+      ? digestSource.slice(0, -1).split("\n")
+      : digestSource.split("\n");
+    const opener = (sourceLines[0] ?? "").match(/^( {0,3})(`{3,}|~{3,})([^\n]*)/u);
+    if (!opener || opener[0].length !== (sourceLines[0] ?? "").length) {
+      fail("accounting_mismatch");
+    }
+    const marker = opener[2];
+    const family = marker[0] === "`" ? "backtick" : "tilde";
+    const closerMatches = (line: string): boolean => {
+      const match = line.match(/^( {0,3})(`+|~+)[ \t]*/u);
+      return !!match && match[0].length === line.length &&
+        match[2][0] === marker[0] && match[2].length >= marker.length;
+    };
+    if (
+      family !== flag.fence ||
+      (marker[0] === "`" && opener[3].includes("`")) ||
+      (flag.closure === "explicit"
+        ? flag.sourceTerminalNewline ||
+          sourceLines.length < 2 ||
+          !closerMatches(sourceLines[sourceLines.length - 1] ?? "") ||
+          sourceLines.slice(1, -1).some(closerMatches)
+        : flag.markdownEndLine !== physicalLineCount ||
+          flag.sourceTerminalNewline !== markdown.endsWith("\n") ||
+          sourceLines.slice(1).some(closerMatches))
+    ) fail("accounting_mismatch");
+    const rawInfo = opener[3].replace(/^[ \t]+|[ \t]+$/gu, "");
+    const openerIndent = opener[1].length;
+    const rawPayloadLines = flag.closure === "explicit"
+      ? sourceLines.slice(1, -1)
+      : sourceLines.slice(1);
+    const payloadLines: string[] = [];
+    for (const line of rawPayloadLines) {
+      let remove = 0;
+      while (remove < openerIndent && line.charCodeAt(remove) === 32) remove += 1;
+      if (remove < openerIndent && line.charCodeAt(remove) === 9) {
+        fail("accounting_mismatch");
+      }
+      payloadLines.push(line.slice(remove));
+    }
+    let expectedCodeText = payloadLines.join("\n");
+    if (
+      flag.closure === "end_of_input" &&
+      flag.sourceTerminalNewline &&
+      sourceLines.length > 1
+    ) expectedCodeText += "\n";
+    if (block.text !== expectedCodeText) fail("accounting_mismatch");
+    const expectedInfo = terminalSafeBoundedArticleCodeEvidence(
+      rawInfo,
+      X_CODE_INFO_MAX_CODE_POINTS,
+    );
+    const rawPreview = (block.text.split("\n", 1)[0] ?? "")
+      .replace(/^[ \t]+|[ \t]+$/gu, "");
+    const expectedPreview = terminalSafeBoundedArticleCodeEvidence(
+      rawPreview,
+      X_CODE_PREVIEW_MAX_CODE_POINTS,
+    );
+    if (
+      flag.infoString !== (expectedInfo.value || null) ||
+      flag.lang !== (expectedInfo.value || undefined) ||
+      flag.infoStringTruncated !== expectedInfo.truncated ||
+      flag.preview !== expectedPreview.value ||
+      flag.previewTruncated !== expectedPreview.truncated ||
+      createHash("sha256").update(digestSource, "utf8").digest("hex") !==
+        flag.normalizedSourceSha256
+    ) fail("accounting_mismatch");
+    codeLinkSources.push({
+      codeBlockIndex: flag.index,
+      infoString: rawInfo,
+      codeText: block.text,
+    });
+  }
+  return codeLinkSources;
+}
+
+function verifyCanonicalCodeSet(
+  markdown: string,
+  blocks: Array<Extract<ArticleBlock, { kind: "code" }>>,
+  flags: readonly ArticleCodeBlockFlag[],
+  linkFlags: LinkFlag[],
+): void {
+  const sourceOffset = flags.length === 0
+    ? 0
+    : flags[0].sourceLine - flags[0].markdownStartLine;
+  if (!Number.isSafeInteger(sourceOffset) || sourceOffset < 0) {
+    fail("accounting_mismatch");
+  }
+  try {
+    const parsed = parseXArticleMarkdown(markdown, sourceOffset);
+    const parsedBlocks = parsed.blocks.filter(
+      (block): block is Extract<ArticleBlock, { kind: "code" }> => block.kind === "code",
+    );
+    if (
+      parsed.markdown !== markdown ||
+      parsed.codeBlockCount !== blocks.length ||
+      parsedBlocks.length !== blocks.length ||
+      parsedBlocks.some((block, index) => {
+        const actual = blocks[index];
+        return actual === undefined ||
+          block.index !== actual.index ||
+          block.lang !== actual.lang ||
+          block.text !== actual.text;
+      }) ||
+      !sameXArticleCodeAdvisories(parsed.codeFlags, flags) ||
+      !sameXArticleLinkFlags(parsed.linkFlags, linkFlags)
+    ) fail("accounting_mismatch");
+  } catch {
+    fail("accounting_mismatch");
   }
 }
 
-function verifyLinkCorrespondence(hrefs: Set<string>, flags: LinkFlag[]): void {
-  const flagged = new Set(flags.map((flag) => flag.url));
+const LINK_FLAG_OPTIONAL_KEYS = [
+  "text",
+  "advisorySource",
+  "codeBlockIndex",
+  "urlTruncated",
+  "textTruncated",
+] as const;
+
+function sameXArticleLinkFlags(
+  left: readonly LinkFlag[],
+  right: readonly LinkFlag[],
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a.url !== b.url || a.note !== b.note) return false;
+    for (const key of LINK_FLAG_OPTIONAL_KEYS) {
+      if (
+        Object.prototype.hasOwnProperty.call(a, key) !==
+          Object.prototype.hasOwnProperty.call(b, key) ||
+        a[key] !== b[key]
+      ) return false;
+    }
+  }
+  return true;
+}
+
+function verifyLinkCorrespondence(
+  hrefs: Set<string>,
+  flags: LinkFlag[],
+  codeLinkSources: readonly ArticleCodeLinkSource[],
+): void {
+  const flagged = new Set(
+    flags
+      .filter((flag) => flag.advisorySource !== "excluded_article_code")
+      .map((flag) => flag.url),
+  );
   for (const href of hrefs) {
     if (!flagged.has(href)) fail("accounting_mismatch");
+  }
+  const actualCode = flags.filter(
+    (flag): flag is LinkFlag & ArticleCodeLinkAdvisory =>
+      flag.advisorySource === "excluded_article_code",
+  );
+  const firstCode = flags.findIndex(
+    (flag) => flag.advisorySource === "excluded_article_code",
+  );
+  if (
+    firstCode !== -1 &&
+    flags.slice(firstCode).some(
+      (flag) => flag.advisorySource !== "excluded_article_code",
+    )
+  ) fail("accounting_mismatch");
+  const expectedCode = collectXArticleCodeLinkAdvisories(codeLinkSources);
+  if (
+    expectedCode === null ||
+    !sameXArticleCodeLinkAdvisories(expectedCode, actualCode)
+  ) {
+    fail("accounting_mismatch");
   }
 }
 
@@ -858,8 +1237,38 @@ export function snapshotXArticleStageInput(
         () => fail("invalid_value"),
       );
       const warnings = snapshotWarnings(reader.read("warnings"), context);
-      verifyCodeCorrespondence(article.codeBlocks, codeFlags, article.codeBlockCount);
-      verifyLinkCorrespondence(article.hrefs, linkFlags);
+      if (
+        xArticleStageCopiedTextCodeUnits({
+          title: article.title,
+          markdown: article.markdown,
+          blocks: article.blocks,
+          codeFlags,
+          linkFlags,
+          warnings,
+        }) !== context.totalTextCodeUnits
+      ) fail("accounting_mismatch");
+      verifyCanonicalCodeSet(
+        article.markdown,
+        article.codeBlocks,
+        codeFlags,
+        linkFlags,
+      );
+      const codeLinkSources = verifyCodeCorrespondence(
+        article.codeBlocks,
+        codeFlags,
+        article.codeBlockCount,
+        article.markdown,
+      );
+      verifyLinkCorrespondence(article.hrefs, linkFlags, codeLinkSources);
+      const codeLinkFlags = Object.freeze(linkFlags.filter(
+        (flag): flag is LinkFlag & ArticleCodeLinkAdvisory =>
+          flag.advisorySource === "excluded_article_code",
+      ));
+      if (
+        articleCodeAdvisoryRenderSize(codeFlags) +
+          articleCodeLinkAdvisoryRenderSize(codeLinkFlags) >
+            X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS
+      ) fail("oversized_structure");
 
       const blocks = article.blocks;
       const rendered = htmlFromArticleBlocks(blocks);
@@ -892,6 +1301,8 @@ export function snapshotXArticleStageInput(
         plain,
         codeBlockCount: article.codeBlockCount,
         receiptCodeBlockCount,
+        codeAdvisories: codeFlags,
+        codeLinkAdvisories: codeLinkFlags,
       });
     },
     { format: observedFormat },

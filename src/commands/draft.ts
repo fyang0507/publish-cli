@@ -5,9 +5,18 @@ import { dirname, basename, extname, join, resolve } from "node:path";
 import {
   generateContent,
   renderForInspection,
+  renderXLinkFlag,
   type GeneratedContent,
   type XFormat,
 } from "../x/content.js";
+import {
+  renderXArticleCodeLinkAdvisory,
+  renderXArticleCodeAdvisoryDetailLine,
+  sameXArticleCodeAdvisories,
+  sameXArticleCodeLinkAdvisories,
+  type ArticleCodeBlockFlag,
+  type ArticleCodeLinkAdvisory,
+} from "../x/codeAdvisory.js";
 import { isLocalValidationError } from "../capabilities/validation.js";
 import { resolveContentInputDetails, splitLeadingFrontmatter } from "./contentInput.js";
 import {
@@ -183,6 +192,16 @@ function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
     lines.push(
       `  ${count === "many" ? `More than ${X_ARTICLE_CODE_BLOCK_COUNT_LIMIT}` : count} code block${count === 1 ? "" : "s"} NOT auto-formatted; the code text was intentionally excluded. Add ${count === 1 ? "it" : "them"} with Insert → Code or as screenshots.`,
     );
+    lines.push("  Complete bounded code-advisory evidence:");
+    for (const advisory of handoff.codeAdvisories) {
+      lines.push(renderXArticleCodeAdvisoryDetailLine(advisory));
+    }
+    if (handoff.codeLinkAdvisories.length > 0) {
+      lines.push("  Bounded inert link advisories derived from excluded code:");
+      for (const advisory of handoff.codeLinkAdvisories) {
+        lines.push(renderXArticleCodeLinkAdvisory(advisory));
+      }
+    }
   }
   const cover = handoff.cover;
   if (cover.status === "missing") {
@@ -284,11 +303,16 @@ export async function executeXDraftRealRun(
   let stageContent: GeneratedContent;
   let nonArticleSnapshot: XNonArticleStageSnapshot | null = null;
   let expectedArticleCodeBlockCount: number | "many" | null = null;
+  let expectedArticleCodeAdvisories: readonly ArticleCodeBlockFlag[] | null = null;
+  let expectedArticleCodeLinkAdvisories:
+    readonly Readonly<ArticleCodeLinkAdvisory>[] | null = null;
   try {
     if (format === "article") {
       const snapshot = snapshotXArticleStageInput(callerContent, format);
       stageContent = snapshot.content;
       expectedArticleCodeBlockCount = snapshot.receiptCodeBlockCount;
+      expectedArticleCodeAdvisories = snapshot.codeAdvisories;
+      expectedArticleCodeLinkAdvisories = snapshot.codeLinkAdvisories;
     } else {
       nonArticleSnapshot = snapshotXNonArticleExecuteRequest(
         input,
@@ -424,6 +448,16 @@ export async function executeXDraftRealRun(
         candidate.draftRowEvidence === null ||
         candidate.articleHandoff === null ||
         candidate.articleHandoff.codeBlockCount !== expectedArticleCodeBlockCount ||
+        expectedArticleCodeAdvisories === null ||
+        expectedArticleCodeLinkAdvisories === null ||
+        !sameXArticleCodeAdvisories(
+          candidate.articleHandoff.codeAdvisories,
+          expectedArticleCodeAdvisories,
+        ) ||
+        !sameXArticleCodeLinkAdvisories(
+          candidate.articleHandoff.codeLinkAdvisories,
+          expectedArticleCodeLinkAdvisories,
+        ) ||
         !isXDraftRowEvidenceCompatible(
           candidate.saveMechanism,
           candidate.savePhase,
@@ -432,7 +466,16 @@ export async function executeXDraftRealRun(
       ) {
         return uncertainSaveOutcome(format, "save_delivery_unknown");
       }
-      result = candidate as StageDraftResult;
+      result = {
+        ...candidate,
+        // Render only the pre-loader frozen evidence after the returned handoff
+        // proved exact correspondence. Never trust post-await caller strings.
+        articleHandoff: Object.freeze({
+          ...candidate.articleHandoff,
+          codeAdvisories: expectedArticleCodeAdvisories,
+          codeLinkAdvisories: expectedArticleCodeLinkAdvisories,
+        }),
+      } as StageDraftResult;
     }
   } catch {
     // A resolved result is untrusted data, not phase-bearing control flow.
@@ -478,19 +521,32 @@ function artifactBody(content: GeneratedContent): string {
 }
 
 function renderFlagsBlock(content: GeneratedContent): string {
+  let safeContent = content;
+  try {
+    const format = snapshotXContentFormat(content);
+    if (format === "article") {
+      safeContent = snapshotXArticleStageInput(content, format).content;
+    }
+  } catch {
+    return "[Article inspection receipt failed closed: local snapshot validation failed; no caller evidence rendered.]";
+  }
   const out: string[] = [];
-  if (content.format === "article" && content.article) {
+  if (safeContent.format === "article" && safeContent.article) {
     out.push(
-      `ARTICLE NATIVE RICH-HTML EXCLUDED CODE BLOCK COUNT: ${content.article.codeBlockCount}`,
+      `ARTICLE NATIVE RICH-HTML EXCLUDED CODE BLOCK COUNT: ${safeContent.article.codeBlockCount}`,
     );
   }
-  for (const f of content.codeFlags) {
-    out.push(`CODE BLOCK #${f.index}${f.lang ? ` [${f.lang}]` : ""} (line ${f.sourceLine}) → screenshot on X: ${f.preview}`);
+  for (const f of safeContent.codeFlags) {
+    out.push(safeContent.format === "article"
+      ? renderXArticleCodeAdvisoryDetailLine(f as ArticleCodeBlockFlag)
+      : `CODE BLOCK #${f.index}${f.lang ? ` [${f.lang}]` : ""} (line ${f.sourceLine}) → screenshot on X: ${f.preview}`);
   }
-  for (const f of content.linkFlags) {
-    out.push(`LINK ${f.url}${f.text ? ` (${f.text})` : ""} — ${f.note}`);
+  for (const f of safeContent.linkFlags) {
+    out.push(f.advisorySource === "excluded_article_code"
+      ? renderXArticleCodeLinkAdvisory(f)
+      : `LINK ${f.url}${f.text ? ` (${f.text})` : ""} — ${f.note}`);
   }
-  for (const w of content.warnings) out.push(`WARNING: ${w}`);
+  for (const w of safeContent.warnings) out.push(`WARNING: ${w}`);
   return out.join("\n");
 }
 
@@ -529,18 +585,21 @@ export function registerDraftCommand(x: Command): void {
         "\nArticle code-block handoff:\n" +
         "  A valid top-level backtick/tilde fence with 0–3 leading spaces may close explicitly or at end of input. EOF-closed Article code preserves its LF-normalized payload, including trailing spaces and blank/whitespace-only lines, in article.blocks and the clean Markdown dry-run artifact.\n" +
         "  Every recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in verified and unverified handoff receipts for manual Insert → Code or screenshot review.\n" +
-        "  File-backed Article dry-runs put the excluded-code count and advisories in a separate .x-article.inspection.txt receipt so inspection metadata cannot become EOF-fenced code payload.\n" +
+        "  Each complete advisory reports original/canonical line ranges, physical line count, fence/closure/EOF-terminal-LF facts, terminal-safe NFC info (80 code points) and deindented preview (120 code points), explicit truncation booleans, and SHA-256 of the exact LF-normalized opener-through-closer source slice. EOF identity includes a caller terminal LF; explicit identity excludes only the separator LF after its closer.\n" +
+        "  Controls, format/bidi characters, and line/paragraph separators use atomic visible \\u{...} evidence; unpaired surrogates reject before hashing, while valid astral pairs remain supported. Canonical Markdown and ArticleBlock.text stay exact after line-ending normalization.\n" +
+        "  Terminal inspection replaces each excluded fence with its block number and digest. File-backed Article dry-runs put the excluded-code count and bounded advisories in a separate .x-article.inspection.txt receipt; only the clean .x-article.md artifact retains raw code, so inspection metadata cannot become EOF-fenced code payload.\n" +
+        "  Excluded-code link advisories carry block provenance, explicit truncation facts, and safe URL/label projections bounded to 512/240 code points; they never suppress or alter an exact active prose href. More than 10000 code blocks or 1000000 UTF-16 code units of complete rendered code/code-link evidence exits 2 locally rather than dropping identity facts.\n" +
         "  Run `publish x info` for the owned Article Markdown support matrix and stop conditions.\n" +
         "\nArticle staging snapshot:\n" +
         "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/code-count snapshot and pre-renders its native HTML/plain inputs.\n" +
-        "  Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +
+        "  It reparses canonical Markdown with the same Article parser and requires the complete code block/advisory/code-link sets to correspond before any sink. Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +
         "  If the root format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism. Active inline hrefs require exact safe absolute HTTP(S); supported percent bytes remain exact and are not decoded by safety validation. URL-looking advisories from excluded code are bounded but never become active anchors.\n" +
         "\nNative-save outcome:\n" +
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
         "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or other visible-row changes remain unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
         "  Article success instead requires matching the title and, when present, body prefix after reopening the captured canonical edit URL.\n" +
-        "  A returned Article outcome reports bounded body-input, excluded-code, and cover selection/upload/ratio/crop action facts whether verified or unverified; those facts do not prove cover attachment or persistence.\n" +
+        "  A returned Article outcome reports bounded body-input, excluded-code count, complete digest/truncation evidence, bounded code-link provenance/truncation evidence, and cover selection/upload/ratio/crop action facts whether verified or unverified; those facts do not prove cover attachment or persistence. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
         "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
         "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +
         "  Never retry automatically. --inspect and selector calibration do not prove persistence.\n",

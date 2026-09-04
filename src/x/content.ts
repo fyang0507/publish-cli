@@ -41,6 +41,26 @@ import {
   parseXArticleInlineRuns,
   parseXArticleMarkdown,
 } from "./articleMarkdown.js";
+import {
+  articleMarkdownForTerminal,
+  renderXArticleCodeLinkAdvisory,
+  renderXArticleCodeAdvisoryDetailLine,
+  terminalSafeBoundedCodeEvidence,
+  X_CODE_INFO_MAX_CODE_POINTS,
+  X_CODE_PREVIEW_MAX_CODE_POINTS,
+  type ArticleCodeBlockFlag,
+  type CodeBlockFlag,
+} from "./codeAdvisory.js";
+import {
+  snapshotXArticleStageInput,
+  snapshotXContentFormat,
+} from "./articleStageSnapshot.js";
+
+export {
+  X_CODE_INFO_MAX_CODE_POINTS,
+  X_CODE_PREVIEW_MAX_CODE_POINTS,
+} from "./codeAdvisory.js";
+export type { ArticleCodeBlockFlag, CodeBlockFlag } from "./codeAdvisory.js";
 
 /** Hard character limits for the X composer. */
 export const TWEET_LIMIT_DEFAULT = X_STANDARD_POST_MAX_WEIGHTED_LENGTH;
@@ -54,20 +74,6 @@ export type XFormat = "tweet" | "thread" | "article";
  * paste a screenshot/image where this block sits (often an asset already in the
  * canonical folder).
  */
-export interface CodeBlockFlag {
-  /** 1-based index among code blocks in the source. */
-  index: number;
-  /** Fence language tag, if any (```ts -> "ts"). */
-  lang?: string;
-  /** First line of the block, for human identification. */
-  preview: string;
-  /** Exact source line where the parser-confirmed fence opened (1-based for X). */
-  sourceLine: number;
-}
-
-export const X_CODE_INFO_MAX_CODE_POINTS = 80;
-export const X_CODE_PREVIEW_MAX_CODE_POINTS = 120;
-
 /**
  * Closed fidelity evidence for one parser-confirmed fenced block replaced in
  * X tweet/thread/reply transport text. Source snippets are terminal-safe and
@@ -99,6 +105,29 @@ export interface LinkFlag {
   text?: string;
   /** Human-readable placement guidance. */
   note: string;
+  /** Present only when URL-looking text came from Article code excluded from native HTML. */
+  advisorySource?: "excluded_article_code";
+  /** Source Article code block for a detached, non-active link advisory. */
+  codeBlockIndex?: number;
+  /** Explicit bounds for caller text projected out of excluded Article code. */
+  urlTruncated?: boolean;
+  textTruncated?: boolean;
+}
+
+/** Shared safe rendering for command stdout and Article dry-run receipts. */
+export function renderXLinkFlag(flag: LinkFlag): string {
+  try {
+    if (
+      typeof flag === "object" &&
+      flag !== null &&
+      Object.getOwnPropertyDescriptor(flag, "advisorySource") !== undefined
+    ) {
+      return renderXArticleCodeLinkAdvisory(flag);
+    }
+    return `  ${flag.url}${flag.text ? ` (${flag.text})` : ""}\n    ${flag.note}`;
+  } catch {
+    return "  [Link advisory failed closed validation; no caller evidence rendered.]";
+  }
 }
 
 /**
@@ -436,24 +465,6 @@ function xCodeMappingError(
   });
 }
 
-function terminalSafeBounded(
-  value: string,
-  maximumCodePoints: number,
-): { value: string; truncated: boolean } {
-  const safe = value.normalize("NFC").replace(
-    /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,
-    (character) => {
-      const point = character.codePointAt(0) ?? 0;
-      return `\\u{${point.toString(16).padStart(2, "0")}}`;
-    },
-  );
-  const codePoints = Array.from(safe);
-  return {
-    value: codePoints.slice(0, maximumCodePoints).join(""),
-    truncated: codePoints.length > maximumCodePoints,
-  };
-}
-
 function closerMatches(line: string, marker: string): boolean {
   const match = line.match(/^( {0,3})(`+|~+)[ \t]*/u);
   return !!match && match[0].length === line.length &&
@@ -619,11 +630,11 @@ function mapParserConfirmedFence(
   const sourceSegment = sourceLines.join("\n");
   const lastContentIndex = closure === "explicit" ? sourceLines.length - 2 : sourceLines.length - 1;
   const rawInfo = opener[3].trim();
-  const info = terminalSafeBounded(rawInfo, X_CODE_INFO_MAX_CODE_POINTS);
+  const info = terminalSafeBoundedCodeEvidence(rawInfo, X_CODE_INFO_MAX_CODE_POINTS);
   const rawPreview = lastContentIndex >= 1 ? (sourceLines[1] ?? "").trim() : "";
-  const preview = terminalSafeBounded(rawPreview, X_CODE_PREVIEW_MAX_CODE_POINTS);
+  const preview = terminalSafeBoundedCodeEvidence(rawPreview, X_CODE_PREVIEW_MAX_CODE_POINTS);
   const rawLang = rawInfo.split(/[ \t]+/u, 1)[0] ?? "";
-  const lang = terminalSafeBounded(rawLang, X_CODE_INFO_MAX_CODE_POINTS);
+  const lang = terminalSafeBoundedCodeEvidence(rawLang, X_CODE_INFO_MAX_CODE_POINTS);
   const sourceStartLine = sourceLineOffset + startLineIndex + 1;
   const sourceEndLine = sourceLineOffset + endLineIndex + 1;
   const placeholder = codePlaceholder(index);
@@ -1257,46 +1268,70 @@ export function parseArticleBlocks(body: string): ArticleBlock[] {
  * --dry-run echo and by the draft command's success report).
  */
 export function renderForInspection(c: GeneratedContent): string {
+  let format: GeneratedContent["format"];
+  let content = c;
+  let codeFlags: readonly CodeBlockFlag[];
+  let articleCodeFlags: readonly ArticleCodeBlockFlag[] | null = null;
+  let articleTerminalMarkdown: string | null = null;
+  try {
+    format = snapshotXContentFormat(c);
+    if (format === "article") {
+      const snapshot = snapshotXArticleStageInput(c, format);
+      content = snapshot.content;
+      articleCodeFlags = snapshot.codeAdvisories;
+      codeFlags = articleCodeFlags;
+      if (!content.article) throw new Error("Article snapshot omitted Article content");
+      articleTerminalMarkdown = articleMarkdownForTerminal(
+        content.article.markdown,
+        articleCodeFlags,
+      );
+    } else {
+      codeFlags = c.codeFlags;
+    }
+  } catch {
+    return "[Content inspection failed closed: code-advisory validation failed; no caller evidence rendered.]";
+  }
   const out: string[] = [];
-  out.push(`format: ${c.format}`);
-  if (Number.isFinite(c.limit)) out.push(`per-post limit: ${c.limit}`);
+  out.push(`format: ${format}`);
+  if (Number.isFinite(content.limit)) out.push(`per-post limit: ${content.limit}`);
 
-  if (c.tweet) {
-    const unit = c.tweet.unit === "twitter_text_weighted"
+  if (content.tweet) {
+    const unit = content.tweet.unit === "twitter_text_weighted"
       ? "twitter-text weighted chars"
       : "Unicode code points (local Premium transport policy)";
-    out.push("", "── tweet ──", c.tweet.text, `[${c.tweet.chars} ${unit}]`);
+    out.push("", "── tweet ──", content.tweet.text, `[${content.tweet.chars} ${unit}]`);
   }
-  if (c.thread) {
-    out.push("", `── thread (${c.thread.length} posts) ──`);
-    for (const p of c.thread) {
+  if (content.thread) {
+    out.push("", `── thread (${content.thread.length} posts) ──`);
+    for (const p of content.thread) {
       out.push("", `[${p.index}/${p.total}] (${p.chars} twitter-text weighted chars)`, p.text);
     }
   }
-  if (c.article) {
+  if (content.article) {
     out.push(
       "",
-      `── article: ${c.article.title} ──`,
-      c.article.markdown,
-      `[native rich-HTML excluded code blocks: ${c.article.codeBlockCount}]`,
+      `── article: ${content.article.title} ──`,
+      articleTerminalMarkdown ??
+        "[Article Markdown terminal preview unavailable: validation failed closed.]",
+      `[native rich-HTML excluded code blocks: ${content.article.codeBlockCount}]`,
     );
   }
 
-  if (c.codeFlags.length) {
+  if (codeFlags.length) {
     out.push("", "⚠ CODE BLOCKS (X won't render code — paste a screenshot/image instead):");
-    for (const f of c.codeFlags) {
-      out.push(`  #${f.index} ${f.lang ? `[${f.lang}] ` : ""}line ${f.sourceLine}: ${f.preview}`);
+    for (const f of codeFlags) {
+      out.push(format === "article"
+        ? renderXArticleCodeAdvisoryDetailLine(f as ArticleCodeBlockFlag)
+        : `  #${f.index} ${f.lang ? `[${f.lang}] ` : ""}line ${f.sourceLine}: ${f.preview}`);
     }
   }
-  if (c.linkFlags.length) {
+  if (content.linkFlags.length) {
     out.push("", "⚠ LINKS (placement matters for reach):");
-    for (const f of c.linkFlags) {
-      out.push(`  ${f.url}${f.text ? ` (${f.text})` : ""}`, `    ${f.note}`);
-    }
+    for (const f of content.linkFlags) out.push(renderXLinkFlag(f));
   }
-  if (c.warnings.length) {
+  if (content.warnings.length) {
     out.push("", "⚠ WARNINGS:");
-    for (const w of c.warnings) out.push(`  - ${w}`);
+    for (const w of content.warnings) out.push(`  - ${w}`);
   }
   return out.join("\n");
 }

@@ -1,11 +1,29 @@
+import { createHash } from "node:crypto";
 import { Lexer, Marked } from "marked";
 import { LocalValidationError } from "../capabilities/validation.js";
 import type {
   ArticleBlock,
-  CodeBlockFlag,
   InlineRun,
   LinkFlag,
 } from "./content.js";
+import {
+  articleCodeAdvisoryRenderSize,
+  articleCodeLinkAdvisoryRenderSize,
+  collectXArticleCodeLinkAdvisories,
+  terminalSafeBoundedArticleCodeEvidence,
+  unpairedSurrogateOffset,
+  X_ARTICLE_CODE_ADVISORY_COUNT_MAX,
+  X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS,
+  X_CODE_INFO_MAX_CODE_POINTS,
+  X_CODE_PREVIEW_MAX_CODE_POINTS,
+  type ArticleCodeBlockFlag,
+  type ArticleCodeLinkAdvisory,
+  type ArticleCodeLinkSource,
+} from "./codeAdvisory.js";
+import {
+  X_ARTICLE_STAGE_TEXT_MAX_CODE_UNITS,
+  xArticleStageCopiedTextCodeUnits,
+} from "./articleStageTextBudget.js";
 
 const ARTICLE_MARKDOWN_MAX_CODE_UNITS = 10_000_000;
 const ARTICLE_TITLE_MAX_CODE_UNITS = 100_000;
@@ -15,7 +33,6 @@ const ARTICLE_MAX_RUNS_PER_BLOCK = 50_000;
 const ARTICLE_MAX_TOTAL_RUNS = 200_000;
 const ARTICLE_MAX_FLAGS = 50_000;
 const ARTICLE_HREF_MAX_CODE_UNITS = 8_192;
-const ARTICLE_STAGE_TEXT_MAX_CODE_UNITS = 20_000_000;
 
 const LINK_NOTE =
   "Links cost reach — keep this OUT of the opening tweet; move it to a reply or the end of the thread.";
@@ -42,6 +59,8 @@ interface ArticleToken {
   codeBlockStyle?: unknown;
   xFenceSourceLength?: unknown;
   xFenceTabIndentLineOffset?: unknown;
+  xFenceClosure?: unknown;
+  xFenceDigestSourceLength?: unknown;
 }
 
 interface PositionedArticleToken {
@@ -67,7 +86,7 @@ export interface ParsedXArticleMarkdown {
   markdown: string;
   /** Native body blocks. The separately staged title line is not repeated. */
   blocks: ArticleBlock[];
-  codeFlags: CodeBlockFlag[];
+  codeFlags: ArticleCodeBlockFlag[];
   linkFlags: LinkFlag[];
   codeBlockCount: number;
 }
@@ -157,6 +176,8 @@ interface StrictFenceToken {
   lang?: string;
   text: string;
   xFenceTabIndentLineOffset?: number;
+  xFenceClosure: ArticleCodeBlockFlag["closure"];
+  xFenceDigestSourceLength: number;
 }
 
 /** CommonMark removes up to the opener's 0-3 leading spaces per payload line. */
@@ -208,6 +229,10 @@ function strictFenceToken(src: string): StrictFenceToken | null {
         raw: src.slice(0, rawEnd),
         ...(lang ? { lang } : {}),
         ...deindentFencePayload(src.slice(contentStart, contentEnd), openerIndent),
+        xFenceClosure: "explicit",
+        // Exclude the LF after the closer: it is the following block separator,
+        // not part of the fenced source slice.
+        xFenceDigestSourceLength: lineEnd,
       };
     }
     if (nextBreak === -1) break;
@@ -222,6 +247,8 @@ function strictFenceToken(src: string): StrictFenceToken | null {
     // #93 defines EOF payload as the exact LF-normalized bytes after the
     // opener, including a caller-supplied terminal LF.
     ...deindentFencePayload(content, openerIndent),
+    xFenceClosure: "end_of_input",
+    xFenceDigestSourceLength: src.length,
   };
 }
 
@@ -447,8 +474,8 @@ function validateListSourceBoundaries(positioned: PositionedArticleToken[]): voi
   }
 }
 
-/** Lexer output must account for every body byte exactly once and in order. */
-function lexBody(body: string, sourceLineOffset: number): PositionedArticleToken[] {
+/** Root lexer output must account for every body byte exactly once and in order. */
+function lexBodyRoots(body: string, sourceLineOffset: number): PositionedArticleToken[] {
   let values: unknown[];
   try {
     values = articleParser.lexer(body) as unknown[];
@@ -494,6 +521,11 @@ function lexBody(body: string, sourceLineOffset: number): PositionedArticleToken
       "The X Article Markdown parser left canonical caller bytes unmapped. No artifact or native draft was created.",
     );
   }
+  return positioned;
+}
+
+function lexBody(body: string, sourceLineOffset: number): PositionedArticleToken[] {
+  const positioned = lexBodyRoots(body, sourceLineOffset);
   validateBodyAtxHeadingEdges(positioned);
   validateListSourceBoundaries(positioned);
   for (const entry of positioned) {
@@ -906,7 +938,12 @@ function classifyArticle<T>(operation: () => T): T {
 function codeBlock(
   positioned: PositionedArticleToken,
   index: number,
-): { block: Extract<ArticleBlock, { kind: "code" }>; flag: CodeBlockFlag } {
+  documentSourceLineOffset: number,
+): {
+  block: Extract<ArticleBlock, { kind: "code" }>;
+  flag: ArticleCodeBlockFlag;
+  codeLinkSource: ArticleCodeLinkSource;
+} {
   const { token, sourceLine } = positioned;
   if (token.codeBlockStyle === "indented") {
     throw articleError(
@@ -923,7 +960,12 @@ function codeBlock(
     typeof token.xFenceSourceLength !== "number" ||
     !Number.isSafeInteger(token.xFenceSourceLength) ||
     token.xFenceSourceLength <= 0 ||
-    token.xFenceSourceLength > token.raw.length
+    token.xFenceSourceLength > token.raw.length ||
+    (token.xFenceClosure !== "explicit" && token.xFenceClosure !== "end_of_input") ||
+    typeof token.xFenceDigestSourceLength !== "number" ||
+    !Number.isSafeInteger(token.xFenceDigestSourceLength) ||
+    token.xFenceDigestSourceLength <= 0 ||
+    token.xFenceDigestSourceLength > token.xFenceSourceLength
   ) {
     throw articleError(
       "x_article_fenced_code_boundary_unsupported",
@@ -934,6 +976,7 @@ function codeBlock(
     );
   }
   const fenceRaw = token.raw.slice(0, token.xFenceSourceLength);
+  const digestSource = token.raw.slice(0, token.xFenceDigestSourceLength);
   const openerLine = fenceRaw.split("\n", 1)[0] ?? "";
   const opener = supportedFenceOpener(openerLine);
   if (!opener) {
@@ -987,21 +1030,91 @@ function codeBlock(
         "No artifact or native draft was created.",
     );
   }
-  // Preserve the pre-#96 advisory spelling. General terminal-safe
-  // lang/preview bounding belongs to the immediately stacked issue #95.
-  const preview = (token.text.split("\n", 1)[0] ?? "").trim();
+  // Preserve #96's full CommonMark info spelling and deindented first payload
+  // line. Only ASCII spaces/tabs are advisory-edge whitespace; Unicode
+  // control/format/separator characters must remain visible via escaping.
+  const rawPreview = (token.text.split("\n", 1)[0] ?? "")
+    .replace(/^[ \t]+|[ \t]+$/gu, "");
+  const surrogateOffset = unpairedSurrogateOffset(digestSource);
+  if (surrogateOffset !== -1) {
+    const surrogateLine = sourceLine + countNewlines(digestSource.slice(0, surrogateOffset));
+    throw articleError(
+      "x_article_code_advisory_unrepresentable",
+      `unpaired surrogate in fenced source at source line ${surrogateLine}`,
+      "fenced source whose LF-normalized UTF-16 text has an unambiguous UTF-8 encoding",
+      `X Article fenced source contains an unpaired surrogate at source line ${surrogateLine}, so a complete UTF-8 digest is unavailable. ` +
+        "No artifact or native draft was created.",
+    );
+  }
+  const safeInfo = terminalSafeBoundedArticleCodeEvidence(
+    info,
+    X_CODE_INFO_MAX_CODE_POINTS,
+  );
+  const safePreview = terminalSafeBoundedArticleCodeEvidence(
+    rawPreview,
+    X_CODE_PREVIEW_MAX_CODE_POINTS,
+  );
+  const sourceLineCount = countNewlines(digestSource) +
+    (digestSource.endsWith("\n") ? 0 : 1);
+  if (sourceLineCount <= 0) {
+    throw articleError(
+      "x_article_code_advisory_unrepresentable",
+      `empty fenced source identity at source line ${sourceLine}`,
+      "a non-empty exact LF-normalized fenced source slice",
+      `The X Article code advisory at source line ${sourceLine} has no representable source identity. ` +
+        "No artifact or native draft was created.",
+    );
+  }
+  const sourceEndLine = sourceLine + sourceLineCount - 1;
+  const markdownStartLine = sourceLine - documentSourceLineOffset;
+  const markdownEndLine = markdownStartLine + sourceLineCount - 1;
+  if (
+    !Number.isSafeInteger(sourceEndLine) ||
+    !Number.isSafeInteger(markdownStartLine) ||
+    !Number.isSafeInteger(markdownEndLine) ||
+    markdownStartLine <= 0
+  ) {
+    throw articleError(
+      "x_article_code_advisory_unrepresentable",
+      "unrepresentable fenced-code line evidence",
+      "positive safe-integer original and canonical source-line bounds",
+      "An X Article code advisory has line evidence outside the supported local range. " +
+        "No artifact or native draft was created.",
+    );
+  }
+  const safeLang = safeInfo.value || undefined;
   return {
     block: {
       kind: "code" as const,
       index,
-      lang: info || undefined,
+      lang: safeLang,
       text: token.text,
     },
     flag: {
+      kind: "article_code_block",
       index,
-      lang: info || undefined,
-      preview,
+      lang: safeLang,
+      preview: safePreview.value,
       sourceLine,
+      sourceEndLine,
+      sourceLineCount,
+      markdownStartLine,
+      markdownEndLine,
+      fence: opener[2][0] === "`" ? "backtick" : "tilde",
+      closure: token.xFenceClosure,
+      sourceTerminalNewline: digestSource.endsWith("\n"),
+      infoString: safeInfo.value || null,
+      infoStringTruncated: safeInfo.truncated,
+      previewTruncated: safePreview.truncated,
+      digestNormalization: "lf_normalized_exact_fence_source",
+      normalizedSourceSha256: createHash("sha256")
+        .update(digestSource, "utf8")
+        .digest("hex"),
+    },
+    codeLinkSource: {
+      codeBlockIndex: index,
+      infoString: info,
+      codeText: token.text,
     },
   };
 }
@@ -1034,13 +1147,18 @@ function addBlock(context: ArticleParseContext, blocks: ArticleBlock[], block: A
   blocks.push(block);
 }
 
-function convertBody(positioned: PositionedArticleToken[]): {
+function convertBody(
+  positioned: PositionedArticleToken[],
+  documentSourceLineOffset: number,
+): {
   blocks: ArticleBlock[];
-  codeFlags: CodeBlockFlag[];
+  codeFlags: ArticleCodeBlockFlag[];
+  codeLinkSources: ArticleCodeLinkSource[];
 } {
   const context: ArticleParseContext = { blockCount: 0, runCount: 0 };
   const blocks: ArticleBlock[] = [];
-  const codeFlags: CodeBlockFlag[] = [];
+  const codeFlags: ArticleCodeBlockFlag[] = [];
+  const codeLinkSources: ArticleCodeLinkSource[] = [];
 
   for (const entry of positioned) {
     const { token, sourceLine } = entry;
@@ -1121,17 +1239,23 @@ function convertBody(positioned: PositionedArticleToken[]): {
         break;
       }
       case "code": {
-        if (codeFlags.length >= ARTICLE_MAX_FLAGS) {
+        if (codeFlags.length >= X_ARTICLE_CODE_ADVISORY_COUNT_MAX) {
           throw articleError(
-            "x_article_structure_oversized",
-            "too many fenced-code advisories",
-            `at most ${ARTICLE_MAX_FLAGS} fenced code blocks`,
-            "X Article Markdown has too many fenced code blocks. No artifact or native draft was created.",
+            "x_article_code_advisory_oversized",
+            "too many complete fenced-code advisories",
+            `at most ${X_ARTICLE_CODE_ADVISORY_COUNT_MAX} fenced code blocks with complete evidence`,
+            "X Article Markdown has too many code blocks for a complete bounded advisory receipt. " +
+              "No artifact or native draft was created.",
           );
         }
-        const mapped = codeBlock(entry, codeFlags.length + 1);
+        const mapped = codeBlock(
+          entry,
+          codeFlags.length + 1,
+          documentSourceLineOffset,
+        );
         addBlock(context, blocks, mapped.block);
         codeFlags.push(mapped.flag);
+        codeLinkSources.push(mapped.codeLinkSource);
         break;
       }
       case "html":
@@ -1142,9 +1266,19 @@ function convertBody(positioned: PositionedArticleToken[]): {
         throw unsupportedBlock(token.type, sourceLine);
     }
   }
+  if (articleCodeAdvisoryRenderSize(codeFlags) > X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS) {
+    throw articleError(
+      "x_article_code_advisory_oversized",
+      "complete fenced-code advisory receipt exceeds the local output bound",
+      `at most ${X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS} UTF-16 code units of complete advisory evidence`,
+      "X Article code advisory evidence exceeds the bounded receipt size. " +
+        "No artifact or native draft was created.",
+    );
+  }
   return {
     blocks,
     codeFlags,
+    codeLinkSources,
   };
 }
 
@@ -1159,20 +1293,14 @@ function bareUrlCandidates(value: string): string[] {
   return urls;
 }
 
-function codeAdvisoryCandidates(value: string): Array<{ url: string; text?: string }> {
-  const candidates: Array<{ url: string; text?: string }> = [];
-  for (const match of value.matchAll(/\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/gu)) {
-    candidates.push({ url: match[2], ...(match[1] ? { text: match[1] } : {}) });
-  }
-  for (const url of bareUrlCandidates(value)) candidates.push({ url });
-  return candidates;
-}
-
-function linkFlags(blocks: ArticleBlock[]): LinkFlag[] {
+function linkFlags(
+  blocks: ArticleBlock[],
+  codeLinkSources: ArticleCodeLinkSource[],
+): LinkFlag[] {
   const flags: LinkFlag[] = [];
-  const seen = new Set<string>();
-  const pushBare = (url: string, text?: string) => {
-    if (seen.has(url)) return;
+  const seenExact = new Set<string>();
+  const pushExact = (url: string, text?: string) => {
+    if (seenExact.has(url)) return;
     if (url.length > ARTICLE_HREF_MAX_CODE_UNITS) {
       throw articleError(
         "x_article_link_advisory_oversized",
@@ -1197,19 +1325,15 @@ function linkFlags(blocks: ArticleBlock[]): LinkFlag[] {
         "X Article Markdown has too many link advisories. No artifact or native draft was created.",
       );
     }
-    seen.add(url);
+    seenExact.add(url);
     flags.push({ url, ...(text ? { text } : {}), note: LINK_NOTE });
   };
+
+  // Exact active and non-code prose links are collected first. A code advisory
+  // with the same raw URL must never suppress the exact flag required to prove
+  // active-href correspondence at the immutable staging boundary.
   for (const block of blocks) {
-    if (block.kind === "code") {
-      // Code is excluded from native HTML/plain input, but URL-looking source
-      // still remains a detached advisory fact. It never becomes an active
-      // href and therefore does not receive the active-href policy.
-      for (const candidate of codeAdvisoryCandidates(`${block.lang ?? ""}\n${block.text}`)) {
-        pushBare(candidate.url, candidate.text);
-      }
-      continue;
-    }
+    if (block.kind === "code") continue;
     for (let index = 0; index < block.runs.length; index += 1) {
       const run = block.runs[index];
       if (run.href) {
@@ -1226,7 +1350,7 @@ function linkFlags(blocks: ArticleBlock[]): LinkFlag[] {
             "An X Article link label exceeds the local structural bound. No artifact or native draft was created.",
           );
         }
-        if (!seen.has(run.href)) {
+        if (!seenExact.has(run.href)) {
           if (flags.length >= ARTICLE_MAX_FLAGS) {
             throw articleError(
               "x_article_structure_oversized",
@@ -1235,49 +1359,68 @@ function linkFlags(blocks: ArticleBlock[]): LinkFlag[] {
               "X Article Markdown has too many link advisories. No artifact or native draft was created.",
             );
           }
-          seen.add(run.href);
+          seenExact.add(run.href);
           flags.push({ url: run.href, ...(label ? { text: label } : {}), note: LINK_NOTE });
         }
         continue;
       }
       for (const url of bareUrlCandidates(run.text)) {
-        pushBare(url);
+        pushExact(url);
       }
     }
   }
+
+  // Code is excluded from native HTML/plain input. URL-looking source stays
+  // inert, provenance-tagged advisory data whose full identity is covered by
+  // the containing block's exact digest; active prose href bytes remain exact.
+  const codeFlags = collectXArticleCodeLinkAdvisories(codeLinkSources);
+  if (codeFlags === null || flags.length + codeFlags.length > ARTICLE_MAX_FLAGS) {
+    throw articleError(
+      "x_article_structure_oversized",
+      "too many link advisories",
+      `at most ${ARTICLE_MAX_FLAGS} link advisories`,
+      "X Article Markdown has too many link advisories. No artifact or native draft was created.",
+    );
+  }
+  flags.push(...codeFlags);
   return flags;
 }
 
 function normalizedSourceLineOffset(value: number): number {
-  return Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
+  if (!Number.isFinite(value)) return 0;
+  const offset = Math.max(0, Math.trunc(value));
+  if (!Number.isSafeInteger(offset)) {
+    throw articleError(
+      "x_article_code_advisory_unrepresentable",
+      "source-line offset exceeds the safe-integer range",
+      "a non-negative safe-integer source-line offset",
+      "The X Article source-line offset cannot be represented safely in advisory evidence. " +
+        "No artifact or native draft was created.",
+    );
+  }
+  return offset;
 }
 
 function validateStageTextBudget(
   markdown: string,
   title: string,
   blocks: ArticleBlock[],
-  codeFlags: CodeBlockFlag[],
+  codeFlags: ArticleCodeBlockFlag[],
   flags: LinkFlag[],
 ): void {
-  let total = markdown.length + title.length;
-  for (const block of blocks) {
-    if (block.kind === "code") {
-      total += block.text.length + (block.lang?.length ?? 0);
-      continue;
-    }
-    for (const run of block.runs) total += run.text.length + (run.href?.length ?? 0);
-  }
-  for (const flag of codeFlags) {
-    total += flag.preview.length + (flag.lang?.length ?? 0);
-  }
-  for (const flag of flags) {
-    total += flag.url.length + (flag.text?.length ?? 0) + flag.note.length;
-  }
-  if (total > ARTICLE_STAGE_TEXT_MAX_CODE_UNITS) {
+  const total = xArticleStageCopiedTextCodeUnits({
+    markdown,
+    title,
+    blocks,
+    codeFlags,
+    linkFlags: flags,
+    warnings: [],
+  });
+  if (total > X_ARTICLE_STAGE_TEXT_MAX_CODE_UNITS) {
     throw articleError(
       "x_article_structure_oversized",
       "Article structured text exceeds the local aggregate bound",
-      `at most ${ARTICLE_STAGE_TEXT_MAX_CODE_UNITS} copied UTF-16 code units`,
+      `at most ${X_ARTICLE_STAGE_TEXT_MAX_CODE_UNITS} copied UTF-16 code units`,
       "X Article structured text exceeds the local aggregate bound. No artifact or native draft was created.",
     );
   }
@@ -1295,7 +1438,10 @@ export function parseXArticleMarkdown(
     rejectConsumedSetextTitle(split, titleToken);
     validateTitleSourceBoundary(split.titleLine, titleToken, split.titleSourceLine);
     const title = titleText(titleToken, split.titleSourceLine);
-    const converted = convertBody(lexBody(split.body, split.bodySourceLineOffset));
+    const converted = convertBody(
+      lexBody(split.body, split.bodySourceLineOffset),
+      offset,
+    );
     const codeBlockCount = converted.blocks.reduce(
       (count, block) => count + (block.kind === "code" ? 1 : 0),
       0,
@@ -1308,7 +1454,24 @@ export function parseXArticleMarkdown(
         "X Article fenced-code parsing produced inconsistent structured facts. No artifact or native draft was created.",
       );
     }
-    const flags = linkFlags(converted.blocks);
+    const flags = linkFlags(converted.blocks, converted.codeLinkSources);
+    const codeLinkFlags = flags.filter(
+      (flag): flag is LinkFlag & ArticleCodeLinkAdvisory =>
+        flag.advisorySource === "excluded_article_code",
+    );
+    if (
+      articleCodeAdvisoryRenderSize(converted.codeFlags) +
+        articleCodeLinkAdvisoryRenderSize(codeLinkFlags) >
+          X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS
+    ) {
+      throw articleError(
+        "x_article_code_advisory_oversized",
+        "complete Article code and code-link advisory output exceeds the local bound",
+        `at most ${X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS} UTF-16 code units of complete advisory evidence`,
+        "X Article code advisory evidence exceeds the bounded receipt size. " +
+          "No artifact or native draft was created.",
+      );
+    }
     validateStageTextBudget(markdown, title, converted.blocks, converted.codeFlags, flags);
     return {
       title,
@@ -1325,7 +1488,7 @@ export function parseXArticleMarkdown(
 export function parseXArticleBlocks(body: string): ArticleBlock[] {
   return classifyArticle(() => {
     const normalized = normalizedArticleMarkdown(body);
-    return convertBody(lexBody(normalized, 0)).blocks;
+    return convertBody(lexBody(normalized, 0), 0).blocks;
   });
 }
 

@@ -4,6 +4,7 @@ import type { BrowserContext, Locator, Page } from "playwright";
 import { executeXDraftRealRun } from "../commands/draft.js";
 import {
   generateContent,
+  renderForInspection,
   type ArticleBlock,
   type GeneratedContent,
   type InlineRun,
@@ -206,6 +207,81 @@ test("valid empty explicit and EOF Article fences survive snapshot accounting", 
     assert.equal(snapshot.receiptCodeBlockCount, 1);
     assert.equal(snapshot.html, "");
     assert.equal(snapshot.plain, "");
+  }
+});
+
+test("canonical fence provenance rejects complete and partial structured-code omission", async () => {
+  const source = [
+    "# Canonical code provenance",
+    "",
+    "Visible body.",
+    "",
+    "```txt",
+    "RAW_ANSI_CANARY_\u001b[31m",
+    "```",
+    "",
+    "~~~url",
+    "https://example.test/private",
+  ].join("\n");
+  const base = await generateContent(source, { format: "article" });
+  assert.ok(base.article);
+
+  const omitAll = cloneContent(base);
+  omitAll.article!.blocks = omitAll.article!.blocks.filter(
+    (block) => block.kind !== "code",
+  );
+  omitAll.article!.codeBlockCount = 0;
+  omitAll.codeFlags = [];
+  omitAll.linkFlags = omitAll.linkFlags.filter(
+    (flag) => flag.advisorySource !== "excluded_article_code",
+  );
+  assert.throws(
+    () => snapshotXArticleStageInput(omitAll, "article"),
+    (error: unknown) =>
+      error instanceof XArticleStageSnapshotError &&
+      error.reason === "accounting_mismatch",
+  );
+  const failedInspection = renderForInspection(omitAll);
+  assert.match(failedInspection, /failed closed/i);
+  assert.doesNotMatch(failedInspection, /RAW_ANSI_CANARY|\u001b\[31m/);
+
+  const omitSecond = cloneContent(base);
+  omitSecond.article!.blocks = omitSecond.article!.blocks.filter(
+    (block) => block.kind !== "code" || block.index === 1,
+  );
+  omitSecond.article!.codeBlockCount = 1;
+  omitSecond.codeFlags = omitSecond.codeFlags.slice(0, 1);
+  omitSecond.linkFlags = omitSecond.linkFlags.filter(
+    (flag) => flag.advisorySource !== "excluded_article_code" ||
+      flag.codeBlockIndex === 1,
+  );
+  assert.throws(
+    () => snapshotXArticleStageInput(omitSecond, "article"),
+    (error: unknown) =>
+      error instanceof XArticleStageSnapshotError &&
+      error.reason === "accounting_mismatch",
+  );
+});
+
+test("canonical parser rejects nested and raw-HTML pseudo-fence omission without rendering bytes", async () => {
+  const base = await generateContent("# Parser boundary\n\nVisible body.", {
+    format: "article",
+  });
+  for (const markdown of [
+    "# Parser boundary\n\n> ```txt\n> NESTED_PRIVATE_CANARY\n> ```",
+    "# Parser boundary\n\n<div>\n```txt\nHTML_PRIVATE_CANARY\n```\n</div>",
+  ]) {
+    const candidate = cloneContent(base);
+    candidate.article!.markdown = markdown;
+    assert.throws(
+      () => snapshotXArticleStageInput(candidate, "article"),
+      (error: unknown) =>
+        error instanceof XArticleStageSnapshotError &&
+        error.reason === "accounting_mismatch",
+    );
+    const inspection = renderForInspection(candidate);
+    assert.match(inspection, /failed closed/i);
+    assert.doesNotMatch(inspection, /NESTED_PRIVATE_CANARY|HTML_PRIVATE_CANARY/);
   }
 });
 
@@ -987,9 +1063,10 @@ test("unsafe active hrefs fail before loader while supported percent bytes remai
     "https://example.com/a%ZZ?q=%0A%09",
     "https://example.com/%E2%80%AEevil",
   ]) {
-    const safe = cloneContent(base);
-    firstLinkedRun(safe).href = exact;
-    safe.linkFlags[0].url = exact;
+    const safe = await generateContent(
+      `# Link policy\n\n[linked](${exact})`,
+      { format: "article" },
+    );
     const snapshot = snapshotXArticleStageInput(safe, "article");
     assert.equal(firstLinkedRun(snapshot.content).href, exact);
     assert.equal(
@@ -1025,10 +1102,23 @@ test("unsafe URL-looking advisories inside excluded code never become active anc
   ].join("\n");
   const content = await generateContent(source, { format: "article" });
   assert.equal(content.linkFlags.length, 4);
-  content.linkFlags.push({
+  assert.equal(content.linkFlags[0]?.advisorySource, undefined);
+  assert.deepEqual(
+    content.linkFlags.slice(1).map((flag) => flag.advisorySource),
+    ["excluded_article_code", "excluded_article_code", "excluded_article_code"],
+  );
+
+  const forged = cloneContent(content);
+  forged.linkFlags.push({
     url: "javascript:advisory-only",
     note: "Advisory-only fixture; never an active editor anchor.",
   });
+  assert.throws(
+    () => snapshotXArticleStageInput(forged, "article"),
+    (error: unknown) =>
+      error instanceof XArticleStageSnapshotError &&
+      error.reason === "accounting_mismatch",
+  );
 
   const snapshot = snapshotXArticleStageInput(content, "article");
   assert.equal(

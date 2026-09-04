@@ -253,9 +253,16 @@ test("code-source URL advisories remain detached while code never enters native 
       "https://example.com/private",
       "https://example.com/info",
       "https://user:secret@example.com/credentialed",
-      `https://example.com/\u202eadvisory`,
+      "https://example.com/\\u{202e}advisory",
     ],
   );
+  assert.equal(content.linkFlags[0]?.advisorySource, undefined);
+  for (const flag of content.linkFlags.slice(1)) {
+    assert.equal(flag.advisorySource, "excluded_article_code");
+    assert.equal(flag.codeBlockIndex, 1);
+    assert.equal(flag.urlTruncated, false);
+    assert.equal(flag.textTruncated, false);
+  }
   const snapshot = snapshotXArticleStageInput(content, "article");
   assert.equal(
     snapshot.html,
@@ -754,7 +761,20 @@ test("title formatting, missing titles, duplicate definitions, and structural ex
   await rejectedArticle(oversizedCode, "x_article_code_block_oversized");
 
   const oversizedAdvisoryUrl = "# T\n\n```txt\nhttps://example.com/" + "x".repeat(8_193);
-  await rejectedArticle(oversizedAdvisoryUrl, "x_article_link_advisory_oversized");
+  const boundedAdvisory = await generateContent(oversizedAdvisoryUrl, {
+    format: "article",
+  });
+  const codeLink = boundedAdvisory.linkFlags.find(
+    (flag) => flag.advisorySource === "excluded_article_code",
+  );
+  assert.ok(codeLink);
+  assert.equal(Array.from(codeLink.url).length, 512);
+  assert.equal(codeLink.urlTruncated, true);
+  assert.equal(codeLink.textTruncated, false);
+  assert.equal(
+    boundedAdvisory.article?.blocks.find((block) => block.kind === "code")?.text,
+    "https://example.com/" + "x".repeat(8_193),
+  );
 
   const oversizedFormattedLinkLabel =
     "# T\n\n[" + "a".repeat(600_000) + "**" + "b".repeat(600_000) +

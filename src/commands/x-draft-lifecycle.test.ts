@@ -5,6 +5,7 @@ import {
   type XDraftRealRunDependencies,
 } from "./draft.js";
 import { generateContent, type GeneratedContent, type XFormat } from "../x/content.js";
+import { snapshotXArticleStageInput } from "../x/articleStageSnapshot.js";
 import type { StageDraftResult } from "../x/draftPoster.js";
 import {
   isXDraftStageError,
@@ -67,7 +68,27 @@ function articleHandoff(
   },
   codeBlockCount: number | "many" = 0,
 ): XArticleDraftHandoff {
-  return { body: "rich_html", codeBlockCount, cover };
+  return {
+    body: "rich_html",
+    codeBlockCount,
+    codeAdvisories: [],
+    codeLinkAdvisories: [],
+    cover,
+  };
+}
+
+function articleHandoffFor(
+  generated: GeneratedContent,
+  cover: XArticleDraftHandoff["cover"] = articleHandoff().cover,
+): XArticleDraftHandoff {
+  const snapshot = snapshotXArticleStageInput(generated, "article");
+  return {
+    body: "rich_html",
+    codeBlockCount: snapshot.receiptCodeBlockCount,
+    codeAdvisories: snapshot.codeAdvisories,
+    codeLinkAdvisories: snapshot.codeLinkAdvisories,
+    cover,
+  };
 }
 
 async function content(format: XFormat): Promise<GeneratedContent> {
@@ -92,7 +113,7 @@ function stageResult(
     savePhase,
     note: "Bounded verified draft note.",
     draftRowEvidence,
-    ...(generated.format === "article" ? { articleHandoff: articleHandoff() } : {}),
+    ...(generated.format === "article" ? { articleHandoff: articleHandoffFor(generated) } : {}),
     ...overrides,
   } as StageDraftResult;
 }
@@ -368,96 +389,86 @@ test("resolved unverified results never print poster notes; verified is the only
 });
 
 test("verified and returned-unverified Article receipts preserve only closed handoff facts", async () => {
-  const generated = await content("article");
   const cases: Array<{
-    handoff: XArticleDraftHandoff;
+    codeBlockCount: number;
+    cover?: XArticleDraftHandoff["cover"];
     expected: RegExp[];
   }> = [
     {
-      handoff: articleHandoff(undefined, 1),
+      codeBlockCount: 1,
       expected: [/heroAction=no supported cover selected/, /codeBlockCount=1/, /1 code block NOT auto-formatted/, /HERO IMAGE MISSING/],
     },
     {
-      handoff: articleHandoff(undefined, "many"),
-      expected: [/codeBlockCount=>10000/, /More than 10000 code blocks NOT auto-formatted/, /HERO IMAGE MISSING/],
-    },
-    {
-      handoff: articleHandoff({
+      codeBlockCount: 2,
+      cover: {
         status: "upload_incomplete",
         ratio: "outside_5_2",
         width: 1200,
         height: 600,
         crop: "not_observed",
-      }, 2),
+      },
       expected: [/heroAction=upload action incomplete; attachment unconfirmed/, /codeBlockCount=2/, /2 code blocks NOT auto-formatted/, /HERO IMAGE RATIO/, /HERO UPLOAD INCOMPLETE/],
     },
     {
-      handoff: articleHandoff({
+      codeBlockCount: 0,
+      cover: {
         status: "upload_incomplete",
         ratio: "unknown",
         width: null,
         height: null,
         crop: "not_observed",
-      }),
+      },
       expected: [/heroAction=upload action incomplete; attachment unconfirmed/, /HERO IMAGE RATIO UNVERIFIED/, /HERO UPLOAD INCOMPLETE/],
     },
     {
-      handoff: articleHandoff({
+      codeBlockCount: 0,
+      cover: {
         status: "attached",
         ratio: "within_5_2",
         width: 1500,
         height: 600,
         crop: "unverified",
-      }),
+      },
       expected: [/heroAction=upload action returned; attachment and persistence unverified/, /codeBlockCount=0/, /HERO CROP UNVERIFIED/],
     },
     {
-      handoff: articleHandoff({
+      codeBlockCount: 0,
+      cover: {
         status: "attached",
         ratio: "within_5_2",
         width: 1500,
         height: 600,
         crop: "applied",
-      }),
+      },
       expected: [/heroAction=upload action returned; attachment and persistence unverified/, /Hero upload and crop\/apply actions returned/, /cover persistence remains manual-review evidence only/],
     },
   ];
   for (const fixture of cases) {
-    const expectedCount = fixture.handoff.codeBlockCount === "many"
-      ? 10_001
-      : fixture.handoff.codeBlockCount;
-    const fixtureGenerated: GeneratedContent = {
-      ...generated,
-      codeFlags: Array.from({ length: expectedCount }, (_, index) => ({
-        index: index + 1,
-        preview: "",
-        sourceLine: index + 1,
-      })),
-      article: {
-        ...generated.article!,
-        blocks: [
-          ...generated.article!.blocks,
-          ...Array.from({ length: expectedCount }, (_, index) => ({
-            kind: "code" as const,
-            index: index + 1,
-            text: "",
-          })),
-        ],
-        codeBlockCount: expectedCount,
-      },
-    };
+    const blocks = Array.from(
+      { length: fixture.codeBlockCount },
+      (_, index) => `\n\n\`\`\`txt\nreceipt-${index + 1}\n\`\`\``,
+    ).join("");
+    const fixtureGenerated = await generateContent(
+      `# Offline article\n\nBody prefix for persistence matching.${blocks}`,
+      { format: "article" },
+    );
+    const handoff = articleHandoffFor(fixtureGenerated, fixture.cover);
     for (const phase of ["verified", "save_delivered_unverified"] as const) {
       const outcome = await executeXDraftRealRun(
         { content: fixtureGenerated },
         dependencies(async () => async () => stageResult(fixtureGenerated, phase, {
-          articleHandoff: fixture.handoff,
+          articleHandoff: handoff,
           note: RAW_CANARY,
         })),
       );
       assert.equal(outcome.kind, phase === "verified" ? "staged" : "save_incomplete");
       assert.equal(outcome.exitCode, phase === "verified" ? 0 : 1);
-      assert.deepEqual(outcome.articleHandoff, fixture.handoff);
+      assert.deepEqual(outcome.articleHandoff, handoff);
       for (const pattern of fixture.expected) assert.match(outcome.message, pattern);
+      if (fixture.codeBlockCount > 0) {
+        assert.match(outcome.message, /LF-normalized exact fence source sha256=[a-f0-9]{64}/);
+        assert.match(outcome.message, /info=.*truncated=false.*preview=.*truncated=false/);
+      }
       if (phase === "save_delivered_unverified") {
         assert.match(outcome.message, /native Save\/autosave action returned, but persistence was not verified/i);
         assert.match(outcome.message, /compare X Articles → Drafts manually in the exact CLI-owned profile/);
@@ -517,18 +528,19 @@ test("malformed and stateful Article handoff facts cannot leak or change after v
         return statusReads === 1 ? "upload_incomplete" : "attached";
       },
     });
+    const baseHandoff = articleHandoffFor(generated);
     const outcome = await executeXDraftRealRun(
       { content: generated },
       dependencies(async () => async () => stageResult(generated, phase, {
-        articleHandoff: { body: "rich_html", codeBlockCount: 0, cover } as never,
+        articleHandoff: { ...baseHandoff, cover } as never,
         note: RAW_CANARY,
       })),
     );
-    assert.equal(statusReads, 1);
-    assert.equal(outcome.kind, phase === "verified" ? "staged" : "save_incomplete");
-    assert.equal(outcome.exitCode, phase === "verified" ? 0 : 1);
-    assert.equal(outcome.articleHandoff?.cover.status, "upload_incomplete");
-    assert.match(outcome.message, /HERO UPLOAD INCOMPLETE/);
+    assert.equal(statusReads, 0);
+    assert.equal(outcome.kind, "save_incomplete");
+    assert.equal(outcome.savePhase, "save_delivery_unknown");
+    assert.equal(outcome.exitCode, 1);
+    assert.equal(outcome.articleHandoff, null);
     assert.doesNotMatch(outcome.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
   }
 });
@@ -615,7 +627,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
         { content: generated },
         dependencies(async () => async () => nested),
       );
-      assert.equal(nestedReads, format === "article" ? 1 : 0);
+      assert.equal(nestedReads, 0);
       assert.equal(nestedOutcome.kind, "save_incomplete");
       assert.equal(nestedOutcome.savePhase, "save_delivery_unknown");
       assert.equal(nestedOutcome.saveMechanism, expectedMechanism);

@@ -371,7 +371,7 @@ test("mismatched or stateful returned Article counts cannot print a false receip
     { content },
     { async loadStageDraft() { return async () => stateful; } },
   );
-  assert.equal(countReads, 1);
+  assert.equal(countReads, 0);
   assert.equal(outcome.savePhase, "save_delivery_unknown");
   assert.equal(outcome.articleHandoff, null);
   assert.doesNotMatch(outcome.message, /codeBlockCount|code block NOT auto-formatted/);
