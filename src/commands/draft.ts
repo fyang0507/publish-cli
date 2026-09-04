@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { writeFileSync } from "node:fs";
+import { isProxy } from "node:util/types";
 import { dirname, basename, extname, join, resolve } from "node:path";
 import {
   generateContent,
@@ -22,11 +23,13 @@ import {
   type XDraftSavePhase,
 } from "../x/saveProgress.js";
 import type { StageDraftOptions, StageDraftResult } from "../x/draftPoster.js";
+import { snapshotXNonArticleStageResult } from "../x/nonArticleStageResultSnapshot.js";
 import {
   normalizeXArticleStageSnapshotFailure,
   snapshotXArticleStageInput,
   snapshotXContentFormat,
-  snapshotXNonArticleStageContent,
+  snapshotXNonArticleExecuteRequest,
+  type XNonArticleStageSnapshot,
   type XArticleStageSnapshotFailure,
 } from "../x/articleStageSnapshot.js";
 
@@ -251,8 +254,24 @@ export async function executeXDraftRealRun(
 ): Promise<XDraftRealRunOutcome> {
   let callerContent: GeneratedContent;
   let format: GeneratedContent["format"];
+  if (typeof input !== "object" || input === null) {
+    return unclassifiedSnapshotFailure("not_plain_object");
+  }
   try {
-    callerContent = input.content;
+    if (isProxy(input)) return unclassifiedSnapshotFailure("proxy_object");
+    if (Array.isArray(input)) return unclassifiedSnapshotFailure("not_plain_object");
+    if (Object.getPrototypeOf(input) !== Object.prototype) {
+      return unclassifiedSnapshotFailure("not_plain_object");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(input, "content");
+    if (!descriptor || !descriptor.enumerable) {
+      return unclassifiedSnapshotFailure("unexpected_property");
+    }
+    // #98 permits one Article content-slot observation. Non-Article accessors
+    // are rejected by the complete request snapshot below after this sole read.
+    callerContent = ("value" in descriptor
+      ? descriptor.value
+      : Reflect.get(input, "content")) as GeneratedContent;
   } catch {
     return unclassifiedSnapshotFailure("property_read_failed");
   }
@@ -263,6 +282,7 @@ export async function executeXDraftRealRun(
   }
 
   let stageContent: GeneratedContent;
+  let nonArticleSnapshot: XNonArticleStageSnapshot | null = null;
   let expectedArticleCodeBlockCount: number | "many" | null = null;
   try {
     if (format === "article") {
@@ -270,7 +290,12 @@ export async function executeXDraftRealRun(
       stageContent = snapshot.content;
       expectedArticleCodeBlockCount = snapshot.receiptCodeBlockCount;
     } else {
-      stageContent = snapshotXNonArticleStageContent(callerContent, format);
+      nonArticleSnapshot = snapshotXNonArticleExecuteRequest(
+        input,
+        callerContent,
+        format,
+      );
+      stageContent = nonArticleSnapshot.content;
     }
   } catch (error) {
     return beforeSaveFailure(
@@ -279,24 +304,26 @@ export async function executeXDraftRealRun(
     );
   }
 
-  // Primitives are copied before the awaited loader so later mutation of the
-  // caller-owned input object cannot change the staging request.
+  // Article retains its separately reviewed #98 option boundary. Non-Article
+  // options were copied as part of the complete request snapshot above.
   let inspect: boolean | undefined;
   let basePath: string | undefined;
-  try {
-    inspect = input.inspect;
-    basePath = input.basePath;
-  } catch {
-    return format === "article"
-      ? beforeSaveFailure(format, "property_read_failed")
-      : beforeSaveFailure(format);
-  }
-  if (
-    format === "article" &&
-    ((inspect !== undefined && typeof inspect !== "boolean") ||
-      (basePath !== undefined && (typeof basePath !== "string" || basePath.length > 1_000_000)))
-  ) {
-    return beforeSaveFailure(format, "invalid_value");
+  if (format === "article") {
+    try {
+      inspect = input.inspect;
+      basePath = input.basePath;
+    } catch {
+      return beforeSaveFailure(format, "property_read_failed");
+    }
+    if (
+      (inspect !== undefined && typeof inspect !== "boolean") ||
+      (basePath !== undefined && (typeof basePath !== "string" || basePath.length > 1_000_000))
+    ) {
+      return beforeSaveFailure(format, "invalid_value");
+    }
+  } else {
+    inspect = nonArticleSnapshot!.inspect;
+    basePath = nonArticleSnapshot!.basePath;
   }
 
   let stageDraft: Awaited<ReturnType<XDraftRealRunDependencies["loadStageDraft"]>>;
@@ -337,10 +364,10 @@ export async function executeXDraftRealRun(
 
   let returned: StageDraftResult;
   try {
-    returned = await stageDraft(stageContent, {
-      inspect,
-      basePath,
-    });
+    const stageOptions: StageDraftOptions = nonArticleSnapshot
+      ? nonArticleSnapshot.stageOptions
+      : { inspect, basePath };
+    returned = await stageDraft(stageContent, stageOptions);
   } catch (error) {
     // Only a rejection from the staging promise itself can carry typed phase
     // evidence. Once the promise resolves, result inspection is a separate,
@@ -364,45 +391,49 @@ export async function executeXDraftRealRun(
 
   let result: StageDraftResult;
   try {
-    if (typeof returned !== "object" || returned === null) {
-      return uncertainSaveOutcome(format, "save_delivery_unknown");
+    if (nonArticleSnapshot) {
+      const closedResult = snapshotXNonArticleStageResult(
+        returned,
+        nonArticleSnapshot.format,
+        nonArticleSnapshot.expectedPosts,
+      );
+      if (closedResult === null) {
+        return uncertainSaveOutcome(format, "save_delivery_unknown");
+      }
+      result = closedResult;
+    } else {
+      if (typeof returned !== "object" || returned === null) {
+        return uncertainSaveOutcome(format, "save_delivery_unknown");
+      }
+      // Article retains its independently reviewed #98 handoff boundary.
+      const candidate = {
+        format: returned.format,
+        posts: returned.posts,
+        saveMechanism: returned.saveMechanism,
+        savePhase: returned.savePhase,
+        draftRowEvidence: snapshotXDraftRowEvidence(returned.draftRowEvidence),
+        articleHandoff: snapshotXArticleDraftHandoff(
+          (returned as StageDraftResult & { articleHandoff?: unknown }).articleHandoff,
+        ),
+      };
+      if (
+        candidate.format !== format ||
+        candidate.posts !== 1 ||
+        candidate.saveMechanism !== "article_create_autosave" ||
+        !isXDraftReturnedSavePhase(candidate.savePhase) ||
+        candidate.draftRowEvidence === null ||
+        candidate.articleHandoff === null ||
+        candidate.articleHandoff.codeBlockCount !== expectedArticleCodeBlockCount ||
+        !isXDraftRowEvidenceCompatible(
+          candidate.saveMechanism,
+          candidate.savePhase,
+          candidate.draftRowEvidence,
+        )
+      ) {
+        return uncertainSaveOutcome(format, "save_delivery_unknown");
+      }
+      result = candidate as StageDraftResult;
     }
-    // Snapshot each untrusted port field once while exceptions are guarded.
-    // A proxy/stateful getter must not pass validation and later change the
-    // human receipt or manufacture a verified outcome.
-    const candidate = {
-      format: returned.format,
-      posts: returned.posts,
-      saveMechanism: returned.saveMechanism,
-      savePhase: returned.savePhase,
-      draftRowEvidence: snapshotXDraftRowEvidence(returned.draftRowEvidence),
-      articleHandoff: snapshotXArticleDraftHandoff(
-        (returned as StageDraftResult & { articleHandoff?: unknown }).articleHandoff,
-      ),
-    };
-    if (
-      candidate.format !== format ||
-      candidate.posts !== (format === "thread"
-        ? (stageContent.thread?.length ?? 0)
-        : 1) ||
-      candidate.saveMechanism !== (format === "article"
-        ? "article_create_autosave"
-        : "composer_close_save") ||
-      !isXDraftReturnedSavePhase(candidate.savePhase) ||
-      candidate.draftRowEvidence === null ||
-      (candidate.saveMechanism === "article_create_autosave" &&
-        candidate.articleHandoff === null) ||
-      (candidate.saveMechanism === "article_create_autosave" &&
-        candidate.articleHandoff?.codeBlockCount !== expectedArticleCodeBlockCount) ||
-      !isXDraftRowEvidenceCompatible(
-        candidate.saveMechanism,
-        candidate.savePhase,
-        candidate.draftRowEvidence,
-      )
-    ) {
-      return uncertainSaveOutcome(format, "save_delivery_unknown");
-    }
-    result = candidate as StageDraftResult;
   } catch {
     // A resolved result is untrusted data, not phase-bearing control flow.
     // Throwing top-level or nested getters therefore always mean uncertainty.

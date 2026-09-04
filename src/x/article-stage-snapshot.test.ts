@@ -1244,13 +1244,14 @@ test("only an exact canonical Article edit URL can reach verification", async ()
   }
 });
 
-test("non-Article roots are detached only enough to prevent loader-time Article flips", async () => {
+test("non-Article graphs are deeply detached before loader-time mutation", async () => {
   const hostileArticle = await generateContent("# Injected Article\n\nMUTATED ARTICLE BODY", {
     format: "article",
   });
   for (const format of ["tweet", "thread"] as const) {
     const original = await generateContent("Original transport text", { format });
     const nestedPayload = format === "tweet" ? original.tweet : original.thread;
+    const expectedNestedPayload = structuredClone(nestedPayload);
     let loaderCalls = 0;
     let stageCalls = 0;
     let articleEvents = 0;
@@ -1268,10 +1269,14 @@ test("non-Article roots are detached only enough to prevent loader-time Article 
             assert.equal(Object.isFrozen(stageContent), true);
             assert.equal(stageContent.format, format);
             assert.equal("article" in stageContent, false);
-            assert.equal(
+            assert.notEqual(
               format === "tweet" ? stageContent.tweet : stageContent.thread,
               nestedPayload,
-              "existing tweet/thread nested transport identity remains unchanged",
+              "tweet/thread transport must not retain caller-owned identity",
+            );
+            assert.deepEqual(
+              format === "tweet" ? stageContent.tweet : stageContent.thread,
+              expectedNestedPayload,
             );
             if ((stageContent as GeneratedContent).format === "article") articleEvents += 1;
             throw new XDraftStageError("save_not_attempted", "composer_close_save");

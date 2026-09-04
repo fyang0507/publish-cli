@@ -30,9 +30,10 @@ import {
   normalizeXArticleStageSnapshotFailure,
   snapshotXArticleStageInput,
   snapshotXContentFormat,
-  snapshotXNonArticleStageContent,
+  snapshotXNonArticleDirectStageRequest,
   XArticleStageSnapshotError,
   type XArticleStageSnapshot,
+  type XNonArticleStageSnapshot,
 } from "./articleStageSnapshot.js";
 export { htmlFromArticleBlocks } from "./articleStageSnapshot.js";
 import {
@@ -317,12 +318,13 @@ export async function stageDraft(
     const articleSnapshot = format === "article"
       ? snapshotXArticleStageInput(content, format)
       : null;
-    const stageContent = articleSnapshot
-      ? articleSnapshot.content
-      : snapshotXNonArticleStageContent(content, format);
-    const inspect = opts.inspect;
-    const force = opts.force;
-    const basePath = opts.basePath;
+    const nonArticleSnapshot = articleSnapshot
+      ? null
+      : snapshotXNonArticleDirectStageRequest(content, format, opts);
+    const stageContent = articleSnapshot?.content ?? nonArticleSnapshot!.content;
+    const inspect = articleSnapshot ? opts.inspect : nonArticleSnapshot!.inspect;
+    const force = articleSnapshot ? opts.force : nonArticleSnapshot!.force;
+    const basePath = articleSnapshot ? opts.basePath : nonArticleSnapshot!.basePath;
     if (
       articleSnapshot &&
       ((inspect !== undefined && typeof inspect !== "boolean") ||
@@ -337,7 +339,7 @@ export async function stageDraft(
       if (articleSnapshot) {
         return await stageArticleSnapshot(ctx, page, articleSnapshot, basePath);
       }
-      return await stageTweetOrThreadDraft(page, stageContent);
+      return await stageTweetOrThreadDraft(page, nonArticleSnapshot!);
     } finally {
       // Close only the page we opened; leave the persistent context alive so the
       // session stays warm for subsequent commands.
@@ -355,14 +357,9 @@ export async function stageDraft(
  */
 async function stageTweetOrThreadDraft(
   page: Page,
-  content: GeneratedContent,
+  snapshot: XNonArticleStageSnapshot,
 ): Promise<StageDraftResult> {
-  const posts =
-    content.format === "thread"
-      ? (content.thread ?? []).map((p) => p.text)
-      : content.tweet
-        ? [content.tweet.text]
-        : [];
+  const { format, posts, intendedFirstPostText } = snapshot;
 
   if (posts.length === 0) {
     throw new Error("No content to stage (empty tweet/thread).");
@@ -370,27 +367,27 @@ async function stageTweetOrThreadDraft(
 
   // Read-only baseline on the same page/context. Failure is retained as
   // unverified evidence and never prevents the later Save attempt.
-  const baseline = await captureDraftRowBaseline(page, posts[0]);
+  const baseline = await captureDraftRowBaseline(page, intendedFirstPostText);
   await page.goto(X_COMPOSER_SELECTORS.composeUrl, { waitUntil: "domcontentloaded" });
 
   await typePosts(page, posts);
 
   const saved = await saveAsDraft(
     page,
-    () => verifyDraftSaved(page, posts[0], baseline),
+    () => verifyDraftSaved(page, intendedFirstPostText, baseline),
   );
 
   return saved.savePhase === "verified"
     ? {
-        format: content.format,
+        format,
         posts: posts.length,
         saveMechanism: "composer_close_save",
         savePhase: "verified",
         draftRowEvidence: saved.draftRowEvidence,
-        note: `Saved via ${saved.value}. Full intended ${content.format === "thread" ? "first thread-row" : "tweet"} text was observed in one calibrated X Unsent row; review every row and post manually.`,
+        note: `Saved via ${saved.value}. Full intended ${format === "thread" ? "first thread-row" : "tweet"} text was observed in one calibrated X Unsent row; review every row and post manually.`,
       }
     : {
-        format: content.format,
+        format,
         posts: posts.length,
         saveMechanism: "composer_close_save",
         savePhase: "save_delivered_unverified",
@@ -405,7 +402,7 @@ async function stageTweetOrThreadDraft(
  * Shared by the tweet/thread path and the reply path (issue #8) so the typing +
  * thread-append logic isn't duplicated. Does NOT save or post.
  */
-async function typePosts(page: Page, posts: string[]): Promise<void> {
+async function typePosts(page: Page, posts: readonly string[]): Promise<void> {
   const firstBox = await tolerantLocator(page, X_COMPOSER_SELECTORS.tweetTextbox, "tweet text box");
   await firstBox.click();
   await typeText(page, firstBox, posts[0]);
