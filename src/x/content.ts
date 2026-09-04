@@ -965,13 +965,17 @@ function packingPieces(prose: string): string[] {
   for (const match of prose.matchAll(xCodePlaceholderRegex())) {
     const matchIndex = match.index;
     if (matchIndex > cursor) {
-      pieces.push(...(prose.slice(cursor, matchIndex).match(/\S+\s*|\s+/gu) ?? []));
+      for (const piece of prose.slice(cursor, matchIndex).matchAll(/\S+\s*|\s+/gu)) {
+        pieces.push(piece[0]);
+      }
     }
     pieces.push(match[0]);
     cursor = matchIndex + match[0].length;
   }
   if (cursor < prose.length) {
-    pieces.push(...(prose.slice(cursor).match(/\S+\s*|\s+/gu) ?? []));
+    for (const piece of prose.slice(cursor).matchAll(/\S+\s*|\s+/gu)) {
+      pieces.push(piece[0]);
+    }
   }
   return pieces;
 }
