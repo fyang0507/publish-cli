@@ -491,7 +491,7 @@ test("LinkedIn rejects empty/overflow conversion and surfaces real Markdown imag
   ]);
   assert.doesNotMatch(post.text, /inside-code\.png|angle-only/);
   assert.match(post.text, /Inline code: !\[literal\]\(inside-inline-code\.png\)\./);
-  assert.match(post.text, /Escaped: !\[literal\]\(escaped\.png\)\./);
+  assert.match(post.text, /Escaped: !literal \(escaped\.png\)\./);
   assert.match(post.text, /Balanced: balanced end\./);
   assert.match(post.text, /Escaped destination: escaped-paren end\./);
   assert.match(post.text, /Inline chart detail\./);
@@ -543,7 +543,7 @@ test("LinkedIn uses CommonMark image parsing without code/escape false positives
     post.imageFlags.map((flag) => flag.sourceLine),
     [1, 2, 3, 4, 5, 6, 7, 12, 17],
   );
-  assert.match(post.text, /Odd escape: !\[literal\]\(odd\.png\)\./);
+  assert.match(post.text, /Odd escape: !literal \(odd\.png\)\./);
   assert.match(post.text, /Inline code: !\[code\]\(code\.png\)\./);
   assert.doesNotMatch(post.text, /fenced\.png|\[img\]:|\[collapsed\]:|\[shortcut\]:|\[only\]:/);
   assert.doesNotMatch(post.text, /!\[only\]|only\.png/);
@@ -564,8 +564,8 @@ test("LinkedIn locates parent images before child code and escape tokens", () =>
   assert.deepEqual(
     post.imageFlags.map(({ alt, source }) => ({ alt, source })),
     [
-      { alt: "`run()` flow", source: "flow.png" },
-      { alt: "a \\! bang", source: "bang.png" },
+      { alt: "run() flow", source: "flow.png" },
+      { alt: "a ! bang", source: "bang.png" },
     ],
   );
 
@@ -577,17 +577,21 @@ test("LinkedIn locates parent images before child code and escape tokens", () =>
     { alt: "same", source: "same.png", sourceLine: 1 },
   ]);
 
-  const htmlLiteral = generatePost(
-    "Opening\n\n<div>\n![literal](inside-html.png)\n</div>\n\nClosing",
+  expectLocalProblem(
+    () => generatePost("Opening\n\n<div>\n![literal](inside-html.png)\n</div>\n\nClosing"),
+    {
+      code: "linkedin_raw_html_unsupported",
+      actual: 1,
+      unit: "parser_confirmed_occurrences",
+    },
   );
-  assert.deepEqual(htmlLiteral.imageFlags, [], "image-looking text in an HTML block is not media");
 });
 
 test("LinkedIn surfaces resolved reference-link destinations before definitions are removed", () => {
   const post = generatePost(
     "Check [the docs][reference] before launch.\n\n[reference]: https://example.com/docs\n",
   );
-  assert.equal(post.text, "Check [the docs][reference] before launch.");
+  assert.equal(post.text, "Check the docs (https://example.com/docs) before launch.");
   assert.deepEqual(
     post.linkFlags.map(({ url, text }) => ({ url, text })),
     [{ url: "https://example.com/docs", text: "the docs" }],

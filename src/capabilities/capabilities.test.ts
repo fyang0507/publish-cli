@@ -276,6 +276,12 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(linkedin, /intended draft with `--inspect`/);
   assert.match(linkedin, /recognized JPEG, PNG, GIF, or WebP magic\/header/);
   assert.match(linkedin, /dimension-unreadable, and extension-mismatch inputs are rejected locally/);
+  assert.match(linkedin, /deterministic CommonMark\/GFM parser owns link conversion and evidence/);
+  assert.match(linkedin, /full\/collapsed\/shortcut reference links, bare URLs, autolinks/);
+  assert.match(linkedin, /character references decode once/);
+  assert.match(linkedin, /Parser-confirmed raw HTML exits 2 before profile\/browser access/);
+  assert.match(linkedin, /Image evidence uses parser-normalized alt text/);
+  assert.match(linkedin, /exit 2 identifies only the constructs actually omitted/);
   assert.doesNotMatch(linkedin, /Run `publish linkedin info`|readiness\.ready/);
 
   const reddit = `${CHANNEL_INFO_SOURCES.reddit.cliBoundary}\n${CHANNEL_INFO_SOURCES.reddit.authentication}\n${CHANNEL_INFO_SOURCES.reddit.platformGuidance}`;
