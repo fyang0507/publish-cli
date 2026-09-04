@@ -282,6 +282,13 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(linkedin, /Parser-confirmed raw HTML exits 2 before profile\/browser access/);
   assert.match(linkedin, /Image evidence uses parser-normalized alt text/);
   assert.match(linkedin, /exit 2 identifies only the constructs actually omitted/);
+  assert.match(linkedin, /one LinkedIn-local closed save phase: `save_not_attempted`, `save_delivery_unknown`, `save_delivered_unverified`, or `verified`/);
+  assert.match(linkedin, /rejected Save click has unknown delivery/);
+  assert.match(linkedin, /complete text does not equal the complete intended text after only line-ending and NFC normalization/);
+  assert.match(linkedin, /Only positive full-text verification after reopening the composer exits 0/);
+  assert.match(linkedin, /Before any retry, manually compare LinkedIn Drafts in the exact same CLI-owned LinkedIn profile used by that run/);
+  assert.match(linkedin, /Only after that comparison may `--inspect` help diagnose selector drift/);
+  assert.match(linkedin, /Raw browser errors, selectors, page text, credentials, cookies, private paths/);
   assert.doesNotMatch(linkedin, /Run `publish linkedin info`|readiness\.ready/);
 
   const reddit = `${CHANNEL_INFO_SOURCES.reddit.cliBoundary}\n${CHANNEL_INFO_SOURCES.reddit.authentication}\n${CHANNEL_INFO_SOURCES.reddit.platformGuidance}`;

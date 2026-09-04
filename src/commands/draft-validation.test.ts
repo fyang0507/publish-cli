@@ -1712,6 +1712,11 @@ test("valid dry-runs also avoid platform/browser/API imports", () => {
     assert.match(linkedinHelp.stdout, /full\/collapsed\/shortcut reference, bare, and autolinks/);
     assert.match(linkedinHelp.stdout, /character references decode\s+once/);
     assert.match(linkedinHelp.stdout, /Parser-confirmed raw HTML exits 2 before profile\/browser access/);
+    assert.match(linkedinHelp.stdout, /Only a returned Save as draft action followed by a full intended-text match/);
+    assert.match(linkedinHelp.stdout, /rejected Save click has unknown\s+delivery/);
+    assert.match(linkedinHelp.stdout, /Both uncertain states exit 1 because a native draft may exist/);
+    assert.match(linkedinHelp.stdout, /manually compare LinkedIn Drafts in the exact same CLI-owned LinkedIn profile/);
+    assert.match(linkedinHelp.stdout, /--inspect is secondary diagnosis after comparison and cannot prove absence/);
     assert.doesNotMatch(output(linkedinHelp), /PLATFORM_IMPORT_BLOCKED/);
 
     const wechatInspection = runCli(fixture, [

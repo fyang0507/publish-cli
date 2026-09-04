@@ -33,6 +33,13 @@ import type { BrowserContext, Page, Locator } from "playwright";
 import { getBrowserContext, type EnsureSessionOptions } from "./session.js";
 import { tolerantLocator, optionalLocator, typeText } from "../x/draftPoster.js";
 import { snapshotLinkedInGeneratedPost, type GeneratedPost } from "./content.js";
+import {
+  LINKEDIN_DRAFT_SAVE_MECHANISM,
+  linkedInDraftStageError,
+  runLinkedInDraftSaveFlow,
+  type LinkedInDraftSaveFlowResult,
+  type LinkedInDraftStageResult,
+} from "./saveProgress.js";
 
 /**
  * Centralized composer/draft/media selectors. EVERY entry NEEDS LIVE CALIBRATION.
@@ -139,15 +146,7 @@ export interface StagePostOptions extends EnsureSessionOptions {
   media?: string[];
 }
 
-export interface StagePostResult {
-  format: "post";
-  /** Whether the post-save verification step matched the staged text in drafts. */
-  verified: boolean;
-  /** How many media files were attached (0 when none / attach step didn't resolve). */
-  mediaAttached: number;
-  /** Human-readable note about how the draft was saved / what to check. */
-  note: string;
-}
+export type StagePostResult = LinkedInDraftStageResult;
 
 const OPEN_TIMEOUT = 15_000;
 
@@ -261,66 +260,105 @@ async function attachMedia(page: Page, media: string[]): Promise<number> {
  * Save the current composer as a draft WITHOUT posting.
  *
  * Flow: click the composer Close → LinkedIn raises "Save this post as a draft?" →
- * click "Save as draft". Returns a short label of the path used, or null if the
- * flow didn't resolve.
+ * click "Save as draft". The Save click is its own delivery boundary: a
+ * rejected promise may still mean LinkedIn received the click.
  *
  * SAFEGUARD (mirrors X's saveAsDraft): if the "Save as draft" affordance does not
  * resolve, we do NOT guess at another button — a wrong click could Discard or
  * Post. We bail and leave it to a human.
  */
-async function saveAsDraftLinkedIn(page: Page): Promise<string | null> {
-  const close = await optionalLocator(page, LI_COMPOSER_SELECTORS.closeComposerButton, 5_000);
-  if (!close) return null;
-  await close.click();
-
-  const save = await optionalLocator(page, LI_COMPOSER_SELECTORS.saveDraftButton, 5_000);
-  if (!save) {
-    // The "Save this post as a draft?" dialog didn't appear as expected — do NOT
-    // guess another button (a wrong click could discard or post). Leave it to a
-    // human. NEVER fall through to Post.
-    return null;
-  }
-  await save.click();
-  await page.waitForTimeout(750);
-  return 'the close→"Save as draft" dialog';
+export interface SaveAsDraftLinkedInDependencies {
+  locateClose(page: Page): Promise<Locator | null>;
+  locateSave(page: Page): Promise<Locator | null>;
+  settle(page: Page): Promise<void>;
 }
 
-/** Normalize whitespace/case for tolerant text matching in the drafts list. */
-function normalizeForMatch(s: string): string {
-  return s.replace(/\s+/g, " ").trim().toLowerCase();
+const productionSaveAsDraftLinkedInDependencies: SaveAsDraftLinkedInDependencies = {
+  locateClose(page) {
+    return optionalLocator(page, LI_COMPOSER_SELECTORS.closeComposerButton, 5_000);
+  },
+  locateSave(page) {
+    return optionalLocator(page, LI_COMPOSER_SELECTORS.saveDraftButton, 5_000);
+  },
+  async settle(page) {
+    await page.waitForTimeout(750);
+  },
+};
+
+export async function saveAsDraftLinkedIn(
+  page: Page,
+  verify: () => Promise<boolean>,
+  deps: SaveAsDraftLinkedInDependencies = productionSaveAsDraftLinkedInDependencies,
+): Promise<LinkedInDraftSaveFlowResult<string>> {
+  let save: Locator | undefined;
+  return runLinkedInDraftSaveFlow({
+    async beforeSave() {
+      const close = await deps.locateClose(page);
+      if (!close) throw new Error("Close control unavailable.");
+      await close.click();
+
+      const candidate = await deps.locateSave(page);
+      if (!candidate) {
+        // Never guess another button: a wrong click could discard or Post.
+        throw new Error("Save as draft control unavailable.");
+      }
+      save = candidate;
+    },
+    async deliverSave() {
+      if (!save) throw new Error("Save as draft control was not prepared.");
+      await save.click();
+    },
+    async afterSave() {
+      await deps.settle(page);
+      return {
+        verified: await verify(),
+        value: 'the close→"Save as draft" dialog',
+      };
+    },
+  });
+}
+
+/** Preserve only browser line-ending and Unicode normalizations for equality. */
+function normalizeReopenedDraftText(value: string): string {
+  return value.replace(/\r\n?/g, "\n").normalize("NFC");
+}
+
+export function sameLinkedInReopenedDraftText(
+  actualText: string,
+  expectedText: string,
+): boolean {
+  return normalizeReopenedDraftText(actualText) === normalizeReopenedDraftText(expectedText);
 }
 
 /**
- * Verify a draft was ACTUALLY saved by matching the staged text's leading ~40
- * chars (ports X verifyDraftSaved's "match the staged prefix, don't trust any
- * row" hardening — the same false-positive trap).
+ * Verify a draft was ACTUALLY saved by requiring the complete reopened editor
+ * text to equal the complete intended text after only CR/LF and NFC
+ * normalization. Prefixes, substrings, case folds, and whitespace collapse are
+ * not positive evidence.
  *
  * CALIBRATED LIVE 2026-07: LinkedIn has no drafts-list URL, but REOPENING the
  * share composer (shareUrl) AUTO-RESTORES the most recent saved draft into the
  * editor. So we reopen the composer, read the editor's own text, and require the
- * staged prefix to appear there (scoped to the editor, not the whole page, so the
- * feed behind the modal can't false-positive). Non-fatal — returns false
- * (unconfirmed) if inconclusive; never throws.
+ * full staged text to appear there (scoped to the editor, not the whole page, so
+ * the feed behind the modal can't false-positive). A clean negative observation
+ * returns false; navigation or observation failures throw and become
+ * `save_delivered_unverified` at the save-flow boundary.
  */
-async function verifyDraftSaved(page: Page, expectedText: string): Promise<boolean> {
-  const needle = normalizeForMatch(expectedText).slice(0, 40);
-  if (!needle) return false;
-  try {
-    await page.goto(LI_COMPOSER_SELECTORS.shareUrl, { waitUntil: "domcontentloaded" });
-    const editor = await optionalLocator(page, LI_COMPOSER_SELECTORS.editor, 15_000);
-    if (!editor) return false;
+export async function verifyDraftSaved(page: Page, expectedText: string): Promise<boolean> {
+  const expected = normalizeReopenedDraftText(expectedText);
+  if (!expected) return false;
+  await page.goto(LI_COMPOSER_SELECTORS.shareUrl, { waitUntil: "domcontentloaded" });
+  const editor = await optionalLocator(page, LI_COMPOSER_SELECTORS.editor, 15_000);
+  if (!editor) return false;
 
-    // The composer restores the draft asynchronously — poll the editor text.
-    const deadline = Date.now() + 6_000;
-    while (Date.now() < deadline) {
-      const txt = normalizeForMatch((await editor.innerText().catch(() => "")) || "");
-      if (txt.includes(needle)) return true;
-      await page.waitForTimeout(500);
-    }
-    return false;
-  } catch {
-    return false;
+  // The composer restores the draft asynchronously — poll the editor text.
+  const deadline = Date.now() + 6_000;
+  while (Date.now() < deadline) {
+    const text = await editor.innerText();
+    if (sameLinkedInReopenedDraftText(text, expected)) return true;
+    await page.waitForTimeout(500);
   }
+  return false;
 }
 
 /**
@@ -332,57 +370,50 @@ export async function stagePost(
   content: GeneratedPost,
   opts: StagePostOptions = {},
 ): Promise<StagePostResult> {
+  // Preserve the public generated-DTO seam: malformed caller structures fail
+  // locally before any session/profile work and retain TerminalProjectionError.
   content = snapshotLinkedInGeneratedPost(content);
   const text = content.text;
   if (!text.trim()) throw new Error("No content to stage (empty LinkedIn post).");
-
   const media = opts.media ?? [];
-  const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
-  const page = await ctx.newPage();
+
+  let page: Page | undefined;
   try {
-    const editor = await openComposer(page);
-    await editor.click();
-    // LinkedIn AUTO-RESTORES the most recent saved draft into the composer editor
-    // (verified live). typeText inserts at the cursor, so without clearing we would
-    // APPEND this post to a previously-restored draft. Select-all + delete first so
-    // every run types a CLEAN post. (On an empty composer this is a harmless no-op.)
-    await editor.press(`${modifier()}+a`);
-    await editor.press("Backspace");
-    await typeText(page, editor, text);
+    let mediaAttached: number;
+    try {
+      const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
+      page = await ctx.newPage();
+      const editor = await openComposer(page);
+      await editor.click();
+      // LinkedIn AUTO-RESTORES the most recent saved draft into the composer editor
+      // (verified live). Clear it so every run types one clean post.
+      await editor.press(`${modifier()}+a`);
+      await editor.press("Backspace");
+      await typeText(page, editor, text);
 
-    const mediaAttached = await attachMedia(page, media);
-    if (mediaAttached !== media.length) {
-      throw new Error(
-        `LinkedIn attached ${mediaAttached} of ${media.length} requested media files; refusing to save an incomplete draft.`,
-      );
+      mediaAttached = await attachMedia(page, media);
+      if (mediaAttached !== media.length) {
+        throw new Error("LinkedIn did not attach every requested media file.");
+      }
+    } catch (error) {
+      throw linkedInDraftStageError(error, "save_not_attempted");
     }
 
-    const saved = await saveAsDraftLinkedIn(page);
-    const verified = await verifyDraftSaved(page, text);
-
-    const hasLinks = !!content.linkFlags && content.linkFlags.length > 0;
-    const noteParts: string[] = [];
-    noteParts.push(
-      saved
-        ? `Saved via ${saved}. Draft is under LinkedIn "Start a post" → drafts — open it to review and post manually.`
-        : `Attempted to save as draft (path uncertain — NEEDS CALIBRATION). Check LinkedIn drafts manually. NEVER auto-posted.`,
+    const saved = await saveAsDraftLinkedIn(
+      page,
+      () => verifyDraftSaved(page as Page, text),
     );
-    noteParts.push(`media attached: ${mediaAttached}${media.length ? ` of ${media.length}` : ""}.`);
-    if (hasLinks) {
-      noteParts.push(
-        "Links: LinkedIn suppresses reach on body links — after publishing, add the URL(s) as the FIRST COMMENT (a first comment can't be pre-saved in a draft).",
-      );
-    }
 
     return {
       format: "post",
-      verified,
+      saveMechanism: LINKEDIN_DRAFT_SAVE_MECHANISM,
+      savePhase: saved.savePhase,
+      verified: saved.savePhase === "verified",
       mediaAttached,
-      note: noteParts.join(" "),
     };
   } finally {
     // Close only the page we opened; leave the persistent context alive so the
     // session stays warm for subsequent commands.
-    await page.close().catch(() => {});
+    await page?.close().catch(() => {});
   }
 }
