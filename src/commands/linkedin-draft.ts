@@ -82,6 +82,19 @@ export function registerLinkedInDraftCommand(linkedin: Command): void {
     .option("--bold", "Opt-in Unicode math-bold for **emphasis** (accessibility caveat — see output)")
     .option("--dry-run", "Only generate the post; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
+    .addHelpText(
+      "after",
+      "\nMarkdown conversion:\n" +
+        "  One deterministic CommonMark/GFM parse owns plain text and evidence.\n" +
+        "  Inline, full/collapsed/shortcut reference, bare, and autolinks resolve to\n" +
+        "  visible parser-normalized labels/destinations; character references decode\n" +
+        "  once, definitions disappear, and duplicate HTTP(S) destinations produce one\n" +
+        "  first-seen advisory.\n" +
+        "  Parser-confirmed raw HTML exits 2 before profile/browser access. Link/image\n" +
+        "  syntax inside code stays inert. Image evidence uses normalized alt text.\n" +
+        "  Empty conversion errors name only omitted code, images, definitions,\n" +
+        "  thematic breaks, or whitespace. Run publish linkedin info for the full contract.\n",
+    )
     .action(async (opts: LinkedInDraftOptions) => {
       const output = new TerminalOutputBudget();
       const emit = (stream: "stdout" | "stderr", message: string) =>

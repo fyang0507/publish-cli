@@ -144,6 +144,13 @@ test("invalid draft inputs exit 2 before importing platform/browser/API stacks",
       },
       {
         args: [
+          "linkedin", "draft", "--text",
+          "Before <span>[fake](https://inside.example)</span> after",
+        ],
+        evidence: /parser-confirmed raw HTML.*no browser was touched/s,
+      },
+      {
+        args: [
           "reddit", "draft", "--subreddit", "test", "--title", "Title",
           "--text", "a".repeat(40_001),
         ],
@@ -1679,14 +1686,32 @@ test("valid dry-runs also avoid platform/browser/API imports", () => {
       "Read [the docs][ref].\n\n[ref]: https://example.com/docs", "--dry-run",
     ]);
     assert.equal(referenceLink.status, 0, output(referenceLink));
+    assert.match(
+      referenceLink.stdout,
+      /Read the docs \(https:\/\/example\.com\/docs\)\./,
+    );
     assert.match(referenceLink.stdout, /https:\/\/example\.com\/docs \(the docs\)/);
     assert.match(referenceLink.stdout, /FIRST COMMENT/);
+    assert.doesNotMatch(referenceLink.stdout, /\[the docs\]\[ref\]|\[ref\]:/);
     assert.doesNotMatch(output(referenceLink), /PLATFORM_IMPORT_BLOCKED/);
+
+    const autolink = runCli(fixture, [
+      "linkedin", "draft", "--text",
+      "Open <https://example.com/path?q=1&x=2>.", "--dry-run",
+    ]);
+    assert.equal(autolink.status, 0, output(autolink));
+    assert.match(autolink.stdout, /Open https:\/\/example\.com\/path\?q=1&x=2\./);
+    assert.doesNotMatch(autolink.stdout, /https:\/\/example\.com\/path\?q=1&x=2>/);
+    assert.doesNotMatch(output(autolink), /PLATFORM_IMPORT_BLOCKED/);
 
     const linkedinHelp = runCli(fixture, ["linkedin", "draft", "--help"]);
     assert.equal(linkedinHelp.status, 0, output(linkedinHelp));
     assert.match(linkedinHelp.stdout, /leading --- is literal/);
     assert.match(linkedinHelp.stdout, /Markdown images never attach files/);
+    assert.match(linkedinHelp.stdout, /One deterministic CommonMark\/GFM parse owns plain text and evidence/);
+    assert.match(linkedinHelp.stdout, /full\/collapsed\/shortcut reference, bare, and autolinks/);
+    assert.match(linkedinHelp.stdout, /character references decode\s+once/);
+    assert.match(linkedinHelp.stdout, /Parser-confirmed raw HTML exits 2 before profile\/browser access/);
     assert.doesNotMatch(output(linkedinHelp), /PLATFORM_IMPORT_BLOCKED/);
 
     const wechatInspection = runCli(fixture, [

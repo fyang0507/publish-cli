@@ -5,14 +5,9 @@
  * rejection, the fold/hook advisory) so output is reproducible and
  * verifiable, exactly like the X content generator (src/x/content.ts).
  *
- * REUSE: parseBaseMarkdown() + countChars() are imported from ../x/content.js
- * (the shared, deterministic markdown parser). We use parseBaseMarkdown to derive
- * the code-block and link advisory flags (and the title), and countChars for the
- * conservative code-point count. The markdown -> LinkedIn plain-text RENDERING is
- * LinkedIn-specific (the X parser's `prose` stream is tuned for tweet splitting —
- * it collapses single newlines and DROPS headings, both wrong for a LinkedIn post
- * where newlines are honored verbatim and headings become plain lines), so it
- * lives here.
+ * LinkedIn owns one isolated CommonMark/GFM parser for plain-text rendering plus
+ * link/image/code evidence. It emits the established shared code-block advisory
+ * shape without mixing X prose/link heuristics into LinkedIn conversion.
  *
  * LinkedIn rules (LINKEDIN_DESIGN.md §4):
  *   - Single post, hard cap 3000 UTF-16 code units. Over cap => reject before
@@ -25,12 +20,14 @@
  *     breaks AND single newlines are preserved verbatim (LinkedIn honors both).
  *   - Emoji pass through untouched (first-class).
  *   - Code blocks -> reuse codeFlags, LinkedIn wording (screenshot/document).
- *   - Links -> reuse linkFlags, reworded: post as the FIRST COMMENT, not the body.
+ *   - Links -> parser-resolved labels/destinations, with one deduplicated
+ *     first-comment advisory per visible HTTP(S) destination.
  *   - Hashtags -> advisory: keep 3–5, at the end.
  */
 
-import { parseBaseMarkdown, type CodeBlockFlag, type LinkFlag } from "../x/content.js";
-import { marked, type Token, type Tokens } from "marked";
+import { decodeHTMLStrict } from "entities";
+import { Marked, type Token, type Tokens } from "marked";
+import type { CodeBlockFlag, LinkFlag } from "../x/content.js";
 import {
   LINKEDIN_POST_MAX_UTF16_CODE_UNITS,
   LocalValidationError,
@@ -112,256 +109,21 @@ export interface PreparedLinkedInPost {
   readonly inspection: string;
 }
 
-const FENCE_RE = /^(\s*)(`{3,}|~{3,})(.*)$/;
-const HEADING_RE = /^(#{1,6})\s+(.+)$/;
-const BULLET_RE = /^(\s*)[-*+]\s+(.+)$/;
-// Blockquote (`> ...`) and thematic breaks (`---` / `***` / `___`, 3+). LinkedIn
-// has neither construct, so we strip the quote marker and drop the rule entirely.
-const BLOCKQUOTE_RE = /^\s*>\s?(.*)$/;
-const THEMATIC_BREAK_RE = /^\s*([-*_])(?:\s*\1){2,}\s*$/;
-const MD_LINK_RE = /(?<!!)\[([^\]]*)\]\((https?:\/\/[^)\s]+)\)/g;
-// Bare URL not already inside a markdown-link's () or a ("...) attribute.
-const BARE_URL_RE = /(?<![("])\bhttps?:\/\/[^\s)]+/g;
+const IMAGE_REPLACEMENT_RE = /\u0000LI_IMAGE_(\d+)\u0000/g;
+
+// Keep this transport independent from process-wide marked defaults or
+// extensions. The same closed parser configuration owns rendered text and
+// advisory evidence.
+const linkedinMarkdown = new Marked({
+  gfm: true,
+  breaks: false,
+  pedantic: false,
+});
 
 /** The first-comment placement note attached to every LinkedIn link flag. */
 const LINK_NOTE =
   "LinkedIn suppresses reach on body links — post this URL as the FIRST COMMENT after publishing, not in the post body (a first comment can't be pre-saved in a draft).";
 
-/**
- * Collect link advisory flags from the RAW post source (both `[text](url)` and
- * bare URLs), deduped by URL. Unlike the shared parser's collector — which scans
- * only the parsed BODY and therefore misses links in a single-line --text (that
- * first line is consumed as the "title" and never reaches the body) — this scans
- * the whole input, so the primary --text path flags its links correctly.
- */
-function collectLinkFlags(md: string): LinkFlag[] {
-  const flags: LinkFlag[] = [];
-  const seen = new Set<string>();
-  const searchable: string[] = [];
-  let inFence = false;
-  let fenceMarker = "";
-  for (const line of md.replace(/\r\n?/g, "\n").split("\n")) {
-    const fence = line.match(FENCE_RE);
-    if (!inFence && fence) {
-      inFence = true;
-      fenceMarker = fence[2];
-      continue;
-    }
-    if (inFence) {
-      if (fence && fence[2][0] === fenceMarker[0] && fence[2].length >= fenceMarker.length) {
-        inFence = false;
-        fenceMarker = "";
-      }
-      continue;
-    }
-    // Inline-code literals are not post-body links. Image tokens were already
-    // parser-removed by analyzeMarkdownImages before this collector runs.
-    searchable.push(maskInlineCode(line));
-  }
-  const text = searchable.join("\n");
-
-  let m: RegExpExecArray | null;
-  MD_LINK_RE.lastIndex = 0;
-  while ((m = MD_LINK_RE.exec(text)) !== null) {
-    const url = m[2];
-    if (seen.has(url)) continue;
-    seen.add(url);
-    flags.push({ url, text: m[1] || undefined, note: LINK_NOTE });
-  }
-
-  BARE_URL_RE.lastIndex = 0;
-  while ((m = BARE_URL_RE.exec(text)) !== null) {
-    const url = m[0].replace(/[.,;:]+$/, "");
-    if (seen.has(url)) continue;
-    seen.add(url);
-    flags.push({ url, note: LINK_NOTE });
-  }
-
-  return flags;
-}
-
-/**
- * Let CommonMark resolve reference links before their definition blocks are
- * removed from the plain-text render. This preserves the otherwise-lost URL as
- * an explicit first-comment advisory, including collapsed/shortcut references.
- */
-function collectParserLinkFlags(md: string): LinkFlag[] {
-  const flags: LinkFlag[] = [];
-  const seen = new Set<string>();
-  marked.walkTokens(marked.lexer(md), (token) => {
-    if (token.type !== "link") return;
-    const link = token as Tokens.Link;
-    if (!/^https?:\/\//i.test(link.href) || seen.has(link.href)) return;
-    seen.add(link.href);
-    flags.push({ url: link.href, text: link.text || undefined, note: LINK_NOTE });
-  });
-  return flags;
-}
-
-function mergeLinkFlags(...groups: LinkFlag[][]): LinkFlag[] {
-  const merged: LinkFlag[] = [];
-  const seen = new Set<string>();
-  for (const group of groups) {
-    for (const flag of group) {
-      if (seen.has(flag.url)) continue;
-      seen.add(flag.url);
-      merged.push(flag);
-    }
-  }
-  return merged;
-}
-
-/** Mask inline-code spans without shifting the remaining source positions. */
-function maskInlineCode(line: string): string {
-  return line.replace(/(`+)(.*?)\1/g, (match) => " ".repeat(match.length));
-}
-
-interface SourceEdit {
-  start: number;
-  end: number;
-  replacement: string;
-}
-
-interface SourceSpan {
-  start: number;
-  end: number;
-}
-
-function spansOverlap(left: SourceSpan, right: SourceSpan): boolean {
-  return left.start < right.end && right.start < left.end;
-}
-
-function spanContains(outer: SourceSpan, inner: SourceSpan): boolean {
-  return outer.start <= inner.start && outer.end >= inner.end;
-}
-
-/**
- * Use the CommonMark parser as the authority for image syntax. This covers
- * inline/reference/collapsed/shortcut images, nested or multiline destinations,
- * escaped alt text, and odd/even escape semantics without interpreting code.
- */
-function analyzeMarkdownImages(md: string): { markdown: string; flags: MarkdownImageFlag[] } {
-  const tokens = marked.lexer(md);
-  const allTokens: Token[] = [];
-  marked.walkTokens(tokens, (token) => {
-    allTokens.push(token);
-  });
-
-  // String offsets from indexOf are UTF-16 code-unit offsets; split("") keeps
-  // this mask aligned even when emoji precede an image token.
-  const masked = md.split("");
-  const edits: SourceEdit[] = [];
-  const flags: MarkdownImageFlag[] = [];
-  const maskRange = (start: number, end: number) => {
-    for (let index = start; index < end; index += 1) {
-      if (masked[index] !== "\n") masked[index] = "\u0000";
-    }
-  };
-  const surface = () => masked.join("");
-
-  // Locate top-level blocks exactly. Definitions never render as post text;
-  // code/HTML bodies are masked so image-looking literals inside them cannot be
-  // mistaken for a later parser-confirmed image with the same raw spelling.
-  let topCursor = 0;
-  for (const token of tokens) {
-    const start = md.indexOf(token.raw, topCursor);
-    if (start < 0) continue;
-    const end = start + token.raw.length;
-    topCursor = end;
-    if (token.type === "def") edits.push({ start, end, replacement: "" });
-    if (token.type === "code" || token.type === "html") maskRange(start, end);
-  }
-
-  // Locate inline-code/escape spans without masking them yet. Marked can emit
-  // codespan/escape CHILD tokens inside an image's alt text; masking those first
-  // would make the parent image.raw impossible to locate. These spans instead
-  // disambiguate image-looking literals outside an image (inline code or an odd
-  // escaped `!`) from child formatting that is legitimately inside one.
-  const blockMaskedSurface = surface();
-  const inlineProtectionSpans: SourceSpan[] = [];
-  let inlineCursor = 0;
-  for (const token of allTokens) {
-    if (token.type !== "escape" && token.type !== "codespan") continue;
-    const start = blockMaskedSurface.indexOf(token.raw, inlineCursor);
-    if (start < 0) continue;
-    const end = start + token.raw.length;
-    inlineProtectionSpans.push({ start, end });
-    inlineCursor = end;
-  }
-
-  let imageCursor = 0;
-  const imageSpans: SourceSpan[] = [];
-  for (const token of allTokens) {
-    if (token.type !== "image") continue;
-    const image = token as Tokens.Image;
-    let start = blockMaskedSurface.indexOf(image.raw, imageCursor);
-    while (start >= 0) {
-      const candidate = { start, end: start + image.raw.length };
-      const protectedLiteral = inlineProtectionSpans.some(
-        (span) => spansOverlap(span, candidate) && !spanContains(candidate, span),
-      );
-      if (!protectedLiteral) break;
-      start = blockMaskedSurface.indexOf(image.raw, start + 1);
-    }
-    if (start < 0) continue;
-    const end = start + image.raw.length;
-    imageCursor = end;
-    imageSpans.push({ start, end });
-    const lineStart = md.lastIndexOf("\n", start - 1) + 1;
-    const newline = md.indexOf("\n", end);
-    const lineEnd = newline < 0 ? md.length : newline;
-    const isOnlyImage =
-      md.slice(lineStart, start).trim() === "" && md.slice(end, lineEnd).trim() === "";
-    if (isOnlyImage) {
-      // Remove the whole image-only line, not merely its token. Also consume one
-      // immediately-following blank line only when the preceding line is blank:
-      // deleting `![x](...)` from `A\n\n![x](...)\n\nB` must not manufacture a
-      // third newline, while `A\n![x](...)\n\nB` must keep its caller-owned gap.
-      let editEnd = lineEnd;
-      if (md[editEnd] === "\n") editEnd += 1;
-      const previousLineEnd = lineStart - 1;
-      const previousLineStart = md.lastIndexOf("\n", previousLineEnd - 1) + 1;
-      const previousLineIsBlank =
-        previousLineEnd >= 0 && md.slice(previousLineStart, previousLineEnd).trim() === "";
-      const nextLineEnd = md.indexOf("\n", editEnd);
-      const nextLineIsBlank =
-        editEnd < md.length &&
-        md.slice(editEnd, nextLineEnd < 0 ? md.length : nextLineEnd).trim() === "";
-      if (previousLineIsBlank && nextLineIsBlank) {
-        editEnd = nextLineEnd < 0 ? md.length : nextLineEnd + 1;
-      }
-      edits.push({ start: lineStart, end: editEnd, replacement: "" });
-    } else {
-      edits.push({ start, end, replacement: image.text });
-    }
-    flags.push({
-      alt: image.text || undefined,
-      source: image.href,
-      sourceLine: md.slice(0, start).split("\n").length,
-    });
-  }
-
-  // Only after every parent image span is fixed do we mask images and external
-  // inline literals. Child codespan/escape tokens stay inside their image span.
-  for (const span of imageSpans) maskRange(span.start, span.end);
-  for (const span of inlineProtectionSpans) {
-    if (!imageSpans.some((imageSpan) => spanContains(imageSpan, span))) {
-      maskRange(span.start, span.end);
-    }
-  }
-
-  let markdown = md;
-  for (const edit of edits.sort((a, b) => b.start - a.start)) {
-    markdown = markdown.slice(0, edit.start) + edit.replacement + markdown.slice(edit.end);
-  }
-  return { markdown, flags };
-}
-
-/**
- * Map ASCII letters/digits to their Unicode MATHEMATICAL BOLD code points. Used
- * only for the opt-in --bold path; other characters (punctuation, emoji, CJK)
- * pass through unchanged.
- */
 function toUnicodeBold(s: string): string {
   let out = "";
   for (const ch of s) {
@@ -374,130 +136,602 @@ function toUnicodeBold(s: string): string {
   return out;
 }
 
-/**
- * Apply inline markdown transforms to a single line, deterministically:
- *   - `[text](url)` -> "text (url)" (or just the url when there's no label) so the
- *     link is preserved and visible (placement is advised separately via linkFlags);
- *   - `**bold**` / `__bold__` -> plain inner text, or Unicode math-bold when `bold`;
- *   - `*italic*` / `_italic_` -> plain inner text (LinkedIn has no italic);
- *   - inline `` `code` `` -> plain inner text.
- * Emoji and all other characters pass through untouched.
- */
-function applyInline(line: string, bold: boolean): string {
-  // Protect inline-code contents before interpreting Markdown image/link syntax.
-  // The final restoration removes only the code delimiter and keeps its literal
-  // payload, so `![literal](x.png)` inside backticks is never treated as media.
-  const codeLiterals: string[] = [];
-  let out = line.replace(/(`+)(.*?)\1/g, (_match, _ticks: string, inner: string) => {
-    const index = codeLiterals.push(inner) - 1;
-    return `\u0000${index}\u0000`;
+interface ImageReplacement {
+  plain: string;
+  transport: string;
+}
+
+type EmptyOmission =
+  | "code blocks"
+  | "Markdown images"
+  | "link reference definitions"
+  | "thematic breaks";
+
+interface LinkedInConversionState {
+  readonly codeFlags: CodeBlockFlag[];
+  readonly imageFlags: MarkdownImageFlag[];
+  readonly imageReplacements: ImageReplacement[];
+  readonly linkFlags: LinkFlag[];
+  readonly seenLinks: Set<string>;
+  readonly omissions: Set<EmptyOmission>;
+}
+
+interface LinkedInMarkdownConversion {
+  text: string;
+  firstLineWasHeading: boolean;
+  firstLineWasLink: boolean;
+  codeFlags: CodeBlockFlag[];
+  imageFlags: MarkdownImageFlag[];
+  linkFlags: LinkFlag[];
+  omissions: Set<EmptyOmission>;
+}
+
+const HEADING_MARKER = "\u0000LI_HEADING\u0000";
+
+function countLineFeeds(value: string): number {
+  let count = 0;
+  for (let index = value.indexOf("\n"); index >= 0; index = value.indexOf("\n", index + 1)) {
+    count += 1;
+  }
+  return count;
+}
+
+function rawHtmlUnsupported(count: number): LocalValidationError {
+  return new LocalValidationError(
+    "LinkedIn Markdown contains parser-confirmed raw HTML, which cannot be converted " +
+      "faithfully to plain text. Replace it with plain or escaped text; no browser was touched.",
+    {
+      code: "linkedin_raw_html_unsupported",
+      field: "text",
+      actual: count,
+      expected: "Markdown without parser-confirmed raw HTML",
+      unit: "parser_confirmed_occurrences",
+    },
+  );
+}
+
+function unsupportedMarkdownToken(type: string): LocalValidationError {
+  return new LocalValidationError(
+    "LinkedIn Markdown contains a parser token that this plain-text transport cannot " +
+      "represent faithfully. Replace the construct with plain text; no browser was touched.",
+    {
+      code: "linkedin_markdown_token_unsupported",
+      field: "text",
+      actual: type,
+      expected: "a supported LinkedIn Markdown token",
+      unit: null,
+    },
+  );
+}
+
+function unsupportedHttpDestination(): LocalValidationError {
+  return new LocalValidationError(
+    "LinkedIn Markdown contains a parser-resolved HTTP(S) destination that cannot " +
+      "be represented safely. Encode or replace the URL; no browser was touched.",
+    {
+      code: "linkedin_link_destination_unsupported",
+      field: "text",
+      actual: "invalid_http_url",
+      expected: "an absolute HTTP(S) URL without raw delimiters or controls",
+      unit: null,
+    },
+  );
+}
+
+function isValidatedHttpDestination(href: string): boolean {
+  if (!/^https?:\/\//i.test(href)) return false;
+  if (/[\u0000-\u0020\u007f<>"]/u.test(href)) {
+    throw unsupportedHttpDestination();
+  }
+  try {
+    const parsed = new URL(href);
+    if (
+      (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+      !parsed.hostname
+    ) {
+      throw unsupportedHttpDestination();
+    }
+  } catch (error) {
+    if (error instanceof LocalValidationError) throw error;
+    throw unsupportedHttpDestination();
+  }
+  return true;
+}
+
+function assertNoRawHtml(tokens: Token[]): void {
+  let count = 0;
+  linkedinMarkdown.walkTokens(tokens, (token) => {
+    if (token.type === "html") count += 1;
   });
-  out = out.replace(MD_LINK_RE, (_m, text: string, url: string) => (text ? `${text} (${url})` : url));
-  MD_LINK_RE.lastIndex = 0;
-  // Bold first (so its ** aren't misread as italic *). Non-greedy inner avoids
-  // spanning across separate emphasis runs.
-  out = out.replace(/\*\*([^*]+)\*\*/g, (_m, inner: string) => (bold ? toUnicodeBold(inner) : inner));
-  out = out.replace(/__([^_]+)__/g, (_m, inner: string) => (bold ? toUnicodeBold(inner) : inner));
-  // Italic -> plain (single markers not part of a pair).
-  out = out.replace(/(?<!\*)\*(?!\*)([^*\n]+)\*(?!\*)/g, (_m, inner: string) => inner);
-  out = out.replace(/(?<!_)_(?!_)([^_\n]+)_(?!_)/g, (_m, inner: string) => inner);
-  // An escaped image marker is literal text, not a media reference. Remove the
-  // Markdown escape only after image detection/replacement has completed.
-  out = out.replace(/\\!/g, "!");
-  out = out.replace(/\u0000(\d+)\u0000/g, (_match, index: string) => codeLiterals[Number(index)] ?? "");
+  if (count > 0) throw rawHtmlUnsupported(count);
+}
+
+function imageMarker(index: number): string {
+  return "\u0000LI_IMAGE_" + index + "\u0000";
+}
+
+function replaceKnownImageMarkers(
+  value: string,
+  bold: boolean,
+  replacements: readonly ImageReplacement[],
+): string {
+  return value.replace(IMAGE_REPLACEMENT_RE, (_match, rawIndex: string) => {
+    const replacement = replacements[Number(rawIndex)];
+    if (!replacement) throw unsupportedMarkdownToken("invalid_image_marker");
+    return bold ? replacement.transport : replacement.plain;
+  });
+}
+
+function renderLinkText(label: string, normalizedLabel: string, href: string): string {
+  if (
+    !normalizedLabel ||
+    normalizedLabel === href ||
+    href === "mailto:" + normalizedLabel
+  ) {
+    return normalizedLabel || href;
+  }
+  return label + " (" + href + ")";
+}
+
+/**
+ * Parser-normalized inline rendering. With state omitted this is a pure semantic
+ * projection used for link labels and image alt evidence. With state present it
+ * also records only visible link/image occurrences in source order.
+ */
+function renderInlineTokens(
+  tokens: Token[],
+  bold: boolean,
+  replacements: readonly ImageReplacement[] = [],
+  state?: LinkedInConversionState,
+  startLine = 1,
+  unicodeBold = false,
+  includeLinkDestinations = true,
+): string {
+  let out = "";
+  let sourceLine = startLine;
+
+  for (const token of tokens) {
+    switch (token.type) {
+      case "text": {
+        const text = token as Tokens.Text;
+        if (text.tokens) {
+          out += renderInlineTokens(
+            text.tokens,
+            bold,
+            replacements,
+            state,
+            sourceLine,
+            unicodeBold,
+            includeLinkDestinations,
+          );
+        } else {
+          const rendered = replaceKnownImageMarkers(
+            decodeHTMLStrict(text.text),
+            bold,
+            replacements,
+          );
+          out += unicodeBold ? toUnicodeBold(rendered) : rendered;
+        }
+        break;
+      }
+      case "escape": {
+        const escaped = decodeHTMLStrict((token as Tokens.Escape).text);
+        out += unicodeBold ? toUnicodeBold(escaped) : escaped;
+        break;
+      }
+      case "strong": {
+        out += renderInlineTokens(
+          (token as Tokens.Strong).tokens,
+          bold,
+          replacements,
+          state,
+          sourceLine,
+          unicodeBold || bold,
+          includeLinkDestinations,
+        );
+        break;
+      }
+      case "em":
+        out += renderInlineTokens(
+          (token as Tokens.Em).tokens,
+          bold,
+          replacements,
+          state,
+          sourceLine,
+          unicodeBold,
+          includeLinkDestinations,
+        );
+        break;
+      case "del":
+        out += renderInlineTokens(
+          (token as Tokens.Del).tokens,
+          bold,
+          replacements,
+          state,
+          sourceLine,
+          unicodeBold,
+          includeLinkDestinations,
+        );
+        break;
+      case "codespan": {
+        const code = (token as Tokens.Codespan).text;
+        out += unicodeBold ? toUnicodeBold(code) : code;
+        break;
+      }
+      case "br":
+        out += "\n";
+        break;
+      case "checkbox":
+        out += (token as Tokens.Checkbox).raw;
+        break;
+      case "link": {
+        const link = token as Tokens.Link;
+        const normalizedLabel = renderInlineTokens(
+          link.tokens,
+          false,
+          replacements,
+          undefined,
+          sourceLine,
+          false,
+          false,
+        );
+        const label = renderInlineTokens(
+          link.tokens,
+          bold,
+          replacements,
+          state,
+          sourceLine,
+          unicodeBold,
+          false,
+        );
+        if (!includeLinkDestinations) {
+          out += label;
+          break;
+        }
+
+        const isBare = link.raw === link.text;
+        let href = decodeHTMLStrict(link.href);
+        let visibleLabel = normalizedLabel;
+        let renderedLabel = label;
+        let literalSuffix = "";
+        if (isBare) {
+          literalSuffix = href.match(/>+$/u)?.[0] ?? "";
+          if (literalSuffix) {
+            href = href.slice(0, -literalSuffix.length);
+            if (visibleLabel.endsWith(literalSuffix)) {
+              visibleLabel = visibleLabel.slice(0, -literalSuffix.length);
+            }
+            if (renderedLabel.endsWith(literalSuffix)) {
+              renderedLabel = renderedLabel.slice(0, -literalSuffix.length);
+            }
+          }
+        }
+        const isHttp = isValidatedHttpDestination(href);
+        if (state && isHttp && !state.seenLinks.has(href)) {
+          state.seenLinks.add(href);
+          state.linkFlags.push({
+            url: href,
+            text: !isBare && visibleLabel && visibleLabel !== href
+              ? visibleLabel
+              : undefined,
+            note: LINK_NOTE,
+          });
+        }
+        out += (
+          isBare
+            ? visibleLabel
+            : renderLinkText(renderedLabel, visibleLabel, href)
+        ) + literalSuffix;
+        break;
+      }
+      case "image": {
+        const image = token as Tokens.Image;
+        const plain = renderInlineTokens(
+          image.tokens,
+          false,
+          replacements,
+          undefined,
+          sourceLine,
+          false,
+          false,
+        );
+        if (!state) {
+          out += plain;
+          break;
+        }
+        const transport = renderInlineTokens(
+          image.tokens,
+          bold,
+          replacements,
+          undefined,
+          sourceLine,
+          unicodeBold,
+          false,
+        );
+        const index = state.imageReplacements.push({ plain, transport }) - 1;
+        state.imageFlags.push({
+          alt: plain || undefined,
+          source: decodeHTMLStrict(image.href),
+          sourceLine,
+        });
+        state.omissions.add("Markdown images");
+        out += imageMarker(index);
+        break;
+      }
+      case "html":
+        throw rawHtmlUnsupported(1);
+      default:
+        throw unsupportedMarkdownToken(token.type);
+    }
+    sourceLine += countLineFeeds(token.raw);
+  }
+
   return out;
 }
 
-interface RenderedText {
-  text: string;
-  /** True if the first non-blank rendered line came from a markdown heading. */
-  firstLineWasHeading: boolean;
-  /** True if the first non-blank rendered line begins with a URL. */
-  firstLineWasLink: boolean;
+function ensureRawTrailingNewlines(rendered: string, raw: string): string {
+  if (!rendered) return "";
+  const required = raw.match(/\n+$/)?.[0].length ?? 0;
+  const present = rendered.match(/\n+$/)?.[0].length ?? 0;
+  return required > present ? rendered + "\n".repeat(required - present) : rendered;
 }
 
-/**
- * Render canonical markdown to LinkedIn plain text: strip fenced code blocks
- * (surfaced as flags), drop image-only lines (they become --media), convert
- * headings to plain lines and bullets to "• ", resolve inline emphasis, and
- * PRESERVE blank lines and single newlines verbatim. Deterministic.
- */
-function renderPlainText(md: string, bold: boolean): RenderedText {
-  const lines = md.replace(/\r\n?/g, "\n").split("\n");
-  const out: string[] = [];
-  let inFence = false;
-  let fenceMarker = "";
-  let firstLineWasHeading = false;
-  let firstLineWasLink = false;
-  let sawContent = false;
+function renderTable(
+  table: Tokens.Table,
+  bold: boolean,
+  state: LinkedInConversionState,
+  sourceLine: number,
+): string {
+  const renderRow = (row: Tokens.TableCell[], rowSourceLine: number): string =>
+    row.map((cell) =>
+      renderInlineTokens(
+        cell.tokens,
+        bold,
+        state.imageReplacements,
+        state,
+        rowSourceLine,
+      )
+    ).join(" | ");
 
-  const markFirst = (rendered: string, wasHeading: boolean) => {
-    if (sawContent || !rendered.trim()) return;
-    sawContent = true;
-    firstLineWasHeading = wasHeading;
-    firstLineWasLink = /^https?:\/\//.test(rendered.trim());
-  };
+  // GFM's delimiter row has no rendered cells, but it still occupies the
+  // physical line between the header and the first body row.
+  return [
+    renderRow(table.header, sourceLine),
+    ...table.rows.map((row, rowIndex) => renderRow(row, sourceLine + rowIndex + 2)),
+  ].join("\n");
+}
 
-  for (const line of lines) {
-    const fence = line.match(FENCE_RE);
+function listItemPrefix(list: Tokens.List, item: Tokens.ListItem): string {
+  if (!list.ordered) return "• ";
+  const marker = item.raw.match(/^ {0,3}(\d{1,9}[.)])(?=[\t \n]|$)/)?.[1];
+  if (!marker) throw unsupportedMarkdownToken("ordered_list_item_marker");
+  return marker + " ";
+}
 
-    if (!inFence && fence) {
-      // Enter a fenced code block — skip its content entirely (flagged elsewhere).
-      inFence = true;
-      fenceMarker = fence[2];
-      continue;
+function renderList(
+  list: Tokens.List,
+  bold: boolean,
+  state: LinkedInConversionState,
+  sourceLine: number,
+): string {
+  const renderedItems: string[] = [];
+  let itemLine = sourceLine;
+
+  for (const item of list.items) {
+    const body = renderBlockTokens(item.tokens, bold, state, itemLine)
+      .replace(/^\n+/, "")
+      .replace(/\n+$/, "");
+    if (body) {
+      const lines = body.split("\n");
+      lines[0] = listItemPrefix(list, item) + lines[0];
+      renderedItems.push(lines.join("\n"));
     }
-    if (inFence) {
-      if (fence && fence[2][0] === fenceMarker[0] && fence[2].length >= fenceMarker.length) {
-        inFence = false;
-        fenceMarker = "";
-      }
-      continue;
-    }
-
-    // Blank line -> preserved verbatim.
-    if (!line.trim()) {
-      out.push("");
-      continue;
-    }
-
-    // Thematic break (---, ***, ___) -> LinkedIn has no rule; drop the line.
-    if (THEMATIC_BREAK_RE.test(line)) continue;
-
-    const heading = line.match(HEADING_RE);
-    if (heading) {
-      const rendered = applyInline(heading[2].trim(), bold);
-      markFirst(rendered, true);
-      out.push(rendered);
-      continue;
-    }
-
-    // Blockquote (`> ...`) -> LinkedIn has no quote block; render the inner text
-    // as a plain line (strip the marker so it doesn't leak as literal markdown).
-    const quote = line.match(BLOCKQUOTE_RE);
-    if (quote) {
-      const rendered = applyInline(quote[1].trim(), bold);
-      markFirst(rendered, false);
-      out.push(rendered);
-      continue;
-    }
-
-    const bullet = line.match(BULLET_RE);
-    if (bullet) {
-      const rendered = `• ${applyInline(bullet[2].trim(), bold)}`;
-      markFirst(rendered, false);
-      out.push(rendered);
-      continue;
-    }
-
-    const rendered = applyInline(line, bold);
-    markFirst(rendered, false);
-    out.push(rendered);
+    itemLine += countLineFeeds(item.raw);
   }
 
-  // Trim leading/trailing blank lines but keep internal structure verbatim.
-  const text = out.join("\n").replace(/^\n+/, "").replace(/\n+$/, "");
-  return { text, firstLineWasHeading, firstLineWasLink };
+  return ensureRawTrailingNewlines(renderedItems.join("\n"), list.raw);
+}
+
+function renderBlockTokens(
+  tokens: Token[],
+  bold: boolean,
+  state: LinkedInConversionState,
+  startLine = 1,
+): string {
+  let out = "";
+  let sourceLine = startLine;
+
+  for (const token of tokens) {
+    let rendered = "";
+    switch (token.type) {
+      case "space":
+        rendered = token.raw;
+        break;
+      case "code": {
+        const code = token as Tokens.Code;
+        if (code.codeBlockStyle === "indented") {
+          // Indented CommonMark is ambiguous in LinkedIn plain text. Preserve
+          // the caller's literal bytes instead of silently removing prose that
+          // the legacy line renderer transported.
+          rendered = code.raw;
+          break;
+        }
+        state.omissions.add("code blocks");
+        state.codeFlags.push({
+          index: state.codeFlags.length + 1,
+          ...(code.lang?.trim() ? { lang: code.lang.trim() } : {}),
+          preview: (code.text.split("\n")[0] ?? "").trim(),
+          sourceLine,
+        });
+        break;
+      }
+      case "def":
+        state.omissions.add("link reference definitions");
+        break;
+      case "hr":
+        state.omissions.add("thematic breaks");
+        break;
+      case "heading": {
+        const heading = token as Tokens.Heading;
+        const text = renderInlineTokens(
+          heading.tokens,
+          bold,
+          state.imageReplacements,
+          state,
+          sourceLine,
+        );
+        rendered = ensureRawTrailingNewlines(HEADING_MARKER + text, heading.raw);
+        break;
+      }
+      case "paragraph": {
+        const paragraph = token as Tokens.Paragraph;
+        rendered = ensureRawTrailingNewlines(
+          renderInlineTokens(
+            paragraph.tokens,
+            bold,
+            state.imageReplacements,
+            state,
+            sourceLine,
+          ),
+          paragraph.raw,
+        );
+        break;
+      }
+      case "text": {
+        const text = token as Tokens.Text;
+        rendered = ensureRawTrailingNewlines(
+          text.tokens
+            ? renderInlineTokens(
+                text.tokens,
+                bold,
+                state.imageReplacements,
+                state,
+                sourceLine,
+              )
+            : replaceKnownImageMarkers(
+                decodeHTMLStrict(text.text),
+                bold,
+                state.imageReplacements,
+              ),
+          text.raw,
+        );
+        break;
+      }
+      case "checkbox":
+        rendered = (token as Tokens.Checkbox).raw;
+        break;
+      case "blockquote": {
+        const quote = token as Tokens.Blockquote;
+        rendered = ensureRawTrailingNewlines(
+          renderBlockTokens(quote.tokens, bold, state, sourceLine),
+          quote.raw,
+        );
+        break;
+      }
+      case "list":
+        rendered = renderList(token as Tokens.List, bold, state, sourceLine);
+        break;
+      case "table":
+        rendered = ensureRawTrailingNewlines(
+          renderTable(token as Tokens.Table, bold, state, sourceLine),
+          token.raw,
+        );
+        break;
+      case "html":
+        throw rawHtmlUnsupported(1);
+      default:
+        throw unsupportedMarkdownToken(token.type);
+    }
+    out += rendered;
+    sourceLine += countLineFeeds(token.raw);
+  }
+
+  return out;
+}
+
+function markerOnlyLineStarts(value: string): number[] {
+  const starts: number[] = [];
+  let start = 0;
+  while (start <= value.length) {
+    const newline = value.indexOf("\n", start);
+    const end = newline < 0 ? value.length : newline;
+    const line = value.slice(start, end);
+    if (
+      line.includes("\u0000LI_IMAGE_") &&
+      line.replace(IMAGE_REPLACEMENT_RE, "").trim() === ""
+    ) {
+      starts.push(start);
+    }
+    if (newline < 0) break;
+    start = newline + 1;
+  }
+  return starts;
+}
+
+function resolveImageMarkers(
+  rendered: string,
+  state: LinkedInConversionState,
+): string {
+  let text = rendered;
+  const starts = markerOnlyLineStarts(text);
+  for (let index = starts.length - 1; index >= 0; index -= 1) {
+    const lineStart = starts[index];
+    const lineEndIndex = text.indexOf("\n", lineStart);
+    const lineEnd = lineEndIndex < 0 ? text.length : lineEndIndex;
+    const line = text.slice(lineStart, lineEnd);
+    if (line.replace(IMAGE_REPLACEMENT_RE, "").trim() !== "") continue;
+
+    let editEnd = lineEnd;
+    if (text[editEnd] === "\n") editEnd += 1;
+    const previousLineEnd = lineStart - 1;
+    const previousLineStart = text.lastIndexOf("\n", previousLineEnd - 1) + 1;
+    const previousLineIsBlank =
+      previousLineEnd >= 0 &&
+      text.slice(previousLineStart, previousLineEnd).trim() === "";
+    const nextLineEnd = text.indexOf("\n", editEnd);
+    const nextLineIsBlank =
+      editEnd < text.length &&
+      text.slice(editEnd, nextLineEnd < 0 ? text.length : nextLineEnd).trim() === "";
+    if (previousLineIsBlank && nextLineIsBlank) {
+      editEnd = nextLineEnd < 0 ? text.length : nextLineEnd + 1;
+    }
+    text = text.slice(0, lineStart) + text.slice(editEnd);
+  }
+
+  return text.replace(IMAGE_REPLACEMENT_RE, (_match, rawIndex: string) => {
+    const replacement = state.imageReplacements[Number(rawIndex)];
+    if (!replacement) throw unsupportedMarkdownToken("invalid_image_marker");
+    return replacement.transport;
+  });
+}
+
+function convertLinkedInMarkdown(md: string, bold: boolean): LinkedInMarkdownConversion {
+  const tokens = linkedinMarkdown.lexer(md);
+  assertNoRawHtml(tokens);
+  const state: LinkedInConversionState = {
+    codeFlags: [],
+    imageFlags: [],
+    imageReplacements: [],
+    linkFlags: [],
+    seenLinks: new Set<string>(),
+    omissions: new Set<EmptyOmission>(),
+  };
+  let rendered = renderBlockTokens(tokens, bold, state);
+  rendered = resolveImageMarkers(rendered, state);
+
+  const firstNonBlank = rendered.split("\n").find((line) => line.trim() !== "") ?? "";
+  const firstLineWasHeading = firstNonBlank.startsWith(HEADING_MARKER);
+  rendered = rendered.replaceAll(HEADING_MARKER, "");
+  const text = rendered.replace(/^\n+/, "").replace(/\n+$/, "");
+  return {
+    text,
+    firstLineWasHeading,
+    firstLineWasLink: /^https?:\/\//.test(text.trimStart()),
+    codeFlags: state.codeFlags,
+    imageFlags: state.imageFlags,
+    linkFlags: state.linkFlags,
+    omissions: state.omissions,
+  };
 }
 
 /** Compute the above-the-fold preview: up to the first blank line, capped at ~210. */
@@ -536,35 +770,31 @@ export function generatePost(md: string, opts: GeneratePostOptions = {}): Genera
   }
 
   const normalizedMd = md.replace(/\r\n?/g, "\n");
-  const imageAnalysis = analyzeMarkdownImages(normalizedMd);
+  const conversion = convertLinkedInMarkdown(normalizedMd, bold);
 
-  // Reuse the shared parser for the code-block flags (its fence scan is source-
-  // wide, so it's correct for both --text and --from). Links, however, are
-  // collected LOCALLY from the raw source — the shared parser only flags links in
-  // the parsed BODY, missing a single-line --text whose one line becomes the title.
-  const parsed = parseBaseMarkdown(normalizedMd);
-  const linkFlags: LinkFlag[] = mergeLinkFlags(
-    collectParserLinkFlags(normalizedMd),
-    collectLinkFlags(imageAnalysis.markdown),
-  );
-  const codeFlags = parsed.codeFlags.map((flag) => ({
+  const linkFlags = conversion.linkFlags;
+  const codeFlags = conversion.codeFlags.map((flag) => ({
     ...flag,
     sourceLine: flag.sourceLine + sourceLineOffset,
   }));
-  const imageFlags = imageAnalysis.flags.map((flag) => ({
+  const imageFlags = conversion.imageFlags.map((flag) => ({
     ...flag,
     sourceLine: flag.sourceLine + sourceLineOffset,
   }));
 
-  const { text: rendered, firstLineWasHeading, firstLineWasLink } = renderPlainText(
-    imageAnalysis.markdown,
-    bold,
-  );
+  const {
+    text: rendered,
+    firstLineWasHeading,
+    firstLineWasLink,
+  } = conversion;
 
   if (!rendered.trim()) {
+    const causes = conversion.omissions.size > 0
+      ? [...conversion.omissions].join(", ")
+      : "whitespace";
     throw new LocalValidationError(
       "LinkedIn post is empty after Markdown-to-plain-text conversion. " +
-        "Code blocks and Markdown images are not transported as post text.",
+        "The input contained only non-transporting " + causes + ".",
       {
         code: "linkedin_text_empty_after_conversion",
         field: "text",
