@@ -564,9 +564,9 @@ test("throwing and stateful draft-result getters cannot leak or manufacture succ
     { content: generated },
     dependencies(async () => async () => stateful),
   );
-  assert.equal(phaseReads, 1);
+  assert.equal(phaseReads, 0);
   assert.equal(statefulOutcome.kind, "save_incomplete");
-  assert.equal(statefulOutcome.savePhase, "save_delivered_unverified");
+  assert.equal(statefulOutcome.savePhase, "save_delivery_unknown");
   assert.equal(statefulOutcome.exitCode, 1);
 });
 
@@ -593,7 +593,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
         { content: generated },
         dependencies(async () => async () => topLevel),
       );
-      assert.equal(topLevelReads, 1);
+      assert.equal(topLevelReads, format === "article" ? 1 : 0);
       assert.equal(topLevelOutcome.kind, "save_incomplete");
       assert.equal(topLevelOutcome.savePhase, "save_delivery_unknown");
       assert.equal(topLevelOutcome.saveMechanism, expectedMechanism);
@@ -615,7 +615,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
         { content: generated },
         dependencies(async () => async () => nested),
       );
-      assert.equal(nestedReads, 1);
+      assert.equal(nestedReads, format === "article" ? 1 : 0);
       assert.equal(nestedOutcome.kind, "save_incomplete");
       assert.equal(nestedOutcome.savePhase, "save_delivery_unknown");
       assert.equal(nestedOutcome.saveMechanism, expectedMechanism);
@@ -639,7 +639,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
     { content: generated },
     dependencies(async () => async () => stateful),
   );
-  assert.equal(statefulReads, 1);
+  assert.equal(statefulReads, 0);
   assert.equal(statefulOutcome.savePhase, "save_delivery_unknown");
   assert.equal(statefulOutcome.exitCode, 1);
 
@@ -654,7 +654,7 @@ test("resolved result getters cannot turn branded errors into pre-Save evidence"
   assert.equal(revokedOutcome.exitCode, 1);
 });
 
-test("throwing or stateful nested row evidence is read once and cannot manufacture success", async () => {
+test("throwing or stateful nested row evidence cannot be invoked or manufacture success", async () => {
   const generated = await content("tweet");
   const throwingEvidence = Object.defineProperty({}, "status", {
     get() { throw new Error(RAW_CANARY); },
@@ -688,7 +688,7 @@ test("throwing or stateful nested row evidence is read once and cannot manufactu
     { content: generated },
     dependencies(async () => async () => stateful),
   );
-  assert.equal(statusReads, 1);
+  assert.equal(statusReads, 0);
   assert.equal(outcome.savePhase, "save_delivery_unknown");
   assert.equal(outcome.draftRowEvidence, null);
 

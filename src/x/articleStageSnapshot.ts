@@ -11,6 +11,15 @@ import {
   X_ARTICLE_CODE_BLOCK_COUNT_LIMIT,
   XDraftStageError,
 } from "./saveProgress.js";
+import {
+  createXGeneratedContentSnapshotContext,
+  snapshotXBoundedString,
+  snapshotXGeneratedNonArticleContent,
+  snapshotXOptionalBoolean,
+  snapshotXPlainRecord,
+  type XGeneratedContentSnapshotContext,
+  type XSnapshotRecordReader,
+} from "./nonArticleStageSnapshot.js";
 
 const MAX_TITLE_CODE_UNITS = 100_000;
 const MAX_MARKDOWN_CODE_UNITS = 10_000_000;
@@ -98,6 +107,22 @@ export interface XArticleStageSnapshot {
   readonly receiptCodeBlockCount: number | "many";
 }
 
+export interface XNonArticleStageSnapshot {
+  readonly content: GeneratedContent;
+  readonly format: "tweet" | "thread";
+  readonly posts: readonly string[];
+  readonly expectedPosts: number;
+  readonly intendedFirstPostText: string;
+  readonly inspect: boolean | undefined;
+  readonly force: boolean | undefined;
+  readonly basePath: string | undefined;
+  readonly stageOptions: Readonly<{
+    inspect: boolean | undefined;
+    force?: boolean | undefined;
+    basePath: string | undefined;
+  }>;
+}
+
 interface SnapshotContext {
   readonly active: WeakSet<object>;
   totalRuns: number;
@@ -119,29 +144,36 @@ function fail(reason: XArticleStageSnapshotFailure): never {
  * preserve the single-read boundary, then rejected before any runtime load.
  */
 export function snapshotXContentFormat(value: unknown): XFormat {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (typeof value !== "object" || value === null) {
     fail("not_plain_object");
   }
   let proxy: boolean;
+  let array: boolean;
   let prototype: object | null;
   try {
     proxy = isProxy(value);
-    prototype = Object.getPrototypeOf(value);
   } catch {
     fail("proxy_object");
   }
   if (proxy) fail("proxy_object");
+  try {
+    array = Array.isArray(value);
+    prototype = Object.getPrototypeOf(value);
+  } catch {
+    fail("proxy_object");
+  }
+  if (array) fail("not_plain_object");
   if (prototype !== Object.prototype) fail("not_plain_object");
 
-  let keys: PropertyKey[];
   let descriptor: PropertyDescriptor | undefined;
+  let articleDescriptor: PropertyDescriptor | undefined;
   try {
-    keys = Reflect.ownKeys(value);
     descriptor = Object.getOwnPropertyDescriptor(value, "format");
+    articleDescriptor = Object.getOwnPropertyDescriptor(value, "article");
   } catch {
     fail("property_read_failed");
   }
-  if (!descriptor || !descriptor.enumerable || !keys.includes("format")) {
+  if (!descriptor || !descriptor.enumerable) {
     fail("unexpected_property");
   }
   if (!("value" in descriptor)) readAccessorOnce(value, "format");
@@ -149,16 +181,12 @@ export function snapshotXContentFormat(value: unknown): XFormat {
   if (format !== "tweet" && format !== "thread" && format !== "article") {
     fail("invalid_value");
   }
-  const hasArticle = keys.includes("article");
+  const hasArticle = articleDescriptor !== undefined;
   if ((format === "article") !== hasArticle) fail("unexpected_property");
   return format;
 }
 
-/**
- * Detach and freeze the non-Article union root before an awaited loader/profile
- * boundary. Nested tweet/thread values retain their historical transport
- * semantics, while the captured root can no longer flip into Article shape.
- */
+/** Deep-copy the complete generated tweet/thread graph before any runtime seam. */
 export function snapshotXNonArticleStageContent(
   value: unknown,
   observedFormat: unknown,
@@ -166,31 +194,138 @@ export function snapshotXNonArticleStageContent(
   if (observedFormat !== "tweet" && observedFormat !== "thread") {
     fail("invalid_value");
   }
-  const context: SnapshotContext = {
-    active: new WeakSet<object>(),
-    totalRuns: 0,
-    totalTextCodeUnits: 0,
-  };
-  const payloadKey = observedFormat;
-  return withPlainRecord(
-    value,
-    ["format", "limit", payloadKey, "codeFlags", "linkFlags", "fidelityFlags", "warnings"],
-    [],
-    context,
-    (reader) => {
-      if (reader.read("format") !== observedFormat) fail("invalid_value");
-      return Object.freeze({
-        format: observedFormat,
-        limit: reader.read("limit"),
-        [payloadKey]: reader.read(payloadKey),
-        codeFlags: reader.read("codeFlags"),
-        linkFlags: reader.read("linkFlags"),
-        fidelityFlags: reader.read("fidelityFlags"),
-        warnings: reader.read("warnings"),
-      }) as GeneratedContent;
-    },
-    { format: observedFormat },
+  try {
+    const content = snapshotXGeneratedNonArticleContent(
+      value,
+      createXGeneratedContentSnapshotContext(),
+    );
+    if (content.format !== observedFormat) fail("invalid_value");
+    return content;
+  } catch {
+    fail("invalid_value");
+  }
+}
+
+function snapshotOptionalBasePath(
+  reader: XSnapshotRecordReader,
+  context: XGeneratedContentSnapshotContext,
+): string | undefined {
+  if (!reader.has("basePath")) return undefined;
+  const value = reader.read("basePath");
+  return value === undefined
+    ? undefined
+    : snapshotXBoundedString(value, 1_000_000, context);
+}
+
+function finishNonArticleStageSnapshot(
+  content: GeneratedContent,
+  inspect: boolean | undefined,
+  force: boolean | undefined,
+  basePath: string | undefined,
+  includeForce: boolean,
+): XNonArticleStageSnapshot {
+  if (content.format !== "tweet" && content.format !== "thread") {
+    fail("invalid_value");
+  }
+  const posts = Object.freeze(
+    content.format === "thread"
+      ? content.thread!.map((row) => row.text)
+      : [content.tweet!.text],
   );
+  const expectedPosts = posts.length;
+  const intendedFirstPostText = posts[0];
+  const stageOptions = Object.freeze({
+    inspect,
+    ...(includeForce ? { force } : {}),
+    basePath,
+  });
+  return Object.freeze({
+    content,
+    format: content.format,
+    posts,
+    expectedPosts,
+    intendedFirstPostText,
+    inspect,
+    force,
+    basePath,
+    stageOptions,
+  });
+}
+
+/**
+ * Snapshot the command-owned non-Article request as one exact graph. The
+ * already-observed content identity prevents a second mutable root read.
+ */
+export function snapshotXNonArticleExecuteRequest(
+  value: unknown,
+  observedContent: unknown,
+  observedFormat: unknown,
+): XNonArticleStageSnapshot {
+  if (observedFormat !== "tweet" && observedFormat !== "thread") {
+    fail("invalid_value");
+  }
+  const context = createXGeneratedContentSnapshotContext();
+  try {
+    return snapshotXPlainRecord(
+      value,
+      ["content"],
+      ["inspect", "basePath"],
+      context,
+      (reader) => {
+        const contentValue = reader.read("content");
+        if (contentValue !== observedContent) fail("invalid_value");
+        const content = snapshotXGeneratedNonArticleContent(contentValue, context);
+        if (content.format !== observedFormat) fail("invalid_value");
+        const inspect = snapshotXOptionalBoolean(reader, "inspect");
+        const basePath = snapshotOptionalBasePath(reader, context);
+        return finishNonArticleStageSnapshot(
+          content,
+          inspect,
+          undefined,
+          basePath,
+          false,
+        );
+      },
+    );
+  } catch {
+    fail("invalid_value");
+  }
+}
+
+/** Snapshot direct stageDraft content/options before profile or page access. */
+export function snapshotXNonArticleDirectStageRequest(
+  contentValue: unknown,
+  observedFormat: unknown,
+  optionsValue: unknown,
+): XNonArticleStageSnapshot {
+  if (observedFormat !== "tweet" && observedFormat !== "thread") {
+    fail("invalid_value");
+  }
+  const context = createXGeneratedContentSnapshotContext();
+  try {
+    const content = snapshotXGeneratedNonArticleContent(contentValue, context);
+    if (content.format !== observedFormat) fail("invalid_value");
+    return snapshotXPlainRecord(
+      optionsValue,
+      [],
+      ["inspect", "force", "basePath"],
+      context,
+      (reader) => {
+        const inspect = snapshotXOptionalBoolean(reader, "inspect");
+        const force = snapshotXOptionalBoolean(reader, "force");
+        const basePath = snapshotOptionalBasePath(reader, context);
+        return finishNonArticleStageSnapshot(
+          content,
+          inspect,
+          force,
+          basePath,
+          true,
+        );
+      },
+    );
+  } catch {
+    fail("invalid_value");
+  }
 }
 
 function readAccessorOnce(record: object, key: string): never {
