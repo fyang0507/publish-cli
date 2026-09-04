@@ -181,6 +181,20 @@ test("Article snapshot is detached, recursively frozen, and pre-renders one clos
   assert.doesNotMatch(snapshot.plain, /SECRET_CODE_PAYLOAD/);
 });
 
+test("already-structured subheadings retain the established h2 staging compatibility path", async () => {
+  const content = await generateContent("# Structured title\n\nBody", { format: "article" });
+  assert.ok(content.article);
+  content.article.blocks = [
+    { kind: "subheading", runs: [{ text: "Compatibility heading", bold: true }] },
+  ];
+
+  const snapshot = snapshotXArticleStageInput(content, "article");
+  assert.equal(snapshot.html, "<h2><strong>Compatibility heading</strong></h2>");
+  assert.equal(snapshot.plain, "Compatibility heading");
+  assert.equal(snapshot.codeBlockCount, 0);
+  assert.equal(snapshot.receiptCodeBlockCount, 0);
+});
+
 test("valid empty explicit and EOF Article fences survive snapshot accounting", async () => {
   for (const source of [
     "# Empty explicit\n\n```\n```\n",
@@ -419,9 +433,17 @@ test("hostile Article shapes fail closed with exit 2 before the staging loader",
 
 test("every Article staging field accessor is invoked once then rejected pre-loader", async () => {
   const base = await generateContent(
-    "# Getter matrix\n\n## Section\n\n**bold** *italic* `inline` [label](https://example.com/safe)\n\n```ts\ncode preview\n```",
+    "# Getter matrix\n\n## Section\n\n**bold** *italic* plain [label](https://example.com/safe)\n\n```ts\ncode preview\n```",
     { format: "article" },
   );
+  const syntheticCodeRun = base.article?.blocks
+    .find((block) => block.kind === "paragraph" && block.runs.some((run) => run.text === " plain "));
+  if (!syntheticCodeRun || syntheticCodeRun.kind === "code") {
+    throw new Error("missing synthetic inline-code snapshot fixture run");
+  }
+  const codeRun = syntheticCodeRun.runs.find((run) => run.text === " plain ");
+  if (!codeRun) throw new Error("missing synthetic inline-code snapshot fixture run");
+  codeRun.code = true;
 
   type Target = {
     record: Record<PropertyKey, unknown>;
