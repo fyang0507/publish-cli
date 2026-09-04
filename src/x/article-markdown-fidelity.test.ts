@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BrowserContext, Locator, Page } from "playwright";
 import { LocalValidationError } from "../capabilities/validation.js";
 import { splitLeadingFrontmatter } from "../commands/contentInput.js";
@@ -14,6 +17,17 @@ import {
   stageArticleDraft,
   type ArticleDraftStageDependencies,
 } from "./draftPoster.js";
+import { preloadXArticleCover } from "./articleCover.js";
+
+const COVER_DIR = mkdtempSync(join(tmpdir(), "publish-x-article-markdown-cover-"));
+const COVER_PATH = join(COVER_DIR, "cover.png");
+const COVER_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+writeFileSync(COVER_PATH, COVER_BYTES);
+const ARTICLE_COVER = preloadXArticleCover(COVER_PATH);
+test.after(() => rmSync(COVER_DIR, { recursive: true, force: true }));
 
 // Construct tilde fences so the public-content scanner does not interpret
 // Markdown test literals as shell home-directory spellings.
@@ -838,6 +852,7 @@ function stageDependencies(capture: {
     async openHub() {},
     async locateCreate() { return { async click() {} } as unknown as Locator; },
     currentEditUrl() { return "https://x.com/compose/articles/edit/12345"; },
+    async settledEditUrl() { return "https://x.com/compose/articles/edit/12345"; },
     async locateTitle() { return locator; },
     async writeTitle(_page, _title, value) { capture.title = value; },
     async locateBody() { return locator; },
@@ -847,18 +862,27 @@ function stageDependencies(capture: {
     },
     async stageCover() {
       return {
-        status: "missing",
-        ratio: "not_observed",
-        width: null,
-        height: null,
-        crop: "not_observed",
+        selection: "explicit" as const,
+        contentType: "image/png" as const,
+        width: ARTICLE_COVER.width,
+        height: ARTICLE_COVER.height,
+        ratio: "exact_5_2" as const,
+        sourceSha256: ARTICLE_COVER.sourceSha256,
+        requested: true as const,
+        resolved: true as const,
+        set: true,
+        setPhase: "set_returned" as const,
+        uploaded: null,
+        applyPhase: "returned" as const,
+        observed: true,
+        verified: null,
       };
     },
     async settle() {},
     async verify(_page, _url, title, body) {
       capture.verifyTitle = title;
       capture.verifyBody = body;
-      return true;
+      return { content: true, cover: true };
     },
   };
 }
@@ -871,7 +895,7 @@ test("consumed H1 followed by H1/H2 stages the exact title and body tuple", asyn
     {} as BrowserContext,
     {} as Page,
     content,
-    undefined,
+    ARTICLE_COVER,
     stageDependencies(capture),
   );
   assert.equal(result.savePhase, "verified");

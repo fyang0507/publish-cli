@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BrowserContext, Locator, Page } from "playwright";
 import { executeXDraftRealRun } from "../commands/draft.js";
 import {
@@ -16,14 +19,34 @@ import {
   type StageDraftResult,
 } from "./draftPoster.js";
 import type { XArticleCoverHandoff } from "./saveProgress.js";
+import { preloadXArticleCover } from "./articleCover.js";
 
-function missingCover(): XArticleCoverHandoff {
+const COVER_DIR = mkdtempSync(join(tmpdir(), "publish-x-article-eof-cover-"));
+const COVER_PATH = join(COVER_DIR, "cover.png");
+const COVER_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+writeFileSync(COVER_PATH, COVER_BYTES);
+const ARTICLE_COVER = preloadXArticleCover(COVER_PATH);
+test.after(() => rmSync(COVER_DIR, { recursive: true, force: true }));
+
+function stagedCover(): XArticleCoverHandoff {
   return {
-    status: "missing",
-    ratio: "not_observed",
-    width: null,
-    height: null,
-    crop: "not_observed",
+    selection: "explicit",
+    contentType: "image/png",
+    width: ARTICLE_COVER.width,
+    height: ARTICLE_COVER.height,
+    ratio: "exact_5_2",
+    sourceSha256: ARTICLE_COVER.sourceSha256,
+    requested: true,
+    resolved: true,
+    set: true,
+    setPhase: "set_returned",
+    uploaded: null,
+    applyPhase: "returned",
+    observed: true,
+    verified: null,
   };
 }
 
@@ -277,6 +300,7 @@ function articleDependencies(
     async openHub() {},
     async locateCreate() { return create; },
     currentEditUrl() { return "https://x.com/compose/articles/edit/12345"; },
+    async settledEditUrl() { return "https://x.com/compose/articles/edit/12345"; },
     async locateTitle() { return locator; },
     async writeTitle() {},
     async locateBody() { return locator; },
@@ -284,9 +308,9 @@ function articleDependencies(
       captured.html = html;
       captured.plain = plain;
     },
-    async stageCover() { return missingCover(); },
+    async stageCover() { return stagedCover(); },
     async settle() {},
-    async verify() { return verified; },
+    async verify() { return { content: verified, cover: verified }; },
   };
 }
 
@@ -299,7 +323,7 @@ async function stageEofArticle(
     {} as BrowserContext,
     {} as Page,
     content,
-    undefined,
+    ARTICLE_COVER,
     articleDependencies(verified, captured),
   );
 }
@@ -322,7 +346,7 @@ test("verified and unverified EOF Article handoffs exclude and report the same c
     assert.doesNotMatch(`${captured.html}\n${captured.plain}`, /EXACT_CODE_PAYLOAD|inside-code|body\.png/);
 
     const outcome = await executeXDraftRealRun(
-      { content },
+      { content, cover: ARTICLE_COVER },
       { async loadStageDraft() { return async () => staged; } },
     );
     assert.equal(outcome.kind, verified ? "staged" : "save_incomplete");
@@ -345,7 +369,7 @@ test("mismatched or stateful returned Article counts cannot print a false receip
       articleHandoff: { ...staged.articleHandoff, codeBlockCount: 0 },
     } as StageDraftResult;
     const outcome = await executeXDraftRealRun(
-      { content },
+      { content, cover: ARTICLE_COVER },
       { async loadStageDraft() { return async () => mismatch; } },
     );
     assert.equal(outcome.kind, "save_incomplete");
@@ -368,7 +392,7 @@ test("mismatched or stateful returned Article counts cannot print a false receip
     articleHandoff: statefulHandoff,
   } as unknown as StageDraftResult;
   const outcome = await executeXDraftRealRun(
-    { content },
+    { content, cover: ARTICLE_COVER },
     { async loadStageDraft() { return async () => stateful; } },
   );
   assert.equal(countReads, 0);
@@ -457,7 +481,7 @@ test("every generated Article accounting invariant fails before loading the stag
     const prepared = fixture.makeContent();
     let loaderCalls = 0;
     const outcome = await executeXDraftRealRun(
-      { content: prepared.generated },
+      { content: prepared.generated, cover: ARTICLE_COVER },
       {
         async loadStageDraft() {
           loaderCalls += 1;

@@ -17,7 +17,6 @@ export {
 export const X_STANDARD_POST_MAX_WEIGHTED_LENGTH = 280;
 export const X_PREMIUM_POST_PLATFORM_MAX_LENGTH = 25_000;
 export const LINKEDIN_POST_MAX_UTF16_CODE_UNITS = 3_000;
-export const X_ARTICLE_COVER_POSITIVE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp"] as const;
 export const WECHAT_COVER_EXTENSIONS = [".bmp", ".png", ".jpg", ".jpeg", ".gif"] as const;
 export const WECHAT_BODY_IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png"] as const;
 
@@ -105,12 +104,6 @@ export function validateXPremiumTransportText(
     countUnicodeCodePoints(text),
     maximum,
     "unicode_code_points_transport_policy",
-  );
-}
-
-export function isLivePositiveXArticleCoverPath(localPath: string): boolean {
-  return (X_ARTICLE_COVER_POSITIVE_EXTENSIONS as readonly string[]).includes(
-    extname(localPath).toLowerCase(),
   );
 }
 
@@ -245,7 +238,7 @@ export interface LocalImageInspection {
   problem: LocalValidationProblem | null;
 }
 
-interface DetectedImage {
+export interface DetectedLocalImage {
   contentType: LocalImageContentType;
   width: number | null;
   height: number | null;
@@ -268,7 +261,7 @@ function positiveDimensions(
   contentType: LocalImageContentType,
   width: number,
   height: number,
-): DetectedImage {
+): DetectedLocalImage {
   return {
     contentType,
     width: width > 0 ? width : null,
@@ -286,7 +279,7 @@ function isJpegStartOfFrame(marker: number): boolean {
 }
 
 /** Detect a supported bitmap type and dimensions from its bytes, never its suffix. */
-function detectImage(buffer: Buffer): DetectedImage | null {
+export function detectLocalImageBytes(buffer: Buffer): DetectedLocalImage | null {
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   if (
     buffer.length >= 24 &&
@@ -532,7 +525,7 @@ export function inspectLocalImage(localPath: string): LocalImageInspection {
     }
   }
 
-  let detected = detectImage(buffer);
+  let detected = detectLocalImageBytes(buffer);
   if (detected?.contentType === "image/jpeg" && detected.width === null) {
     const dimensions = inspectJpegDimensions(localPath, stat.size);
     if (dimensions) {

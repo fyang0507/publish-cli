@@ -9,6 +9,10 @@ import {
   type ArticleCodeBlockFlag,
   type ArticleCodeLinkAdvisory,
 } from "./codeAdvisory.js";
+import {
+  X_ARTICLE_COVER_DIMENSION_REPRESENTATION_LIMIT,
+  type XArticleCoverContentType,
+} from "./articleCover.js";
 
 /**
  * Closed evidence contract for X draft persistence progress (issue #82).
@@ -280,35 +284,27 @@ export type XReplyTargetEvidence =
   | XReplyTargetEvidenceMismatch
   | XReplyTargetEvidenceVerified;
 
-/** Closed, bounded Article-only handoff facts retained outside free-form notes. */
-type XArticleCoverGeometry =
-  | {
-      ratio: "unknown";
-      width: null;
-      height: null;
-    }
-  | {
-      ratio: "within_5_2" | "outside_5_2";
-      width: number;
-      height: number;
-    };
-
-export type XArticleCoverHandoff =
-  | {
-      status: "missing";
-      ratio: "not_observed";
-      width: null;
-      height: null;
-      crop: "not_observed";
-    }
-  | (XArticleCoverGeometry & {
-      status: "upload_incomplete";
-      crop: "not_observed";
-    })
-  | (XArticleCoverGeometry & {
-      status: "attached";
-      crop: "applied" | "unverified";
-    });
+/** Closed, bounded Article-cover facts retained outside free-form notes. */
+export interface XArticleCoverHandoff {
+  readonly selection: "explicit";
+  readonly contentType: XArticleCoverContentType;
+  readonly width: number;
+  readonly height: number;
+  readonly ratio: "exact_5_2";
+  readonly sourceSha256: string;
+  readonly requested: true;
+  readonly resolved: true;
+  /** Whether handing off the exact payload returned; null means delivery is unknown. */
+  readonly set: boolean | null;
+  readonly setPhase: "target_unavailable" | "set_delivery_unknown" | "set_returned";
+  /** Browser staging exposes no stable native upload identifier. */
+  readonly uploaded: null;
+  readonly applyPhase: "not_reached" | "not_observed" | "failed" | "returned";
+  /** A cover affordance/preview attributable to this run was observed. */
+  readonly observed: boolean;
+  /** True only when that cover observation survives reopening the captured edit URL. */
+  readonly verified: boolean | null;
+}
 
 export interface XArticleDraftHandoff {
   body: "rich_html";
@@ -322,7 +318,6 @@ export interface XArticleDraftHandoff {
 }
 
 export const X_ARTICLE_CODE_BLOCK_COUNT_LIMIT = X_ARTICLE_CODE_ADVISORY_COUNT_MAX;
-export const X_ARTICLE_IMAGE_DIMENSION_LIMIT = 100_000_000;
 
 export type XDraftSaveFailurePhase = Exclude<XDraftSavePhase, "verified">;
 export type XDraftReturnedSavePhase = Extract<
@@ -831,7 +826,7 @@ export function isXReplyEvidenceCompatible(
 function isArticleDimension(value: unknown): value is number {
   return Number.isInteger(value) &&
     (value as number) > 0 &&
-    (value as number) <= X_ARTICLE_IMAGE_DIMENSION_LIMIT;
+    (value as number) <= X_ARTICLE_COVER_DIMENSION_REPRESENTATION_LIMIT;
 }
 
 function articleHandoffRecord(
@@ -875,10 +870,22 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
     const codeLinkAdvisories = snapshotXArticleCodeLinkAdvisories(
       source.get("codeLinkAdvisories"),
     );
-    const coverSource = articleHandoffRecord(
-      source.get("cover"),
-      ["status", "ratio", "width", "height", "crop"],
-    );
+    const coverSource = articleHandoffRecord(source.get("cover"), [
+      "selection",
+      "contentType",
+      "width",
+      "height",
+      "ratio",
+      "sourceSha256",
+      "requested",
+      "resolved",
+      "set",
+      "setPhase",
+      "uploaded",
+      "applyPhase",
+      "observed",
+      "verified",
+    ]);
     if (
       body !== "rich_html" ||
       !(
@@ -901,58 +908,58 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
     ) return null;
 
     const cover = {
-      status: coverSource.get("status"),
-      ratio: coverSource.get("ratio"),
+      selection: coverSource.get("selection"),
+      contentType: coverSource.get("contentType"),
       width: coverSource.get("width"),
       height: coverSource.get("height"),
-      crop: coverSource.get("crop"),
+      ratio: coverSource.get("ratio"),
+      sourceSha256: coverSource.get("sourceSha256"),
+      requested: coverSource.get("requested"),
+      resolved: coverSource.get("resolved"),
+      set: coverSource.get("set"),
+      setPhase: coverSource.get("setPhase"),
+      uploaded: coverSource.get("uploaded"),
+      applyPhase: coverSource.get("applyPhase"),
+      observed: coverSource.get("observed"),
+      verified: coverSource.get("verified"),
     };
-    if (cover.status === "missing") {
-      if (
-        cover.ratio !== "not_observed" ||
-        cover.width !== null ||
-        cover.height !== null ||
-        cover.crop !== "not_observed"
-      ) return null;
-      return Object.freeze({
-        body,
-        codeBlockCount: codeBlockCount as number | "many",
-        codeAdvisories,
-        codeLinkAdvisories,
-        cover: Object.freeze(cover) as Extract<XArticleCoverHandoff, { status: "missing" }>,
-      });
-    }
-    if (cover.status !== "upload_incomplete" && cover.status !== "attached") return null;
     if (
-      cover.ratio !== "within_5_2" &&
-      cover.ratio !== "outside_5_2" &&
-      cover.ratio !== "unknown"
+      cover.selection !== "explicit" ||
+      (cover.contentType !== "image/jpeg" &&
+        cover.contentType !== "image/png" &&
+        cover.contentType !== "image/webp") ||
+      !isArticleDimension(cover.width) ||
+      !isArticleDimension(cover.height) ||
+      cover.ratio !== "exact_5_2" ||
+      (cover.width as number) * 2 !== (cover.height as number) * 5 ||
+      typeof cover.sourceSha256 !== "string" ||
+      !/^[a-f0-9]{64}$/u.test(cover.sourceSha256) ||
+      cover.requested !== true ||
+      cover.resolved !== true ||
+      (cover.set !== true && cover.set !== false && cover.set !== null) ||
+      (cover.setPhase !== "target_unavailable" &&
+        cover.setPhase !== "set_delivery_unknown" &&
+        cover.setPhase !== "set_returned") ||
+      cover.uploaded !== null ||
+      (cover.applyPhase !== "not_reached" &&
+        cover.applyPhase !== "not_observed" &&
+        cover.applyPhase !== "failed" &&
+        cover.applyPhase !== "returned") ||
+      typeof cover.observed !== "boolean" ||
+      (cover.verified !== true && cover.verified !== false && cover.verified !== null) ||
+      ((cover.setPhase === "set_returned") !== (cover.set === true)) ||
+      ((cover.setPhase === "target_unavailable") !== (cover.set === false)) ||
+      ((cover.setPhase === "set_delivery_unknown") !== (cover.set === null)) ||
+      (cover.set !== true && cover.applyPhase !== "not_reached") ||
+      (cover.verified === true &&
+        !(cover.set === true && cover.applyPhase === "returned" && cover.observed))
     ) return null;
-    const hasDimensions = isArticleDimension(cover.width) && isArticleDimension(cover.height);
-    if (cover.ratio === "unknown") {
-      if (cover.width !== null || cover.height !== null) return null;
-    } else {
-      if (!hasDimensions) return null;
-      const within = Math.abs((cover.width as number) / (cover.height as number) - 2.5) <= 0.02;
-      if ((cover.ratio === "within_5_2") !== within) return null;
-    }
-    if (cover.status === "upload_incomplete") {
-      if (cover.crop !== "not_observed") return null;
-      return Object.freeze({
-        body,
-        codeBlockCount: codeBlockCount as number | "many",
-        codeAdvisories,
-        codeLinkAdvisories,
-        cover: Object.freeze(cover) as Extract<XArticleCoverHandoff, { status: "upload_incomplete" }>,
-      });
-    }
-    if (cover.crop !== "applied" && cover.crop !== "unverified") return null;
     return Object.freeze({
       body,
       codeBlockCount: codeBlockCount as number | "many",
       codeAdvisories,
       codeLinkAdvisories,
-      cover: Object.freeze(cover) as Extract<XArticleCoverHandoff, { status: "attached" }>,
+      cover: Object.freeze(cover) as XArticleCoverHandoff,
     });
   } catch {
     return null;

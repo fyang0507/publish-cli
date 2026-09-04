@@ -31,6 +31,16 @@ function png(width: number, height: number): Buffer {
   return value;
 }
 
+const VALID_TINY_X_ARTICLE_COVER_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+
+const VALID_WRONG_RATIO_X_ARTICLE_COVER_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAADCAIAAADUVFKvAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsBPgAASAACnBWjcwAAAAASUVORK5CYII=",
+  "base64",
+);
+
 function gif(width: number, height: number): Buffer {
   const value = Buffer.alloc(10);
   value.write("GIF89a", 0, "ascii");
@@ -94,9 +104,28 @@ function runCli(
   fixture: CliFixture,
   args: string[],
   input?: string,
-  options: { cwd?: string; dataDir?: string; repoDir?: string; wechatAuthor?: string } = {},
+  options: {
+    cwd?: string;
+    dataDir?: string;
+    repoDir?: string;
+    wechatAuthor?: string;
+    /** Legacy Article fixtures opt in by default; omission tests disable this. */
+    autoXArticleCover?: boolean;
+  } = {},
 ): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, ["--import", fixture.loaderPath, CLI_PATH, ...args], {
+  let invocationArgs = args;
+  if (
+    options.autoXArticleCover !== false &&
+    args[0] === "x" &&
+    args[1] === "draft" &&
+    args[args.indexOf("--format") + 1] === "article" &&
+    !args.includes("--cover")
+  ) {
+    const coverPath = join(fixture.dir, "required-x-article-cover.png");
+    if (!existsSync(coverPath)) writeFileSync(coverPath, VALID_TINY_X_ARTICLE_COVER_PNG);
+    invocationArgs = [...args, "--cover", coverPath];
+  }
+  return spawnSync(process.execPath, ["--import", fixture.loaderPath, CLI_PATH, ...invocationArgs], {
     encoding: "utf8",
     input,
     cwd: options.cwd,
@@ -122,14 +151,41 @@ test("invalid draft inputs exit 2 before importing platform/browser/API stacks",
     const validLinkedinMedia = join(fixture.dir, "valid-linkedin.png");
     const validWechatCover = join(fixture.dir, "valid-wechat-cover.png");
     const invalidWechatBody = join(fixture.dir, "invalid-wechat-body.gif");
+    const xArticleSource = join(fixture.dir, "x-article.md");
+    const validXCover = join(fixture.dir, "x-cover.png");
+    const wrongRatioXCover = join(fixture.dir, "x-cover-wrong-ratio.png");
     writeFileSync(badCover, "not an image");
     writeFileSync(validLinkedinMedia, png(1200, 800));
     writeFileSync(validWechatCover, png(900, 900));
     writeFileSync(invalidWechatBody, gif(640, 480));
-    const cases: Array<{ args: string[]; evidence: RegExp }> = [
+    writeFileSync(xArticleSource, "# Local article\n\nBody.\n");
+    writeFileSync(validXCover, VALID_TINY_X_ARTICLE_COVER_PNG);
+    writeFileSync(wrongRatioXCover, VALID_WRONG_RATIO_X_ARTICLE_COVER_PNG);
+    const cases: Array<{ args: string[]; evidence: RegExp; autoXArticleCover?: boolean }> = [
       {
         args: ["x", "draft", "--format", "tweet", "--text", "a".repeat(281)],
         evidence: /281 weighted chars.*limit is 280/s,
+      },
+      {
+        args: ["x", "draft", "--format", "article", "--from", xArticleSource],
+        evidence: /requires an explicit --cover path/i,
+        autoXArticleCover: false,
+      },
+      {
+        args: ["x", "draft", "--format", "tweet", "--text", "body", "--cover", validXCover],
+        evidence: /--cover is supported only with --format article/i,
+      },
+      {
+        args: ["x", "draft", "--format", "thread", "--text", "body", "--cover", validXCover],
+        evidence: /--cover is supported only with --format article/i,
+      },
+      {
+        args: ["x", "draft", "--format", "article", "--from", xArticleSource, "--cover", badCover],
+        evidence: /unsupported or invalid image header/i,
+      },
+      {
+        args: ["x", "draft", "--format", "article", "--from", xArticleSource, "--cover", wrongRatioXCover],
+        evidence: /exact 5:2 aspect ratio/i,
       },
       {
         args: ["linkedin", "draft", "--text", "a".repeat(3001)],
@@ -190,6 +246,8 @@ test("invalid draft inputs exit 2 before importing platform/browser/API stacks",
         const result = runCli(
           fixture,
           dryRun ? [...testCase.args, "--dry-run"] : testCase.args,
+          undefined,
+          { autoXArticleCover: testCase.autoXArticleCover },
         );
         assert.equal(result.status, 2, output(result));
         assert.match(output(result), testCase.evidence);
@@ -497,7 +555,7 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
     assert.match(draftHelp.stdout, /Terminal inspection replaces each excluded fence with its block number and digest/);
     assert.match(draftHelp.stdout, /link advisories carry block provenance.*512\/240 code points/s);
     assert.match(draftHelp.stdout, /More than 10000 code blocks or 1000000 UTF-16 code units/);
-    assert.match(draftHelp.stdout, /Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title\/Markdown\/block\/run\/link\/code-count snapshot/);
+    assert.match(draftHelp.stdout, /Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title\/Markdown\/block\/run\/link\/code-count plus exact cover-byte snapshot/);
     assert.match(draftHelp.stdout, /reparses canonical Markdown with the same Article parser and requires the complete code block\/advisory\/code-link sets to correspond/);
     assert.match(draftHelp.stdout, /unsafe-active-href Article structures exit 2 locally with save_not_attempted/);
     assert.match(draftHelp.stdout, /runtime and native Save\/autosave failures retain exit 1 semantics/);

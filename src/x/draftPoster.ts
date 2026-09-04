@@ -20,12 +20,16 @@
  * borrow its persistent context.
  */
 
-import type { BrowserContext, Page, Locator } from "playwright";
+import type { BrowserContext, ElementHandle, Page, Locator } from "playwright";
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readSync, statSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
+import { isProxy } from "node:util/types";
 import { getBrowserContext, type EnsureSessionOptions } from "../session.js";
 import type { GeneratedContent } from "./content.js";
+import {
+  snapshotXArticleCoverPreload,
+  xArticleCoverFilePayload,
+  type XArticleCoverPreload,
+} from "./articleCover.js";
 import {
   normalizeXArticleStageSnapshotFailure,
   snapshotXArticleStageInput,
@@ -38,7 +42,6 @@ import {
 export { htmlFromArticleBlocks } from "./articleStageSnapshot.js";
 import {
   extractTweetId,
-  isLivePositiveXArticleCoverPath,
   X_PREMIUM_POST_PLATFORM_MAX_LENGTH,
 } from "../capabilities/validation.js";
 import {
@@ -49,7 +52,6 @@ import {
   snapshotXArticleDraftHandoff,
   snapshotXDraftRowEvidence,
   xReplyTargetEvidenceProbeFailed,
-  X_ARTICLE_IMAGE_DIMENSION_LIMIT,
   X_DRAFT_ROW_OBSERVATION_LIMIT,
   XDraftStageError,
   xDraftStageError,
@@ -68,9 +70,9 @@ import {
 export { extractTweetId } from "../capabilities/validation.js";
 
 /**
- * Centralized composer/draft selectors. EVERY entry NEEDS LIVE CALIBRATION.
- * Each value is an ordered list of candidate strategies; lookups try them in
- * order until one resolves within the timeout (see tolerantLocator()).
+ * Centralized composer/draft selectors. Candidate arrays use tolerantLocator;
+ * the calibrated Article editor/cover selectors are singleton strings whose
+ * uniqueness and DOM relationships are checked explicitly below.
  */
 export const X_COMPOSER_SELECTORS = {
   composeUrl: "https://x.com/compose/post",
@@ -146,19 +148,11 @@ export const X_COMPOSER_SELECTORS = {
     '[data-testid="empty_state_button_text"]',
     '//span[normalize-space()="Write"]/ancestor::*[@role="button"][1]',
   ],
-  // Editor inputs. CALIBRATED 2026-06: title = twitter-article-title; body =
-  // the contenteditable data-testid="composer" (inside composerRichTextInputContainer).
-  articleTitleInput: [
-    '[data-testid="twitter-article-title"]',
-    'div[data-testid="longformRichTextTitleInput"]',
-    'div[role="textbox"][aria-label="Title"]',
-  ],
-  articleBodyInput: [
-    'div[data-testid="composer"][contenteditable="true"]',
-    '[data-testid="composer"]',
-    'div[data-testid="composerRichTextInputContainer"] [contenteditable="true"]',
-    'div[data-testid="longformRichTextInput"]',
-  ],
+  // Editor inputs. LIVE-CALIBRATED 2026-09: twitter-article-title belongs to
+  // sidebar links and is not editable. The editor has one visible, enabled
+  // title textarea and one visible contenteditable body.
+  articleTitleInput: 'textarea[placeholder="Add a title"]',
+  articleBodyInput: 'div[data-testid="composer"][contenteditable="true"]',
 
   // NOTE: the old guessed rich-formatting toolbar/link selectors
   // (articleToolbar* / articleLink*) were REMOVED in the paste-based rewrite
@@ -166,26 +160,15 @@ export const X_COMPOSER_SELECTORS = {
   // (h1/h2/p/ul/ol/blockquote/a/strong/em/s), so we no longer drive a toolbar.
 
   // ---- Article hero / cover image (REQUIRED to publish; 5:2 ratio) ----
-  // The cover-image control + hidden file <input>. testids are BEST-EFFORT and
-  // NEED LIVE CALIBRATION. We prefer setting the file <input> directly (works
-  // even when the visible button is a styled label), falling back to clicking a
-  // labelled "Add cover"/"cover" control.
-  articleCoverButton: [
-    '[data-testid="articleCoverImageButton"]',
-    'button[aria-label="Add cover"]',
-    'button[aria-label="Add photo"]',
-    '//span[contains(normalize-space(),"cover")]/ancestor::*[@role="button"][1]',
-  ],
-  articleCoverFileInput: [
-    'input[data-testid="fileInput"]',
-    'input[type="file"]',
-  ],
-  // The crop/apply dialog X shows after choosing a cover image. testids UNKNOWN.
-  articleCoverApply: [
-    '[data-testid="applyButton"]',
-    '//span[text()="Apply"]/ancestor::*[@role="button"][1]',
-    '//span[text()="Save"]/ancestor::*[@role="button"][1]',
-  ],
+  // LIVE-CALIBRATED 2026-09. The media input has no cover-specific attribute;
+  // it is authorized only by its geometry and sibling relationship inside the
+  // unique title/body editor root. The button is inspected, never clicked.
+  articleMediaButton: 'button[aria-label="Add photos or video"]',
+  articleMediaFileInput:
+    'input[type="file"][data-testid="fileInput"][accept="image/jpeg,image/png,image/webp"]',
+  articleCoverDialog: 'div[role="dialog"][aria-modal="true"]',
+  articleCoverApply: '[data-testid="applyButton"]',
+  articleCoverPreview: 'img[src^="https://pbs.twimg.com/media/"]',
 
   // The PUBLISH/POST button — listed ONLY so we are explicit about what we must
   // NEVER click. Nothing in this module ever locates+clicks it.
@@ -252,10 +235,12 @@ export interface StageDraftOptions extends EnsureSessionOptions {
   /** Headful + slower so a human can watch/calibrate. Maps to --inspect. */
   inspect?: boolean;
   /**
-   * Absolute path to the canonical base markdown (--from). Used to locate the
-   * article's `publish/<slug>/` asset folder for the required 5:2 hero image
-   * (issue #5). Ignored for tweet/thread.
+   * Exact validated bytes for the required X Article cover. The CLI preloads
+   * this before importing the browser staging runtime. Forbidden for tweet and
+   * thread drafts.
    */
+  cover?: Readonly<XArticleCoverPreload>;
+  /** Legacy non-Article option retained only for the closed snapshot shape. */
   basePath?: string;
 }
 
@@ -289,7 +274,7 @@ export type StageDraftResult = StageDraftResultBase & (
       savePhase: XDraftReturnedSavePhase;
       draftRowEvidence: Extract<XDraftRowEvidence, { status: "not_applicable" }>;
       articleHandoff: XArticleDraftHandoff;
-      /** Captured canonical edit URL when the platform exposed one. */
+      /** Non-conflicting exact canonical edit URL recaptured after settle. */
       nativeReference?: string;
     }
 );
@@ -324,22 +309,69 @@ export async function stageDraft(
       ? null
       : snapshotXNonArticleDirectStageRequest(content, format, opts);
     const stageContent = articleSnapshot?.content ?? nonArticleSnapshot!.content;
-    const inspect = articleSnapshot ? opts.inspect : nonArticleSnapshot!.inspect;
-    const force = articleSnapshot ? opts.force : nonArticleSnapshot!.force;
-    const basePath = articleSnapshot ? opts.basePath : nonArticleSnapshot!.basePath;
-    if (
-      articleSnapshot &&
-      ((inspect !== undefined && typeof inspect !== "boolean") ||
+    let inspect: boolean | undefined;
+    let force: boolean | undefined;
+    let articleCover: Readonly<XArticleCoverPreload> | null = null;
+    if (articleSnapshot) {
+      if (
+        typeof opts !== "object" ||
+        opts === null ||
+        Array.isArray(opts) ||
+        isProxy(opts) ||
+        Object.getPrototypeOf(opts) !== Object.prototype
+      ) {
+        throw new XDraftStageError("save_not_attempted", mechanism);
+      }
+      const keys = Reflect.ownKeys(opts);
+      if (keys.some((key) => typeof key !== "string" ||
+        (key !== "inspect" && key !== "force" && key !== "cover"))) {
+        throw new XDraftStageError("save_not_attempted", mechanism);
+      }
+      const inspectDescriptor = Object.getOwnPropertyDescriptor(opts, "inspect");
+      const forceDescriptor = Object.getOwnPropertyDescriptor(opts, "force");
+      const coverDescriptor = Object.getOwnPropertyDescriptor(opts, "cover");
+      if (
+        (inspectDescriptor && (!("value" in inspectDescriptor) || !inspectDescriptor.enumerable)) ||
+        (forceDescriptor && (!("value" in forceDescriptor) || !forceDescriptor.enumerable)) ||
+        !coverDescriptor || !("value" in coverDescriptor) || !coverDescriptor.enumerable
+      ) {
+        throw new XDraftStageError("save_not_attempted", mechanism);
+      }
+      inspect = inspectDescriptor?.value;
+      force = forceDescriptor?.value;
+      articleCover = snapshotXArticleCoverPreload(coverDescriptor.value);
+      if (
+        (inspect !== undefined && typeof inspect !== "boolean") ||
         (force !== undefined && typeof force !== "boolean") ||
-        (basePath !== undefined && (typeof basePath !== "string" || basePath.length > 1_000_000)))
-    ) {
-      throw new XDraftStageError("save_not_attempted", mechanism);
+        articleCover === null
+      ) {
+        throw new XDraftStageError("save_not_attempted", mechanism);
+      }
+    } else {
+      inspect = nonArticleSnapshot!.inspect;
+      force = nonArticleSnapshot!.force;
     }
-    const ctx = (await getBrowserContext({ inspect, force })) as BrowserContext;
+    const articleRequestSnapshot = articleSnapshot === null
+      ? null
+      : Object.freeze({
+          content: articleSnapshot,
+          cover: articleCover!,
+          inspect,
+          force,
+        });
+    const ctx = (await getBrowserContext({
+      inspect: articleRequestSnapshot?.inspect ?? inspect,
+      force: articleRequestSnapshot?.force ?? force,
+    })) as BrowserContext;
     const page = await ctx.newPage();
     try {
-      if (articleSnapshot) {
-        return await stageArticleSnapshot(ctx, page, articleSnapshot, basePath);
+      if (articleRequestSnapshot) {
+        return await stageArticleSnapshot(
+          ctx,
+          page,
+          articleRequestSnapshot.content,
+          articleRequestSnapshot.cover,
+        );
       }
       return await stageTweetOrThreadDraft(page, nonArticleSnapshot!);
     } finally {
@@ -569,20 +601,24 @@ export async function stageReplyDraft(
  * Flow: open the hub → click create → wait for the title input → type the title →
  * build an HTML fragment from the structured blocks → write it to the clipboard
  * in-page (text/html + text/plain fallback) → focus the body composer → paste
- * (Meta+V / Ctrl+V) → let the editor convert. Then best-effort attach the 5:2
- * hero image. Leaves it unsent (Articles autosave). NEVER clicks Publish.
+ * (Meta+V / Ctrl+V) → let the editor convert. Then attach the exact preloaded
+ * 5:2 cover. Leaves it unsent (Articles autosave). NEVER clicks Publish.
  *
  * DETERMINISTIC parts (fully implemented, verifiable at build time): block/inline
- * parsing (content.ts), HTML rendering (htmlFromArticleBlocks), and optional
- * cover discovery + ratio inspection (resolveHeroImage).
+ * parsing (content.ts), HTML rendering (htmlFromArticleBlocks), and explicit
+ * cover byte/dimension validation (articleCover.ts).
  *
- * BROWSER-INTERACTION part still needing live calibration: the 5:2 HERO IMAGE
- * upload (articleCover* selectors + crop/apply dialog) — degrades gracefully.
+ * BROWSER-INTERACTION: the 5:2 cover target, crop dialog, Apply control, and
+ * persisted preview were live-calibrated in 2026-09. Any ambiguity or missing
+ * positive evidence keeps the result delivered-but-unverified.
  */
 export interface ArticleDraftStageDependencies {
   openHub(page: Page): Promise<void>;
   locateCreate(page: Page): Promise<Locator | null>;
+  /** Immediate post-Create URL sample; never authoritative on its own. */
   currentEditUrl(page: Page): string | null;
+  /** Post-settle URL sample, with any production polling bounded internally. */
+  settledEditUrl(page: Page): Promise<string | null>;
   locateTitle(page: Page): Promise<Locator | null>;
   writeTitle(page: Page, title: Locator, value: string): Promise<void>;
   locateBody(page: Page): Promise<Locator | null>;
@@ -593,35 +629,37 @@ export interface ArticleDraftStageDependencies {
     html: string,
     plain: string,
   ): Promise<void>;
-  stageCover(page: Page, basePath: string | undefined): Promise<XArticleCoverHandoff>;
+  stageCover(
+    page: Page,
+    cover: Readonly<XArticleCoverPreload>,
+  ): Promise<XArticleCoverHandoff>;
   settle(page: Page): Promise<void>;
   verify(
     page: Page,
     editUrl: string,
     expectedTitle: string,
     expectedBody: string,
-  ): Promise<boolean>;
+    expectedCoverWidth: number,
+    expectedCoverHeight: number,
+  ): Promise<Readonly<{ content: boolean; cover: boolean }>>;
 }
 
 export async function stageArticleDraft(
   ctx: BrowserContext,
   page: Page,
   content: GeneratedContent,
-  basePath?: string,
+  cover: Readonly<XArticleCoverPreload>,
   deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
 ): Promise<StageDraftResult> {
   let format: GeneratedContent["format"];
   try {
     format = snapshotXContentFormat(content);
     const snapshot = snapshotXArticleStageInput(content, format);
-    if (
-      basePath !== undefined &&
-      (typeof basePath !== "string" || basePath.length > 1_000_000)
-    ) {
+    const copiedCover = snapshotXArticleCoverPreload(cover);
+    if (copiedCover === null) {
       throw new XDraftStageError("save_not_attempted", "article_create_autosave");
     }
-    const copiedBasePath = basePath;
-    return await stageArticleSnapshot(ctx, page, snapshot, copiedBasePath, deps);
+    return await stageArticleSnapshot(ctx, page, snapshot, copiedCover, deps);
   } catch (error) {
     throw xDraftStageError(error, "save_not_attempted", "article_create_autosave");
   }
@@ -632,7 +670,7 @@ async function stageArticleSnapshot(
   ctx: BrowserContext,
   page: Page,
   snapshot: XArticleStageSnapshot,
-  basePath?: string,
+  coverInput: Readonly<XArticleCoverPreload>,
   deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
 ): Promise<StageDraftResult> {
   const title = snapshot.title;
@@ -662,11 +700,7 @@ async function stageArticleSnapshot(
       // delivered-but-unverified autosave outcome by runXDraftSaveFlow.
       const titleBox = await deps.locateTitle(page);
       if (!titleBox) throw new Error("Article editor unavailable after Create.");
-      const rawEditUrl = deps.currentEditUrl(page);
-      const editUrl = typeof rawEditUrl === "string" &&
-          validatedArticleEditUrl(rawEditUrl) === rawEditUrl
-        ? rawEditUrl
-        : null;
+      const provisionalEditUrl = validatedArticleEditUrl(deps.currentEditUrl(page));
 
       await deps.writeTitle(page, titleBox, title);
 
@@ -675,21 +709,76 @@ async function stageArticleSnapshot(
 
       await deps.writeBody(ctx, page, bodyBox, html, plainFallback);
 
-      // Attach an optional auto-discovered cover. The live-positive set includes
-      // exact 5:2 and 1500x620; every tested image opened crop/edit and required
-      // Apply, so ratio is advisory and never a local rejection.
-      const cover = await deps.stageCover(page, basePath);
+      // Hand the exact prevalidated payload to X. No path read or discovery is
+      // allowed after the browser boundary.
+      const stagedCover = await deps.stageCover(page, coverInput);
+      const coverEditUrl = ARTICLE_COVER_EDIT_URLS.get(stagedCover);
+      const partialEditUrl = coverEditUrl === undefined
+        ? provisionalEditUrl
+        : provisionalEditUrl === null || provisionalEditUrl === coverEditUrl
+          ? coverEditUrl
+          : null;
+      const partialValue = {
+        nativeReference: partialEditUrl,
+        body: "rich_html" as const,
+        codeBlockCount: receiptCodeBlockCount,
+        codeAdvisories,
+        codeLinkAdvisories,
+        cover: stagedCover,
+      };
 
       // Let autosave settle, then independently reload the captured edit URL and
       // match the intended title/body. Merely remaining on /edit/<id> is not
       // persistence evidence.
-      await deps.settle(page);
-      const verified = editUrl !== null && await deps.verify(
-        page,
-        editUrl,
-        title,
-        plainFallback,
-      );
+      let settledEditUrl: string | null;
+      try {
+        await deps.settle(page);
+        settledEditUrl = validatedArticleEditUrl(await deps.settledEditUrl(page));
+      } catch {
+        // The cover handoff already returned after Create. A later read-only
+        // settle/route probe cannot erase that progress or make delivery unknown.
+        return { verified: false, value: partialValue };
+      }
+      const editUrl = settledEditUrl !== null &&
+          (provisionalEditUrl === null || provisionalEditUrl === settledEditUrl) &&
+          (coverEditUrl === undefined || coverEditUrl === settledEditUrl)
+        ? settledEditUrl
+        : null;
+      let reopen: Readonly<{ content: boolean; cover: boolean }> | null = null;
+      if (editUrl !== null) {
+        try {
+          reopen = await deps.verify(
+            page,
+            editUrl,
+            title,
+            plainFallback,
+            coverInput.width,
+            coverInput.height,
+          );
+        } catch {
+          // Reopen verification is read-only. Its rejection leaves the exact
+          // staged cover and canonical reference delivered but unverified.
+          return {
+            verified: false,
+            value: { ...partialValue, nativeReference: editUrl },
+          };
+        }
+      }
+      const appliedCoverChainComplete = stagedCover.set === true &&
+        stagedCover.applyPhase === "returned";
+      const finalObserved = appliedCoverChainComplete &&
+        (stagedCover.observed || reopen?.cover === true);
+      const cover = Object.freeze({
+        ...stagedCover,
+        // The production verifier proves the same calibrated cover both before
+        // navigation and after reopen, so it may repair only a transient early
+        // observation miss after the set+Apply chain returned.
+        observed: finalObserved,
+        verified: reopen === null
+          ? null
+          : appliedCoverChainComplete && reopen.cover,
+      });
+      const verified = reopen !== null && reopen.content && cover.verified === true;
       return {
         verified,
         value: {
@@ -733,45 +822,711 @@ async function stageArticleSnapshot(
 
 export async function stageArticleCover(
   page: Page,
-  basePath: string | undefined,
+  cover: Readonly<XArticleCoverPreload>,
+  deps: ArticleCoverStageDependencies = productionArticleCoverStageDependencies,
 ): Promise<XArticleCoverHandoff> {
-  const hero = resolveHeroImage(basePath);
-  if (!hero.path) {
-    return {
-      status: "missing",
-      ratio: "not_observed",
-      width: null,
-      height: null,
-      crop: "not_observed",
-    };
+  const safeCover = snapshotXArticleCoverPreload(cover);
+  const payload = xArticleCoverFilePayload(safeCover);
+  if (safeCover === null || payload === null) {
+    throw new Error("Invalid preloaded X Article cover payload.");
   }
-  const dimensions = Number.isInteger(hero.width) && Number.isInteger(hero.height) &&
-      (hero.width as number) > 0 && (hero.height as number) > 0 &&
-      (hero.width as number) <= X_ARTICLE_IMAGE_DIMENSION_LIMIT &&
-      (hero.height as number) <= X_ARTICLE_IMAGE_DIMENSION_LIMIT
-    ? { width: hero.width as number, height: hero.height as number }
-    : { width: null, height: null };
-  const upload = await uploadHeroImage(page, hero.path);
-  if (dimensions.width === null) {
-    return upload.status === "attached"
-      ? { ...upload, ratio: "unknown", width: null, height: null }
-      : {
-          status: "upload_incomplete",
-          ratio: "unknown",
-          width: null,
-          height: null,
-          crop: "not_observed",
-        };
+
+  const base = {
+    selection: "explicit" as const,
+    contentType: safeCover.contentType,
+    width: safeCover.width,
+    height: safeCover.height,
+    ratio: "exact_5_2" as const,
+    sourceSha256: safeCover.sourceSha256,
+    requested: true as const,
+    resolved: true as const,
+    uploaded: null,
+    observed: false,
+    verified: null,
+  };
+
+  let set: boolean | null = false;
+  let setPhase: XArticleCoverHandoff["setPhase"] = "target_unavailable";
+  const target = await deps.resolveTarget(page);
+  const editUrl = validatedArticleEditUrl(target?.editUrl);
+  const baselineDialogCount = editUrl === null
+    ? null
+    : await deps.activeDialogCount(page, editUrl);
+  const baselineCover = editUrl === null
+    ? { status: "invalid" as const }
+    : await deps.observeCover(page, editUrl, safeCover.width, safeCover.height);
+  if (
+    target !== null &&
+    editUrl !== null &&
+    baselineDialogCount === 0 &&
+    baselineCover.status === "none" &&
+    await deps.targetStillCalibrated(page, target)
+  ) {
+    try {
+      // The target is an exact ElementHandle whose sibling-to-editor relationship
+      // was checked atomically. Never re-resolve it globally and never retry.
+      await target.input.setInputFiles(payload);
+      set = true;
+      setPhase = "set_returned";
+    } catch {
+      // A rejected setInputFiles call may still have delivered the payload.
+      // Preserve uncertainty and do not attempt any alternate upload route.
+      set = null;
+      setPhase = "set_delivery_unknown";
+    }
   }
-  const ratio = hero.ratioOk ? "within_5_2" as const : "outside_5_2" as const;
-  return upload.status === "attached"
-    ? { ...upload, ratio, ...dimensions }
-    : {
-        status: "upload_incomplete",
-        ratio,
-        ...dimensions,
-        crop: "not_observed",
+
+  if (set !== true) {
+    return coverHandoffAtEditUrl({
+      ...base,
+      set,
+      setPhase,
+      applyPhase: "not_reached" as const,
+    }, editUrl);
+  }
+
+  let applyPhase: XArticleCoverHandoff["applyPhase"] = "not_observed";
+  let apply: ElementHandle<HTMLElement> | null;
+  try {
+    await deps.settleAfterSet(page);
+    apply = await deps.locateApply(
+      page,
+      editUrl!,
+      safeCover.width,
+      safeCover.height,
+    );
+  } catch {
+    // setInputFiles returned. A rejected read-only settle/crop probe cannot
+    // erase that known progress, and no alternate upload or Apply is attempted.
+    return coverHandoffAtEditUrl({
+      ...base,
+      set: true,
+      setPhase: "set_returned" as const,
+      applyPhase,
+    }, editUrl);
+  }
+  if (apply) {
+    try {
+      await apply.click();
+      applyPhase = "returned";
+    } catch {
+      applyPhase = "failed";
+    }
+    if (applyPhase === "returned") {
+      try {
+        await deps.settleAfterApply(page);
+      } catch {
+        // Apply returned; a later settle rejection is not evidence that it did
+        // not take effect. Retain the chain without claiming observation.
+        return coverHandoffAtEditUrl({
+          ...base,
+          set: true,
+          setPhase: "set_returned" as const,
+          applyPhase,
+        }, editUrl);
+      }
+    }
+  }
+  let postApplyCover: XArticleCoverObservationResult = { status: "invalid" };
+  if (applyPhase === "returned") {
+    try {
+      const dialogClosed = await deps.activeDialogCount(page, editUrl!) === 0;
+      if (dialogClosed) {
+        postApplyCover = await deps.observeCover(
+          page,
+          editUrl!,
+          safeCover.width,
+          safeCover.height,
+        );
+      }
+    } catch {
+      // Post-Apply probes are read-only. Keep the known returned chain and fail
+      // closed on observation without repeating either delivery action.
+      postApplyCover = { status: "invalid" };
+    }
+  }
+  const observed = postApplyCover.status === "observed" &&
+    postApplyCover.observation.naturalWidth === safeCover.width &&
+    postApplyCover.observation.naturalHeight === safeCover.height;
+  return coverHandoffAtEditUrl({
+    ...base,
+    set: true,
+    setPhase: "set_returned" as const,
+    applyPhase,
+    observed,
+  }, editUrl);
+}
+
+export interface XArticleCoverTargetFacts {
+  readonly visibleEnabledTitleCount: number;
+  readonly visibleBodyCount: number;
+  readonly visibleEnabledMediaButtonCount: number;
+  readonly exactFileInputCount: number;
+  readonly rootMediaButtonCount: number;
+  readonly rootFileInputCount: number;
+  readonly rootIsEditor: boolean;
+  readonly sameImmediateParent: boolean;
+  readonly inputEnabled: boolean;
+  readonly inputMultiple: boolean;
+  readonly buttonStrictlyAboveTitle: boolean;
+}
+
+/** Closed structural decision used by the live-calibrated cover target. */
+export function isCalibratedXArticleCoverTarget(
+  facts: Readonly<XArticleCoverTargetFacts>,
+): boolean {
+  return facts.visibleEnabledTitleCount === 1 &&
+    facts.visibleBodyCount === 1 &&
+    facts.visibleEnabledMediaButtonCount === 1 &&
+    facts.exactFileInputCount === 1 &&
+    facts.rootMediaButtonCount === 1 &&
+    facts.rootFileInputCount === 1 &&
+    facts.rootIsEditor &&
+    facts.sameImmediateParent &&
+    facts.inputEnabled &&
+    !facts.inputMultiple &&
+    facts.buttonStrictlyAboveTitle;
+}
+
+export interface XArticleCoverVisualObservation {
+  readonly sourceIdentitySha256: string;
+  readonly box: Readonly<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
+  readonly naturalWidth: number;
+  readonly naturalHeight: number;
+}
+
+export type XArticleCoverObservationResult =
+  | Readonly<{ status: "none" }>
+  | Readonly<{ status: "invalid" }>
+  | Readonly<{
+      status: "observed";
+      observation: Readonly<XArticleCoverVisualObservation>;
+    }>;
+
+export interface XArticleCoverInputTarget {
+  /** Exact DOM node classified in-place; never a page-global re-resolution. */
+  readonly input: ElementHandle<HTMLInputElement>;
+  readonly editUrl: string;
+}
+
+const ARTICLE_COVER_EDIT_URLS = new WeakMap<object, string>();
+
+function coverHandoffAtEditUrl(
+  value: XArticleCoverHandoff,
+  editUrl: string | null,
+): XArticleCoverHandoff {
+  const frozen = Object.freeze(value);
+  if (editUrl !== null) ARTICLE_COVER_EDIT_URLS.set(frozen, editUrl);
+  return frozen;
+}
+
+export interface ArticleCoverStageDependencies {
+  resolveTarget(page: Page): Promise<Readonly<XArticleCoverInputTarget> | null>;
+  targetStillCalibrated(
+    page: Page,
+    target: Readonly<XArticleCoverInputTarget>,
+  ): Promise<boolean>;
+  activeDialogCount(page: Page, editUrl: string): Promise<number | null>;
+  locateApply(
+    page: Page,
+    editUrl: string,
+    expectedWidth: number,
+    expectedHeight: number,
+  ): Promise<ElementHandle<HTMLElement> | null>;
+  settleAfterSet(page: Page): Promise<void>;
+  settleAfterApply(page: Page): Promise<void>;
+  observeCover(
+    page: Page,
+    editUrl: string,
+    expectedWidth: number,
+    expectedHeight: number,
+  ): Promise<XArticleCoverObservationResult>;
+}
+
+const productionArticleCoverStageDependencies: ArticleCoverStageDependencies = {
+  resolveTarget: resolveCalibratedArticleCoverTarget,
+  targetStillCalibrated: isArticleCoverTargetStillCalibrated,
+  activeDialogCount: activeArticleCoverDialogCount,
+  locateApply: locateCalibratedArticleCoverApply,
+  async settleAfterSet(page) {
+    await page.waitForTimeout(1_000);
+  },
+  async settleAfterApply(page) {
+    await page.waitForTimeout(750);
+  },
+  observeCover: observeCalibratedArticleCover,
+};
+
+async function articleCoverTargetFacts(
+  input: ElementHandle<HTMLInputElement>,
+): Promise<Readonly<XArticleCoverTargetFacts> | null> {
+  try {
+    return await input.evaluate((node, selectors) => {
+      const visible = (element: Element): boolean => {
+        const style = window.getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          box.width > 0 &&
+          box.height > 0;
       };
+      const enabled = (element: Element): boolean =>
+        !element.matches(":disabled") && element.getAttribute("aria-disabled") !== "true";
+      const titles = Array.from(document.querySelectorAll(selectors.title))
+        .filter((element) => visible(element) && enabled(element));
+      const bodies = Array.from(document.querySelectorAll(selectors.body))
+        .filter(visible);
+      const buttons = Array.from(document.querySelectorAll(selectors.button))
+        .filter((element) => visible(element) && enabled(element));
+      const inputs = Array.from(document.querySelectorAll(selectors.input));
+      let root: Element | null = null;
+      if (titles.length === 1 && bodies.length === 1) {
+        root = titles[0];
+        while (root !== null && !root.contains(bodies[0])) root = root.parentElement;
+      }
+      const rootIsEditor = root !== null &&
+        root !== document.body &&
+        root !== document.documentElement &&
+        root.closest("nav,aside") === null;
+      const rootButtons = rootIsEditor
+        ? buttons.filter((button) => root!.contains(button))
+        : [];
+      const rootInputs = rootIsEditor
+        ? inputs.filter((candidate) => root!.contains(candidate))
+        : [];
+      const button = rootButtons.length === 1 ? rootButtons[0] : null;
+      const title = titles.length === 1 ? titles[0] : null;
+      const buttonBox = button?.getBoundingClientRect();
+      const titleBox = title?.getBoundingClientRect();
+      return {
+        visibleEnabledTitleCount: titles.length,
+        visibleBodyCount: bodies.length,
+        visibleEnabledMediaButtonCount: buttons.length,
+        exactFileInputCount: inputs.length,
+        rootMediaButtonCount: rootButtons.length,
+        rootFileInputCount: rootInputs.length,
+        rootIsEditor,
+        sameImmediateParent: button !== null &&
+          node.parentElement !== null &&
+          node.parentElement === button.parentElement,
+        inputEnabled: node.isConnected && enabled(node),
+        inputMultiple: node.multiple,
+        buttonStrictlyAboveTitle: buttonBox !== undefined &&
+          titleBox !== undefined &&
+          buttonBox.width > 0 &&
+          buttonBox.height > 0 &&
+          buttonBox.bottom < titleBox.top,
+      };
+    }, {
+      title: X_COMPOSER_SELECTORS.articleTitleInput,
+      body: X_COMPOSER_SELECTORS.articleBodyInput,
+      button: X_COMPOSER_SELECTORS.articleMediaButton,
+      input: X_COMPOSER_SELECTORS.articleMediaFileInput,
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveCalibratedArticleCoverTarget(
+  page: Page,
+): Promise<Readonly<XArticleCoverInputTarget> | null> {
+  const editUrl = validatedArticleEditUrl(page.url());
+  if (editUrl === null) return null;
+  try {
+    const candidates = page.locator(X_COMPOSER_SELECTORS.articleMediaFileInput);
+    if (await candidates.count() !== 1 || !isExactArticleEditRoute(page, editUrl)) return null;
+    const input = await candidates.elementHandle();
+    if (input === null || !isExactArticleEditRoute(page, editUrl)) return null;
+    const facts = await articleCoverTargetFacts(input as ElementHandle<HTMLInputElement>);
+    if (
+      facts === null ||
+      !isCalibratedXArticleCoverTarget(facts) ||
+      !isExactArticleEditRoute(page, editUrl)
+    ) {
+      await input.dispose().catch(() => {});
+      return null;
+    }
+    return Object.freeze({
+      input: input as ElementHandle<HTMLInputElement>,
+      editUrl,
+    });
+  } catch {
+    return null;
+  }
+}
+
+async function isArticleCoverTargetStillCalibrated(
+  page: Page,
+  target: Readonly<XArticleCoverInputTarget>,
+): Promise<boolean> {
+  if (!isExactArticleEditRoute(page, target.editUrl)) return false;
+  const facts = await articleCoverTargetFacts(target.input);
+  return facts !== null &&
+    isCalibratedXArticleCoverTarget(facts) &&
+    isExactArticleEditRoute(page, target.editUrl);
+}
+
+async function visibleElementHandles<T extends Node>(
+  handles: readonly ElementHandle<T>[],
+): Promise<ElementHandle<T>[]> {
+  const visible: ElementHandle<T>[] = [];
+  for (const handle of handles) {
+    try {
+      if (await handle.evaluate((element) => {
+        if (!(element instanceof Element)) return false;
+        const style = window.getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          box.width > 0 &&
+          box.height > 0;
+      })) visible.push(handle);
+    } catch {
+      return [];
+    }
+  }
+  return visible;
+}
+
+async function activeArticleCoverDialogCount(
+  page: Page,
+  editUrl: string,
+): Promise<number | null> {
+  if (!isExactArticleEditRoute(page, editUrl)) return null;
+  try {
+    const handles = await page.locator(X_COMPOSER_SELECTORS.articleCoverDialog).elementHandles();
+    if (handles.length > 16) return null;
+    const visible = await visibleElementHandles(handles);
+    return isExactArticleEditRoute(page, editUrl) ? visible.length : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Exact crop-image cardinality and caller-dimension gate used before Apply. */
+export function isCalibratedXArticleCoverCrop(
+  visibleCropImageCount: number,
+  naturalWidth: number | null,
+  naturalHeight: number | null,
+  expectedWidth: number,
+  expectedHeight: number,
+): boolean {
+  return visibleCropImageCount === 1 &&
+    Number.isSafeInteger(expectedWidth) &&
+    Number.isSafeInteger(expectedHeight) &&
+    expectedWidth > 0 &&
+    expectedHeight > 0 &&
+    naturalWidth === expectedWidth &&
+    naturalHeight === expectedHeight;
+}
+
+async function locateCalibratedArticleCoverApply(
+  page: Page,
+  editUrl: string,
+  expectedWidth: number,
+  expectedHeight: number,
+): Promise<ElementHandle<HTMLElement> | null> {
+  if (
+    !isExactArticleEditRoute(page, editUrl) ||
+    !Number.isSafeInteger(expectedWidth) ||
+    !Number.isSafeInteger(expectedHeight) ||
+    expectedWidth <= 0 ||
+    expectedHeight <= 0
+  ) return null;
+  try {
+    const dialogHandles = await page
+      .locator(X_COMPOSER_SELECTORS.articleCoverDialog)
+      .elementHandles();
+    const visibleDialogs = await visibleElementHandles(dialogHandles);
+    if (visibleDialogs.length !== 1 || !isExactArticleEditRoute(page, editUrl)) return null;
+    const cropImages = await visibleDialogs[0].$$("img");
+    const visibleCropImages = await visibleElementHandles(cropImages);
+    const cropDimensions = visibleCropImages.length === 1
+      ? await visibleCropImages[0].evaluate((element) =>
+          element instanceof HTMLImageElement
+            ? { width: element.naturalWidth, height: element.naturalHeight }
+            : null,
+        ).catch(() => null)
+      : null;
+    if (
+      !isCalibratedXArticleCoverCrop(
+        visibleCropImages.length,
+        cropDimensions?.width ?? null,
+        cropDimensions?.height ?? null,
+        expectedWidth,
+        expectedHeight,
+      ) ||
+      !isExactArticleEditRoute(page, editUrl)
+    ) return null;
+    const applyHandles = await visibleDialogs[0].$$(X_COMPOSER_SELECTORS.articleCoverApply);
+    const eligible: ElementHandle<HTMLElement>[] = [];
+    for (const apply of applyHandles) {
+      const usable = await apply.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        const box = element.getBoundingClientRect();
+        return element.isConnected &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          box.width > 0 &&
+          box.height > 0 &&
+          !element.matches(":disabled") &&
+          element.getAttribute("aria-disabled") !== "true";
+      }).catch(() => false);
+      if (usable) eligible.push(apply as ElementHandle<HTMLElement>);
+    }
+    return eligible.length === 1 && isExactArticleEditRoute(page, editUrl)
+      ? eligible[0]
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+interface RawArticleCoverObservation {
+  readonly src: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly naturalWidth: number;
+  readonly naturalHeight: number;
+}
+
+function snapshotArticleCoverObservation(
+  raw: RawArticleCoverObservation,
+  expectedWidth: number,
+  expectedHeight: number,
+): Readonly<XArticleCoverVisualObservation> | null {
+  try {
+    const parsed = new URL(raw.src);
+    if (
+      parsed.protocol !== "https:" ||
+      parsed.hostname !== "pbs.twimg.com" ||
+      parsed.username !== "" ||
+      parsed.password !== "" ||
+      parsed.port !== "" ||
+      !parsed.pathname.startsWith("/media/") ||
+      parsed.pathname.length <= "/media/".length ||
+      ![raw.x, raw.y, raw.width, raw.height].every(Number.isFinite) ||
+      raw.width < 300 ||
+      raw.height <= 0 ||
+      raw.width / raw.height < 2 ||
+      raw.width / raw.height > 3 ||
+      !Number.isSafeInteger(raw.naturalWidth) ||
+      !Number.isSafeInteger(raw.naturalHeight) ||
+      raw.naturalWidth <= 0 ||
+      raw.naturalHeight <= 0 ||
+      raw.naturalWidth !== expectedWidth ||
+      raw.naturalHeight !== expectedHeight
+    ) return null;
+    const identity = `${parsed.origin}${parsed.pathname}`;
+    return Object.freeze({
+      sourceIdentitySha256: createHash("sha256").update(identity).digest("hex"),
+      box: Object.freeze({
+        x: raw.x,
+        y: raw.y,
+        width: raw.width,
+        height: raw.height,
+      }),
+      naturalWidth: raw.naturalWidth,
+      naturalHeight: raw.naturalHeight,
+    });
+  } catch {
+    return null;
+  }
+}
+
+export async function observeCalibratedArticleCover(
+  page: Page,
+  editUrl: string,
+  expectedWidth: number,
+  expectedHeight: number,
+): Promise<XArticleCoverObservationResult> {
+  if (
+    !isExactArticleEditRoute(page, editUrl) ||
+    !Number.isSafeInteger(expectedWidth) ||
+    !Number.isSafeInteger(expectedHeight) ||
+    expectedWidth <= 0 ||
+    expectedHeight <= 0
+  ) return Object.freeze({ status: "invalid" });
+  try {
+    const raw = await page.locator(X_COMPOSER_SELECTORS.articleCoverPreview).evaluateAll(
+      (nodes, selectors) => {
+        const visible = (element: Element): boolean => {
+          const style = window.getComputedStyle(element);
+          const box = element.getBoundingClientRect();
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            box.width > 0 &&
+            box.height > 0;
+        };
+        const enabled = (element: Element): boolean =>
+          !element.matches(":disabled") && element.getAttribute("aria-disabled") !== "true";
+        const titles = Array.from(document.querySelectorAll(selectors.title))
+          .filter((element) => visible(element) && enabled(element));
+        const bodies = Array.from(document.querySelectorAll(selectors.body))
+          .filter(visible);
+        let root: Element | null = null;
+        if (titles.length === 1 && bodies.length === 1) {
+          root = titles[0];
+          while (root !== null && !root.contains(bodies[0])) root = root.parentElement;
+        }
+        const rootIsEditor = root !== null &&
+          root !== document.body &&
+          root !== document.documentElement &&
+          root.closest("nav,aside") === null;
+        if (!rootIsEditor) {
+          return { validEditor: false, bodyMediaCount: 0, candidates: [] };
+        }
+        const titleBox = titles[0].getBoundingClientRect();
+        const body = bodies[0];
+        const bodyMediaCount = body.querySelectorAll(selectors.preview).length;
+        const candidates = nodes.flatMap((node) => {
+          if (!(node instanceof HTMLImageElement) ||
+            !root!.contains(node) ||
+            body.contains(node) ||
+            !visible(node)) return [];
+          const box = node.getBoundingClientRect();
+          const ratio = box.width / box.height;
+          if (
+            box.width < 300 ||
+            box.height <= 0 ||
+            ratio < 2 ||
+            ratio > 3 ||
+            box.bottom >= titleBox.top ||
+            node.naturalWidth <= 0 ||
+            node.naturalHeight <= 0
+          ) return [];
+          return [{
+            src: node.src,
+            x: box.x,
+            y: box.y,
+            width: box.width,
+            height: box.height,
+            naturalWidth: node.naturalWidth,
+            naturalHeight: node.naturalHeight,
+          }];
+        });
+        return { validEditor: true, bodyMediaCount, candidates };
+      },
+      {
+        title: X_COMPOSER_SELECTORS.articleTitleInput,
+        body: X_COMPOSER_SELECTORS.articleBodyInput,
+        preview: X_COMPOSER_SELECTORS.articleCoverPreview,
+      },
+    );
+    if (!isExactArticleEditRoute(page, editUrl)) return Object.freeze({ status: "invalid" });
+    if (!raw.validEditor || raw.bodyMediaCount !== 0 || raw.candidates.length > 1) {
+      return Object.freeze({ status: "invalid" });
+    }
+    if (raw.candidates.length === 0) return Object.freeze({ status: "none" });
+    const observation = snapshotArticleCoverObservation(
+      raw.candidates[0],
+      expectedWidth,
+      expectedHeight,
+    );
+    return observation === null
+      ? Object.freeze({ status: "invalid" })
+      : Object.freeze({ status: "observed", observation });
+  } catch {
+    return Object.freeze({ status: "invalid" });
+  }
+}
+
+const ARTICLE_COVER_OBSERVATION_POLL_ATTEMPTS = 33;
+const ARTICLE_COVER_OBSERVATION_POLL_INTERVAL_MS = 250;
+
+type ArticleCoverObservationPort = (
+  page: Page,
+  editUrl: string,
+  expectedWidth: number,
+  expectedHeight: number,
+) => Promise<XArticleCoverObservationResult>;
+
+/** At most 33 read-only samples over 8 seconds; never mutates or retries delivery. */
+export async function waitForCalibratedArticleCoverObservation(
+  page: Page,
+  editUrl: string,
+  expectedWidth: number,
+  expectedHeight: number,
+  observe: ArticleCoverObservationPort = observeCalibratedArticleCover,
+): Promise<XArticleCoverObservationResult> {
+  let last: XArticleCoverObservationResult = Object.freeze({ status: "invalid" });
+  for (let attempt = 0; attempt < ARTICLE_COVER_OBSERVATION_POLL_ATTEMPTS; attempt += 1) {
+    if (!isExactArticleEditRoute(page, editUrl)) {
+      return Object.freeze({ status: "invalid" });
+    }
+    try {
+      const candidate = await observe(page, editUrl, expectedWidth, expectedHeight);
+      if (
+        candidate.status === "observed" &&
+        candidate.observation.naturalWidth === expectedWidth &&
+        candidate.observation.naturalHeight === expectedHeight
+      ) return candidate;
+      last = candidate.status === "none"
+        ? Object.freeze({ status: "none" })
+        : Object.freeze({ status: "invalid" });
+    } catch {
+      return Object.freeze({ status: "invalid" });
+    }
+    if (attempt + 1 < ARTICLE_COVER_OBSERVATION_POLL_ATTEMPTS) {
+      try {
+        await page.waitForTimeout(ARTICLE_COVER_OBSERVATION_POLL_INTERVAL_MS);
+      } catch {
+        return Object.freeze({ status: "invalid" });
+      }
+    }
+  }
+  return last;
+}
+
+export function sameArticleCoverObservation(
+  before: Readonly<XArticleCoverVisualObservation>,
+  after: Readonly<XArticleCoverVisualObservation>,
+): boolean {
+  return before.sourceIdentitySha256 === after.sourceIdentitySha256 &&
+    before.naturalWidth === after.naturalWidth &&
+    before.naturalHeight === after.naturalHeight &&
+    before.box.x === after.box.x &&
+    before.box.y === after.box.y &&
+    before.box.width === after.box.width &&
+    before.box.height === after.box.height;
+}
+
+async function uniqueVisibleArticleLocator(
+  page: Page,
+  selector: string,
+  timeout: number,
+  requireEnabled: boolean,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeout;
+  try {
+    for (;;) {
+      const matches = page.locator(selector);
+      const count = await matches.count();
+      if (count > 64) return null;
+      const eligible: Locator[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const candidate = matches.nth(index);
+        if (!await candidate.isVisible()) continue;
+        if (requireEnabled && !await candidate.isEnabled()) continue;
+        eligible.push(candidate);
+        if (eligible.length > 1) return null;
+      }
+      if (eligible.length === 1) return eligible[0];
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return null;
+      await page.waitForTimeout(Math.min(250, remaining));
+    }
+  } catch {
+    return null;
+  }
 }
 
 const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
@@ -784,15 +1539,28 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
   currentEditUrl(page) {
     return validatedArticleEditUrl(page.url());
   },
+  settledEditUrl(page) {
+    return waitForCanonicalArticleEditUrl(page);
+  },
   locateTitle(page) {
-    return optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 12_000);
+    return uniqueVisibleArticleLocator(
+      page,
+      X_COMPOSER_SELECTORS.articleTitleInput,
+      12_000,
+      true,
+    );
   },
   async writeTitle(page, title, value) {
     await title.click();
     await typeText(page, title, value);
   },
   locateBody(page) {
-    return optionalLocator(page, X_COMPOSER_SELECTORS.articleBodyInput, 12_000);
+    return uniqueVisibleArticleLocator(
+      page,
+      X_COMPOSER_SELECTORS.articleBodyInput,
+      12_000,
+      false,
+    );
   },
   async writeBody(ctx, page, body, html, plain) {
     await ctx
@@ -818,24 +1586,88 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
   async settle(page) {
     await page.waitForTimeout(2_500);
   },
-  verify: verifyArticleDraftSaved,
+  async verify(
+    page,
+    editUrl,
+    expectedTitle,
+    expectedBody,
+    expectedCoverWidth,
+    expectedCoverHeight,
+  ) {
+    const beforeReloadCover = await waitForCalibratedArticleCoverObservation(
+      page,
+      editUrl,
+      expectedCoverWidth,
+      expectedCoverHeight,
+    );
+    const content = await verifyArticleDraftSaved(
+      page,
+      editUrl,
+      expectedTitle,
+      expectedBody,
+    );
+    if (!content || !isExactArticleEditRoute(page, editUrl)) {
+      return Object.freeze({ content: false, cover: false });
+    }
+    const afterReloadCover = await waitForCalibratedArticleCoverObservation(
+      page,
+      editUrl,
+      expectedCoverWidth,
+      expectedCoverHeight,
+    );
+    return Object.freeze({
+      content: true,
+      cover: beforeReloadCover.status === "observed" &&
+        afterReloadCover.status === "observed" &&
+        sameArticleCoverObservation(
+          beforeReloadCover.observation,
+          afterReloadCover.observation,
+        ) &&
+        isExactArticleEditRoute(page, editUrl),
+    });
+  },
 };
 
-function validatedArticleEditUrl(raw: string): string | null {
+function validatedArticleEditUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
   try {
     const parsed = new URL(raw);
+    const canonical = `${parsed.origin}${parsed.pathname}`;
     if (
       parsed.protocol !== "https:" ||
       parsed.hostname !== "x.com" ||
       parsed.username !== "" ||
       parsed.password !== "" ||
       parsed.port !== "" ||
-      !/^\/compose\/articles\/edit\/\d+$/.test(parsed.pathname)
+      !/^\/compose\/articles\/edit\/\d+$/.test(parsed.pathname) ||
+      parsed.search !== "" ||
+      parsed.hash !== "" ||
+      raw !== canonical
     ) return null;
-    return `${parsed.origin}${parsed.pathname}`;
+    return canonical;
   } catch {
     return null;
   }
+}
+
+const ARTICLE_EDIT_URL_POLL_ATTEMPTS = 21;
+const ARTICLE_EDIT_URL_POLL_INTERVAL_MS = 125;
+
+/** Poll for at most 2.5 seconds after the existing autosave settle. */
+export async function waitForCanonicalArticleEditUrl(page: Page): Promise<string | null> {
+  for (let attempt = 0; attempt < ARTICLE_EDIT_URL_POLL_ATTEMPTS; attempt += 1) {
+    let current: string | null = null;
+    try {
+      current = validatedArticleEditUrl(page.url());
+    } catch {
+      return null;
+    }
+    if (current !== null) return current;
+    if (attempt + 1 < ARTICLE_EDIT_URL_POLL_ATTEMPTS) {
+      await page.waitForTimeout(ARTICLE_EDIT_URL_POLL_INTERVAL_MS);
+    }
+  }
+  return null;
 }
 
 function isExactArticleEditRoute(page: Page, editUrl: string): boolean {
@@ -851,7 +1683,7 @@ type ArticleTextObservation =
   | { routeExact: true; text: string }
   | { routeExact: false };
 
-async function locatorTextAtExactArticleRoute(
+async function titleValueAtExactArticleRoute(
   page: Page,
   locator: Locator,
   editUrl: string,
@@ -862,14 +1694,26 @@ async function locatorTextAtExactArticleRoute(
     if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
     return { routeExact: true, text };
   } catch {
-    if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
-    const text = await locator.innerText();
-    if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
-    return { routeExact: true, text };
+    return { routeExact: false };
   }
 }
 
-/** Existing tolerant Article title/body-prefix normalization (issue #82). */
+async function bodyTextAtExactArticleRoute(
+  page: Page,
+  locator: Locator,
+  editUrl: string,
+): Promise<ArticleTextObservation> {
+  if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
+  try {
+    const text = await locator.innerText();
+    if (!isExactArticleEditRoute(page, editUrl)) return { routeExact: false };
+    return { routeExact: true, text };
+  } catch {
+    return { routeExact: false };
+  }
+}
+
+/** Existing tolerant Article title/body whitespace and case normalization (issue #82). */
 function normalizeForMatch(value: string): string {
   return value.replace(/\s+/g, " ").trim().toLowerCase();
 }
@@ -883,227 +1727,41 @@ export async function verifyArticleDraftSaved(
   await page.goto(editUrl, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1_500);
   if (!isExactArticleEditRoute(page, editUrl)) return false;
-  const title = await optionalLocator(page, X_COMPOSER_SELECTORS.articleTitleInput, 8_000);
+  const title = await uniqueVisibleArticleLocator(
+    page,
+    X_COMPOSER_SELECTORS.articleTitleInput,
+    8_000,
+    true,
+  );
   if (!isExactArticleEditRoute(page, editUrl) || !title) return false;
 
   if (!isExactArticleEditRoute(page, editUrl)) return false;
-  const body = await optionalLocator(page, X_COMPOSER_SELECTORS.articleBodyInput, 8_000);
+  const body = await uniqueVisibleArticleLocator(
+    page,
+    X_COMPOSER_SELECTORS.articleBodyInput,
+    8_000,
+    false,
+  );
   if (!isExactArticleEditRoute(page, editUrl) || !body) return false;
 
   const expectedTitleText = normalizeForMatch(expectedTitle);
-  const expectedBodyPrefix = normalizeForMatch(expectedBody).slice(0, 40);
+  const expectedBodyText = normalizeForMatch(expectedBody);
   if (!expectedTitleText) return false;
 
-  const titleObservation = await locatorTextAtExactArticleRoute(page, title, editUrl);
+  const titleObservation = await titleValueAtExactArticleRoute(page, title, editUrl);
   if (!titleObservation.routeExact) return false;
   const actualTitle = normalizeForMatch(titleObservation.text);
 
-  const bodyObservation = await locatorTextAtExactArticleRoute(page, body, editUrl);
+  const bodyObservation = await bodyTextAtExactArticleRoute(page, body, editUrl);
   if (!bodyObservation.routeExact) return false;
   const actualBody = normalizeForMatch(bodyObservation.text);
   if (!isExactArticleEditRoute(page, editUrl)) return false;
   return actualTitle === expectedTitleText &&
-    (expectedBodyPrefix === "" || actualBody.includes(expectedBodyPrefix));
+    actualBody === expectedBodyText;
 }
 
 function modifier(): "Meta" | "Control" {
   return process.platform === "darwin" ? "Meta" : "Control";
-}
-
-// ---------------------------------------------------------------------------
-// Article cover — deterministic discovery + ratio inspection (never rejection)
-// ---------------------------------------------------------------------------
-
-export interface HeroImage {
-  path?: string;
-  width?: number;
-  height?: number;
-  ratio?: number;
-  ratioOk?: boolean;
-  reason?: string;
-}
-
-const HERO_RATIO = 5 / 2; // 2.5
-const HERO_RATIO_TOL = 0.02; // allow tiny rounding drift
-// Prefer explicitly-named hero/cover assets when present.
-const HERO_NAME_HINTS = ["hero", "cover", "banner", "og", "5x2", "5-2"];
-
-/**
- * Locate a hero image next to the article's base markdown (its publish/<slug>/
- * folder), preferring names hinting at a cover, and inspect its ratio by reading
- * the image header (no image lib needed for common formats).
- *
- * Returns a HeroImage describing what was found. Deterministic + verifiable.
- */
-export function resolveHeroImage(basePath?: string): HeroImage {
-  if (!basePath) return { reason: "No base path was provided to locate the article asset folder." };
-  const dir = dirname(basePath);
-  if (!existsSync(dir)) return { reason: `Article folder not found: ${dir}` };
-
-  let candidates: string[];
-  try {
-    candidates = readdirSync(dir)
-      .filter((f) => isLivePositiveXArticleCoverPath(f))
-      .map((f) => join(dir, f))
-      .filter((p) => {
-        try {
-          return statSync(p).isFile();
-        } catch {
-          return false;
-        }
-      });
-  } catch (err) {
-    return { reason: `Could not read article folder ${dir}: ${(err as Error).message}` };
-  }
-  if (candidates.length === 0) return { reason: `No image files in ${dir}.` };
-
-  // Rank: exact 5:2 first, then named hints, then closest ratio, then lexical
-  // path. The final key makes selection deterministic when candidates tie.
-  const scored = candidates
-    .map((p) => {
-      const dims = readImageSize(p);
-      const ratio = dims ? dims.width / dims.height : undefined;
-      const named = HERO_NAME_HINTS.some((h) => p.toLowerCase().includes(h));
-      const ratioOk = ratio !== undefined && Math.abs(ratio - HERO_RATIO) <= HERO_RATIO_TOL;
-      return { p, dims, ratio, named, ratioOk };
-    })
-    .sort((a, b) => {
-      if (a.ratioOk !== b.ratioOk) return a.ratioOk ? -1 : 1;
-      if (a.named !== b.named) return a.named ? -1 : 1;
-      const da = a.ratio === undefined ? Infinity : Math.abs(a.ratio - HERO_RATIO);
-      const db = b.ratio === undefined ? Infinity : Math.abs(b.ratio - HERO_RATIO);
-      if (da !== db) return da - db;
-      return a.p.localeCompare(b.p);
-    });
-
-  const best = scored[0];
-  if (!best.dims) {
-    return {
-      path: best.p,
-      reason: `Could not read image dimensions for ${best.p} (unsupported header).`,
-    };
-  }
-  return {
-    path: best.p,
-    width: best.dims.width,
-    height: best.dims.height,
-    ratio: best.ratio,
-    ratioOk: best.ratioOk,
-  };
-}
-
-/**
- * Read image pixel dimensions from the file header for PNG / JPEG / WEBP without
- * an image library. Returns null if the format/header can't be parsed.
- */
-function readImageSize(path: string): { width: number; height: number } | null {
-  let buf: Buffer;
-  try {
-    // Read enough bytes to cover PNG IHDR / JPEG SOF / WEBP VP8 headers.
-    const fd = openSync(path, "r");
-    buf = Buffer.alloc(65_536);
-    const read = readSync(fd, buf, 0, buf.length, 0);
-    closeSync(fd);
-    buf = buf.subarray(0, read);
-  } catch {
-    return null;
-  }
-  // PNG: 8-byte sig, then IHDR (width @16, height @20, big-endian).
-  if (buf.length >= 24 && buf.readUInt32BE(0) === 0x89504e47) {
-    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
-  }
-  // JPEG: scan SOF0..SOF3/5..7/9..11/13..15 markers.
-  if (buf.length >= 4 && buf[0] === 0xff && buf[1] === 0xd8) {
-    let off = 2;
-    while (off + 9 < buf.length) {
-      if (buf[off] !== 0xff) {
-        off++;
-        continue;
-      }
-      const marker = buf[off + 1];
-      const len = buf.readUInt16BE(off + 2);
-      const isSOF =
-        (marker >= 0xc0 && marker <= 0xc3) ||
-        (marker >= 0xc5 && marker <= 0xc7) ||
-        (marker >= 0xc9 && marker <= 0xcb) ||
-        (marker >= 0xcd && marker <= 0xcf);
-      if (isSOF) {
-        return { height: buf.readUInt16BE(off + 5), width: buf.readUInt16BE(off + 7) };
-      }
-      off += 2 + len;
-    }
-  }
-  // WEBP: RIFF....WEBP; VP8X/VP8L/VP8 variants.
-  if (buf.length >= 30 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") {
-    const fmt = buf.toString("ascii", 12, 16);
-    if (fmt === "VP8X") {
-      const w = 1 + (buf[24] | (buf[25] << 8) | (buf[26] << 16));
-      const h = 1 + (buf[27] | (buf[28] << 8) | (buf[29] << 16));
-      return { width: w, height: h };
-    }
-    if (fmt === "VP8 ") {
-      const w = buf.readUInt16LE(26) & 0x3fff;
-      const h = buf.readUInt16LE(28) & 0x3fff;
-      return { width: w, height: h };
-    }
-    if (fmt === "VP8L") {
-      const b = buf.readUInt32LE(21);
-      const w = (b & 0x3fff) + 1;
-      const h = ((b >> 14) & 0x3fff) + 1;
-      return { width: w, height: h };
-    }
-  }
-  return null;
-}
-
-/**
- * Upload the live-positive cover format via the editor's cover control. X owns
- * the crop/edit acceptance step; local ratio inspection never rejects it.
- *
- * NEEDS LIVE CALIBRATION: the cover button / hidden file input / crop-apply
- * dialog testids are best-effort. We prefer setting the file <input> directly
- * (works for styled labels), then click through any crop/apply dialog with the
- * 5:2 default. Since the source is already 5:2, no in-browser cropping is needed.
- * Returns a closed upload/crop fact without exposing a selector, path, or raw error.
- */
-async function uploadHeroImage(
-  page: Page,
-  imagePath: string,
-): Promise<Pick<Extract<XArticleCoverHandoff, { status: "attached" }>, "status" | "crop"> | { status: "upload_incomplete" }> {
-  // Try the hidden file input first (most reliable for styled upload buttons).
-  const fileInput = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCoverFileInput, 2_500);
-  if (fileInput) {
-    try {
-      await fileInput.setInputFiles(imagePath);
-    } catch {
-      return { status: "upload_incomplete" };
-    }
-  } else {
-    // Fall back to clicking a labelled cover button that opens a file chooser.
-    const coverBtn = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCoverButton, 2_500);
-    if (!coverBtn) {
-      return { status: "upload_incomplete" };
-    }
-    try {
-      const [chooser] = await Promise.all([
-        page.waitForEvent("filechooser", { timeout: 5_000 }),
-        coverBtn.click(),
-      ]);
-      await chooser.setFiles(imagePath);
-    } catch {
-      return { status: "upload_incomplete" };
-    }
-  }
-
-  // Confirm any crop/apply dialog (image already 5:2, so accept the default).
-  await page.waitForTimeout(1_000);
-  const apply = await optionalLocator(page, X_COMPOSER_SELECTORS.articleCoverApply, 3_000);
-  if (apply) {
-    await apply.click();
-    await page.waitForTimeout(750);
-    return { status: "attached", crop: "applied" };
-  }
-  return { status: "attached", crop: "unverified" };
 }
 
 /** Type into a contenteditable composer box reliably (clear-then-type). */

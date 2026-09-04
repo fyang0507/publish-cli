@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { BrowserContext, Locator, Page } from "playwright";
 import { executeXDraftRealRun } from "../commands/draft.js";
 import {
@@ -26,17 +29,40 @@ import {
   XDraftStageError,
   type XArticleCoverHandoff,
 } from "./saveProgress.js";
+import {
+  preloadXArticleCover,
+  type XArticleCoverPreload,
+} from "./articleCover.js";
 
 const RAW_CANARY =
   "PRIVATE_ARTICLE_SNAPSHOT_CANARY selector=[data-secret] cookie=session-secret";
 
-function missingCover(): XArticleCoverHandoff {
+const COVER_DIR = mkdtempSync(join(tmpdir(), "publish-x-article-snapshot-cover-"));
+const COVER_PATH = join(COVER_DIR, "cover.png");
+const COVER_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAUAAAACCAIAAAAfCIEKAAAACXBIWXMAAAABAAAAAQBPJcTWAAAADklEQVR4nGNkQAUsaHwAAIAABtETi70AAAAASUVORK5CYII=",
+  "base64",
+);
+writeFileSync(COVER_PATH, COVER_BYTES);
+const ARTICLE_COVER = preloadXArticleCover(COVER_PATH);
+test.after(() => rmSync(COVER_DIR, { recursive: true, force: true }));
+
+function stagedCover(): XArticleCoverHandoff {
   return {
-    status: "missing",
-    ratio: "not_observed",
-    width: null,
-    height: null,
-    crop: "not_observed",
+    selection: "explicit",
+    contentType: "image/png",
+    width: ARTICLE_COVER.width,
+    height: ARTICLE_COVER.height,
+    ratio: "exact_5_2",
+    sourceSha256: ARTICLE_COVER.sourceSha256,
+    requested: true,
+    resolved: true,
+    set: true,
+    setPhase: "set_returned",
+    uploaded: null,
+    applyPhase: "returned",
+    observed: true,
+    verified: null,
   };
 }
 
@@ -60,7 +86,7 @@ interface ArticleCapture {
   html?: string;
   plain?: string;
   verify?: { editUrl: string; title: string; body: string };
-  coverBasePath?: string;
+  coverSha256?: string;
 }
 
 function articleDependencies(
@@ -87,7 +113,13 @@ function articleDependencies(
       return create;
     },
     currentEditUrl() {
-      capture.events.push("edit:url");
+      capture.events.push("edit:url:provisional");
+      return (options.editUrl === undefined
+        ? "https://x.com/compose/articles/edit/12345"
+        : options.editUrl) as string | null;
+    },
+    async settledEditUrl() {
+      capture.events.push("edit:url:settled");
       return (options.editUrl === undefined
         ? "https://x.com/compose/articles/edit/12345"
         : options.editUrl) as string | null;
@@ -109,10 +141,10 @@ function articleDependencies(
       capture.html = html;
       capture.plain = plain;
     },
-    async stageCover(_page, basePath) {
+    async stageCover(_page, cover) {
       capture.events.push("cover:stage");
-      capture.coverBasePath = basePath;
-      return missingCover();
+      capture.coverSha256 = cover.sourceSha256;
+      return stagedCover();
     },
     async settle() {
       capture.events.push("autosave:settle");
@@ -124,7 +156,8 @@ function articleDependencies(
         title: expectedTitle,
         body: expectedBody,
       };
-      return options.verified ?? true;
+      const verified = options.verified ?? true;
+      return { content: verified, cover: verified };
     },
   };
 }
@@ -132,14 +165,14 @@ function articleDependencies(
 async function expectDirectNotAttempted(
   content: GeneratedContent,
   events: string[],
-  basePath?: string,
+  cover: Readonly<XArticleCoverPreload> = ARTICLE_COVER,
 ): Promise<void> {
   await assert.rejects(
     stageArticleDraft(
       {} as BrowserContext,
       {} as Page,
       content,
-      basePath,
+      cover,
       articleDependencies({ events }),
     ),
     (error: unknown) => {
@@ -599,7 +632,7 @@ test("every Article staging field accessor is invoked once then rejected pre-loa
     });
     let loaderCalls = 0;
     const outcome = await executeXDraftRealRun(
-      { content },
+      { content, cover: ARTICLE_COVER },
       {
         async loadStageDraft() {
           loaderCalls += 1;
@@ -1042,7 +1075,7 @@ test("unsafe active hrefs fail before loader while supported percent bytes remai
     content.linkFlags[0].url = href;
     let loaderCalls = 0;
     const outcome = await executeXDraftRealRun(
-      { content },
+      { content, cover: ARTICLE_COVER },
       {
         async loadStageDraft() {
           loaderCalls += 1;
@@ -1079,7 +1112,7 @@ test("unsafe active hrefs fail before loader while supported percent bytes remai
       {} as BrowserContext,
       {} as Page,
       safe,
-      undefined,
+      ARTICLE_COVER,
       articleDependencies(capture),
     );
     assert.equal(result.savePhase, "verified", exact);
@@ -1137,7 +1170,7 @@ test("unsafe URL-looking advisories inside excluded code never become active anc
     {} as BrowserContext,
     {} as Page,
     content,
-    undefined,
+    ARTICLE_COVER,
     articleDependencies(capture),
   );
   assert.equal(result.savePhase, "verified");
@@ -1203,18 +1236,18 @@ test("direct and production Article entrypoints reject malformed input before pl
   assert.equal(kindReads, 1);
   assert.deepEqual(transitionEvents, []);
 
-  const basePathEvents: string[] = [];
+  const coverEvents: string[] = [];
   await expectDirectNotAttempted(
     cloneContent(base),
-    basePathEvents,
+    coverEvents,
     new Proxy({}, {
       get() { throw new Error(RAW_CANARY); },
-    }) as unknown as string,
+    }) as unknown as Readonly<XArticleCoverPreload>,
   );
-  assert.deepEqual(basePathEvents, []);
+  assert.deepEqual(coverEvents, []);
 
   let optionReads = 0;
-  const options = Object.defineProperty({}, "basePath", {
+  const options = Object.defineProperty({}, "cover", {
     enumerable: true,
     get() {
       optionReads += 1;
@@ -1231,7 +1264,7 @@ test("direct and production Article entrypoints reject malformed input before pl
       return true;
     },
   );
-  assert.equal(optionReads, 1);
+  assert.equal(optionReads, 0, "an accessor cannot supply a branded cover snapshot");
 });
 
 test("loader and awaited dependency mutation cannot change the staged Article tuple", async () => {
@@ -1245,7 +1278,7 @@ test("loader and awaited dependency mutation cannot change the staged Article tu
     let loaderCalls = 0;
 
     const outcome = await executeXDraftRealRun(
-      { content: original, inspect: true, basePath: "/tmp/original.md" },
+      { content: original, inspect: true, cover: ARTICLE_COVER },
       {
         async loadStageDraft() {
           loaderCalls += 1;
@@ -1256,16 +1289,17 @@ test("loader and awaited dependency mutation cannot change the staged Article tu
             assert.notEqual(stageContent, original);
             assert.equal(Object.isFrozen(stageContent), true);
             assert.equal(Object.isFrozen(stageContent.article), true);
+            assert.equal(Object.isFrozen(options), true);
             assert.equal(stageContent.article?.title, expected.title);
             assert.deepEqual(options, {
               inspect: true,
-              basePath: "/tmp/original.md",
+              cover: ARTICLE_COVER,
             });
             return stageArticleDraft(
               {} as BrowserContext,
               {} as Page,
               stageContent,
-              options.basePath,
+              options.cover!,
               articleDependencies(capture, {
                 verified,
                 async mutateAfterSnapshot() {
@@ -1291,7 +1325,7 @@ test("loader and awaited dependency mutation cannot change the staged Article tu
     assert.equal(capture.title, expected.title);
     assert.equal(capture.html, expected.html);
     assert.equal(capture.plain, expected.plain);
-    assert.equal(capture.coverBasePath, "/tmp/original.md");
+    assert.equal(capture.coverSha256, ARTICLE_COVER.sourceSha256);
     assert.deepEqual(capture.verify, {
       editUrl: "https://x.com/compose/articles/edit/12345",
       title: expected.title,
@@ -1313,7 +1347,8 @@ test("execute reads the caller content slot once before detaching the Article", 
       contentReads += 1;
       return contentReads === 1 ? safe : mutated;
     },
-  }) as { content: GeneratedContent };
+  }) as { content: GeneratedContent; cover: Readonly<XArticleCoverPreload> };
+  input.cover = ARTICLE_COVER;
   const capture: ArticleCapture = { events: [] };
 
   const outcome = await executeXDraftRealRun(input, {
@@ -1322,7 +1357,7 @@ test("execute reads the caller content slot once before detaching the Article", 
         {} as BrowserContext,
         {} as Page,
         content,
-        undefined,
+        ARTICLE_COVER,
         articleDependencies(capture),
       );
     },
@@ -1348,7 +1383,7 @@ test("only an exact canonical Article edit URL can reach verification", async ()
       {} as BrowserContext,
       {} as Page,
       cloneContent(content),
-      undefined,
+      ARTICLE_COVER,
       articleDependencies(capture, { editUrl }),
     );
     assert.equal(result.savePhase, "save_delivered_unverified");

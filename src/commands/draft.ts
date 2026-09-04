@@ -65,6 +65,11 @@ import {
   type TransportReceipt,
 } from "../transportReceipt.js";
 import { classifyXPreStageFailure } from "./xPreStageFailure.js";
+import {
+  preloadXArticleCover,
+  snapshotXArticleCoverPreload,
+  type XArticleCoverPreload,
+} from "../x/articleCover.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -92,6 +97,7 @@ const VALID_FORMATS: readonly XFormat[] = ["tweet", "thread", "article"];
 interface DraftXOptions {
   from?: string;
   text?: string;
+  cover?: string;
   format: string;
   long?: boolean;
   dryRun?: boolean;
@@ -103,6 +109,7 @@ export interface XDraftRealRunInput {
   content: GeneratedContent;
   inspect?: boolean;
   basePath?: string;
+  cover?: Readonly<XArticleCoverPreload>;
 }
 
 export interface XDraftRealRunDependencies {
@@ -214,11 +221,13 @@ function uncertainSaveOutcome(
 function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
   const count = handoff.codeBlockCount;
   const countLabel = count === "many" ? `>${X_ARTICLE_CODE_BLOCK_COUNT_LIMIT}` : String(count);
-  const heroAction = handoff.cover.status === "missing"
-    ? "no supported cover selected"
-    : handoff.cover.status === "upload_incomplete"
-      ? "upload action incomplete; attachment unconfirmed"
-      : "upload action returned; attachment and persistence unverified";
+  const heroAction = handoff.cover.verified === true
+    ? "exact preloaded cover observed after canonical draft reopen"
+    : handoff.cover.set === true
+      ? "exact preloaded cover set; persistence not verified"
+      : handoff.cover.set === null
+        ? "exact preloaded cover delivery unknown after the native set operation rejected"
+      : `exact preloaded cover not set (${handoff.cover.setPhase})`;
   const lines = [
     "  Article body input mode=rich_html paste for native conversion; this fact alone does not prove persistence.",
     `  heroAction=${heroAction}. codeBlockCount=${countLabel}.`,
@@ -239,25 +248,14 @@ function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
     }
   }
   const cover = handoff.cover;
-  if (cover.status === "missing") {
+  lines.push(
+    `  Cover input: explicit ${cover.contentType}; ${cover.width}x${cover.height}; exact 5:2; no crop, resize, compression, or conversion performed.`,
+    `  Cover evidence: requested=yes; resolved=yes; set=${cover.set === null ? "unknown" : cover.set ? "yes" : "no"}; uploaded=unknown; observed=${cover.observed ? "yes" : "no"}; verified=${cover.verified === null ? "unknown" : cover.verified ? "yes" : "no"}; apply=${cover.applyPhase}.`,
+  );
+  if (cover.verified !== true) {
     lines.push(
-      "  HERO IMAGE MISSING: no supported cover was selected. Add a 5:2 JPG, PNG, or WebP cover and verify it manually.",
+      "  HERO PERSISTENCE UNVERIFIED: inspect the captured Article draft in the exact CLI-owned profile before any retry.",
     );
-  } else {
-    if (cover.ratio === "outside_5_2") {
-      lines.push(
-        `  HERO IMAGE RATIO: selected image is ${cover.width}x${cover.height} (ratio ${(cover.width / cover.height).toFixed(3)}). X may require crop/edit; verify it manually.`,
-      );
-    } else if (cover.ratio === "unknown") {
-      lines.push("  HERO IMAGE RATIO UNVERIFIED: image dimensions were unavailable; verify X's crop/edit result manually.");
-    }
-    if (cover.status === "upload_incomplete") {
-      lines.push("  HERO UPLOAD INCOMPLETE: the selected cover could not be confirmed attached. Attach and verify it manually.");
-    } else if (cover.crop === "unverified") {
-      lines.push("  HERO CROP UNVERIFIED: a crop/apply confirmation was not observed. Confirm the intended crop manually.");
-    } else {
-      lines.push("  Hero upload and crop/apply actions returned; cover persistence remains manual-review evidence only.");
-    }
   }
   return lines.join("\n");
 }
@@ -345,6 +343,7 @@ export async function executeXDraftRealRun(
   let expectedArticleCodeAdvisories: readonly ArticleCodeBlockFlag[] | null = null;
   let expectedArticleCodeLinkAdvisories:
     readonly Readonly<ArticleCodeLinkAdvisory>[] | null = null;
+  let expectedArticleCover: Readonly<XArticleCoverPreload> | null = null;
   try {
     if (format === "article") {
       const snapshot = snapshotXArticleStageInput(callerContent, format);
@@ -367,20 +366,21 @@ export async function executeXDraftRealRun(
     );
   }
 
-  // Article retains its separately reviewed #98 option boundary. Non-Article
-  // options were copied as part of the complete request snapshot above.
+  // Article retains its separately reviewed #98 content boundary and adds one
+  // process-branded, immutable cover-byte snapshot. Non-Article options were
+  // copied as part of the complete request snapshot above.
   let inspect: boolean | undefined;
   let basePath: string | undefined;
   if (format === "article") {
     try {
       inspect = input.inspect;
-      basePath = input.basePath;
+      expectedArticleCover = snapshotXArticleCoverPreload(input.cover);
     } catch {
       return beforeSaveFailure(format, "property_read_failed");
     }
     if (
       (inspect !== undefined && typeof inspect !== "boolean") ||
-      (basePath !== undefined && (typeof basePath !== "string" || basePath.length > 1_000_000))
+      expectedArticleCover === null
     ) {
       return beforeSaveFailure(format, "invalid_value");
     }
@@ -388,6 +388,18 @@ export async function executeXDraftRealRun(
     inspect = nonArticleSnapshot!.inspect;
     basePath = nonArticleSnapshot!.basePath;
   }
+
+  // One final immutable Article request owns every value that may cross the
+  // dynamic staging-loader boundary. Both content and cover are already
+  // detached from caller paths/objects at this point.
+  const articleRequestSnapshot = format === "article"
+    ? Object.freeze({
+        content: stageContent,
+        cover: expectedArticleCover!,
+        inspect,
+        stageOptions: Object.freeze({ inspect, cover: expectedArticleCover! }),
+      })
+    : null;
 
   let stageDraft: Awaited<ReturnType<XDraftRealRunDependencies["loadStageDraft"]>>;
   try {
@@ -433,8 +445,11 @@ export async function executeXDraftRealRun(
   try {
     const stageOptions: StageDraftOptions = nonArticleSnapshot
       ? nonArticleSnapshot.stageOptions
-      : { inspect, basePath };
-    returned = await stageDraft(stageContent, stageOptions);
+      : articleRequestSnapshot!.stageOptions;
+    returned = await stageDraft(
+      articleRequestSnapshot?.content ?? stageContent,
+      stageOptions,
+    );
   } catch (error) {
     // Only a rejection from the staging promise itself can carry typed phase
     // evidence. Once the promise resolves, result inspection is a separate,
@@ -519,6 +534,15 @@ export async function executeXDraftRealRun(
           candidate.articleHandoff.codeLinkAdvisories,
           expectedArticleCodeLinkAdvisories,
         ) ||
+        candidate.articleHandoff.cover.selection !== expectedArticleCover!.selection ||
+        candidate.articleHandoff.cover.contentType !== expectedArticleCover!.contentType ||
+        candidate.articleHandoff.cover.width !== expectedArticleCover!.width ||
+        candidate.articleHandoff.cover.height !== expectedArticleCover!.height ||
+        candidate.articleHandoff.cover.ratio !== expectedArticleCover!.ratio ||
+        candidate.articleHandoff.cover.sourceSha256 !== expectedArticleCover!.sourceSha256 ||
+        (candidate.savePhase === "verified" &&
+          (candidate.articleHandoff.cover.verified !== true ||
+            candidate.nativeReference === null)) ||
         !isXDraftRowEvidenceCompatible(
           candidate.saveMechanism,
           candidate.savePhase,
@@ -555,17 +579,18 @@ export async function executeXDraftRealRun(
       );
 }
 
-function xArticleAssets(outcome: XDraftRealRunOutcome): readonly ReceiptAsset[] {
+function xArticleAssets(
+  outcome: XDraftRealRunOutcome,
+  inputCover: Readonly<XArticleCoverPreload> | null,
+): readonly ReceiptAsset[] {
   const cover = outcome.articleHandoff?.cover;
-  if (!cover) return NO_ASSETS;
-  if (cover.status === "missing") {
-    // Automatic discovery found no cover to request from the native chooser.
-    // Keep the expected slot explicit without claiming any asset action occurred.
+  if (!cover) {
+    if (inputCover === null) return NO_ASSETS;
     return [{
       index: 0,
       role: "cover",
-      requested: false,
-      resolved: false,
+      requested: true,
+      resolved: true,
       set: false,
       uploaded: false,
       observed: false,
@@ -573,18 +598,15 @@ function xArticleAssets(outcome: XDraftRealRunOutcome): readonly ReceiptAsset[] 
       remoteReference: null,
     }];
   }
-  const set = cover.status === "attached" ? true : null;
-  const observed = cover.status === "attached" && cover.crop === "applied" ? true : null;
   return [{
     index: 0,
     role: "cover",
-    requested: true,
-    resolved: true,
-    set,
-    uploaded: null,
-    observed,
-    // X's text reopen verification does not establish cover persistence.
-    verified: null,
+    requested: cover.requested,
+    resolved: cover.resolved,
+    set: cover.set,
+    uploaded: cover.uploaded,
+    observed: cover.observed,
+    verified: cover.verified,
     remoteReference: null,
   }];
 }
@@ -602,9 +624,9 @@ function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
       `${countLabel} X Article code block${count === 1 ? " was" : "s were"} intentionally excluded from the native rich-HTML input; add ${count === 1 ? "it" : "them"} manually with Insert → Code or as ${count === 1 ? "a screenshot" : "screenshots"}.`,
     );
   }
-  if (handoff.cover.status === "missing") {
+  if (handoff.cover.verified !== true) {
     gotchas.push(
-      "No X Article cover was resolved or staged; add the intended cover and verify it manually in the native draft.",
+      "The exact X Article cover was not positively observed after reopening the captured edit URL; compare the native draft in the exact CLI-owned profile and do not retry blindly.",
     );
   }
   return gotchas;
@@ -614,6 +636,7 @@ export function receiptForXDraftOutcome(
   outcome: XDraftRealRunOutcome,
   format: XFormat,
   warnings: readonly string[] = [],
+  inputCover: Readonly<XArticleCoverPreload> | null = null,
 ): Readonly<TransportReceipt> {
   const verified = outcome.kind === "staged" && outcome.savePhase === "verified";
   const saveMayExist = outcome.savePhase === "save_delivery_unknown" ||
@@ -686,7 +709,7 @@ export function receiptForXDraftOutcome(
         : []),
       ...xArticleGotchas(outcome),
     ],
-    assets: xArticleAssets(outcome),
+    assets: xArticleAssets(outcome, inputCover),
     platformTouched: outcome.platformTouched,
     terminalState,
     verification: {
@@ -788,6 +811,23 @@ function articleInspectionArtifactPath(fromPath: string): string {
   return join(dir, `${stem}.x-article.inspection.txt`);
 }
 
+function xArticleCoverAsset(
+  requested: boolean,
+  resolved: boolean,
+): readonly ReceiptAsset[] {
+  return [{
+    index: 0,
+    role: "cover",
+    requested,
+    resolved,
+    set: false,
+    uploaded: false,
+    observed: false,
+    verified: false,
+    remoteReference: null,
+  }];
+}
+
 export function registerDraftCommand(x: Command): void {
   x
     .command("draft")
@@ -795,6 +835,7 @@ export function registerDraftCommand(x: Command): void {
     .requiredOption("--format <format>", "Required: tweet | thread | article")
     .option("--text <content>", "Content inline (tweet/thread only; exactly one of --text / --from)")
     .option("--from <base.md>", "Canonical markdown ('-' = stdin); strips leading mapping/empty YAML frontmatter")
+    .option("--cover <path>", "Required for Article: prepared exact-5:2 JPEG, PNG, or WebP; never transformed")
     .option("--long", "Use the local 25,000-code-point guard for Premium long posts; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
     .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
@@ -823,16 +864,19 @@ export function registerDraftCommand(x: Command): void {
         "  Terminal inspection replaces each excluded fence with its block number and digest. File-backed Article dry-runs put the excluded-code count and bounded advisories in a separate .x-article.inspection.txt receipt; only the clean .x-article.md artifact retains raw code, so inspection metadata cannot become EOF-fenced code payload.\n" +
         "  Excluded-code link advisories carry block provenance, explicit truncation facts, and safe URL/label projections bounded to 512/240 code points; they never suppress or alter an exact active prose href. More than 10000 code blocks or 1000000 UTF-16 code units of complete rendered code/code-link evidence exits 2 locally rather than dropping identity facts.\n" +
         "  Run `publish x info` for the owned Article Markdown support matrix and stop conditions.\n" +
+        "\nArticle cover input:\n" +
+        "  Article requires one explicit --cover path; tweet and thread reject that flag. The CLI reads one regular JPEG/PNG/WebP once, verifies its header, matching extension, readable dimensions, and exact 5:2 ratio before staging-runtime/profile/browser access.\n" +
+        "  The detached validated bytes are staged unchanged. The CLI never scans neighboring files and never crops, resizes, compresses, or converts the cover.\n" +
         "\nArticle staging snapshot:\n" +
-        "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/code-count snapshot and pre-renders its native HTML/plain inputs.\n" +
+        "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/code-count plus exact cover-byte snapshot and pre-renders its native HTML/plain inputs.\n" +
         "  It reparses canonical Markdown with the same Article parser and requires the complete code block/advisory/code-link sets to correspond before any sink. Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +
         "  If the root format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism. Active inline hrefs require exact safe absolute HTTP(S); supported percent bytes remain exact and are not decoded by safety validation. URL-looking advisories from excluded code are bounded but never become active anchors.\n" +
         "\nNative-save outcome:\n" +
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
         "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or other visible-row changes remain unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
-        "  Article success instead requires matching the title and, when present, body prefix after reopening the captured canonical edit URL.\n" +
-        "  A returned Article outcome reports bounded body-input, excluded-code count, complete digest/truncation evidence, bounded code-link provenance/truncation evidence, and cover selection/upload/ratio/crop action facts whether verified or unverified; those facts do not prove cover attachment or persistence. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
+        "  Article success requires one unique title/body editor root, one direct set on its calibrated same-parent cover input, one attributable crop dialog and exact Apply return, a unique above-title post-apply cover observation, then matching title/body plus the same cover identity, box, and natural dimensions after reopening the canonical edit URL recaptured after autosave settle. An immediate post-Create URL is provisional; a missing/invalid late sample or conflicting positive samples are never used for navigation or verification.\n" +
+        "  A returned Article outcome reports bounded body/code facts and distinct cover requested/resolved/set/uploaded/observed/verified evidence. A rejected native cover-input set leaves set unknown because delivery may have occurred; the CLI never retries, clicks the media button, or uses another upload route. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
         "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
         "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +
         "  Never retry automatically. --inspect and selector calibration do not prove persistence.\n",
@@ -841,7 +885,11 @@ export function registerDraftCommand(x: Command): void {
       const output = new TerminalOutputBudget();
       const emit = (stream: "stdout" | "stderr", message: string) =>
         emitTerminalOutput(output, stream, message);
-      const emitLocalFailure = (problem: LocalValidationProblem, message: string) => {
+      const emitLocalFailure = (
+        problem: LocalValidationProblem,
+        message: string,
+        assets: readonly ReceiptAsset[] = NO_ASSETS,
+      ) => {
         emitTransportReceipt(createLocalInputFailureReceipt({
           channel: "x",
           action: "draft",
@@ -849,6 +897,7 @@ export function registerDraftCommand(x: Command): void {
           mode: opts.dryRun ? "dry_run" : "real",
           problem,
           message,
+          assets,
         }), { json: !!opts.json, budget: output });
       };
       const format = opts.format as XFormat;
@@ -867,6 +916,7 @@ export function registerDraftCommand(x: Command): void {
         error: unknown,
         stage: string,
         code: string,
+        assets: readonly ReceiptAsset[] = NO_ASSETS,
       ): never => {
         const classified = classifyXPreStageFailure(error);
         if (classified.kind === "local_validation") {
@@ -879,7 +929,7 @@ export function registerDraftCommand(x: Command): void {
             // A hostile wrapper around a branded error is an unknown runtime failure.
           }
           if (problem !== null && typeof message === "string") {
-            emitLocalFailure(problem, message);
+            emitLocalFailure(problem, message, assets);
             process.exit(2);
           }
         } else if (classified.kind === "terminal_projection") {
@@ -904,6 +954,46 @@ export function registerDraftCommand(x: Command): void {
         process.exit(1);
       };
 
+      if (format !== "article" && opts.cover !== undefined) {
+        emitLocalFailure({
+          phase: "local",
+          code: "x_cover_non_article_unsupported",
+          field: "media",
+          actual: "--cover",
+          expected: "omit --cover for tweet and thread drafts",
+          unit: null,
+        }, "--cover is supported only with --format article.", xArticleCoverAsset(true, false));
+        process.exit(2);
+      }
+
+      let articleCover: Readonly<XArticleCoverPreload> | null = null;
+      if (format === "article") {
+        if (opts.cover === undefined) {
+          emitLocalFailure({
+            phase: "local",
+            code: "x_article_cover_missing",
+            field: "media",
+            actual: null,
+            expected: "--cover <prepared-5:2.jpg|png|webp>",
+            unit: null,
+          }, "X Article requires an explicit --cover path.", xArticleCoverAsset(false, false));
+          process.exit(2);
+        }
+        try {
+          articleCover = preloadXArticleCover(opts.cover);
+        } catch (error) {
+          return stopForPreStageFailure(
+            error,
+            "cover_preload",
+            "x_article_cover_preload_runtime_failed",
+            xArticleCoverAsset(true, false),
+          );
+        }
+      }
+      const preloadedCoverAssets = articleCover === null
+        ? NO_ASSETS
+        : xArticleCoverAsset(true, true);
+
       // Articles are long-form structured markdown (headings, blocks, inline
       // runs) — no business on a command line. Require a file for that format.
       if (format === "article" && opts.text !== undefined) {
@@ -914,7 +1004,7 @@ export function registerDraftCommand(x: Command): void {
           actual: "--text",
           expected: "--from <base.md> for an X Article",
           unit: null,
-        }, "--text is for tweet/thread only. Use --from <base.md> for --format article.");
+        }, "--text is for tweet/thread only. Use --from <base.md> for --format article.", preloadedCoverAssets);
         process.exit(2);
       }
 
@@ -939,10 +1029,11 @@ export function registerDraftCommand(x: Command): void {
           error,
           "content_input",
           "x_content_input_runtime_failed",
+          preloadedCoverAssets,
         );
       }
-      // A real file base path (not stdin) — used to locate an article's hero
-      // asset and to place the --dry-run artifact. Undefined for --text/stdin.
+      // A real file base path (not stdin) is used only to place the --dry-run
+      // artifact. Cover selection is always explicit and independent.
       const basePath = opts.from && opts.from !== "-" ? resolve(opts.from) : undefined;
 
       // DETERMINISTIC generation. No LLM voice pass by default (formatting,
@@ -960,6 +1051,7 @@ export function registerDraftCommand(x: Command): void {
           error,
           "content_generation",
           "x_content_generation_runtime_failed",
+          preloadedCoverAssets,
         );
       }
 
@@ -1019,6 +1111,7 @@ export function registerDraftCommand(x: Command): void {
           error,
           "terminal_preparation",
           "x_terminal_preparation_runtime_failed",
+          preloadedCoverAssets,
         );
       }
       if (!opts.json) console.log(inspection);
@@ -1036,7 +1129,7 @@ export function registerDraftCommand(x: Command): void {
               validation: { local: PASSED_LOCAL_VALIDATION, live: NOT_REACHED_LIVE_VALIDATION },
               warnings: content.warnings,
               gotchas: ["The requested local artifact may be absent, partial, or replaced."],
-              assets: NO_ASSETS,
+              assets: preloadedCoverAssets,
               platformTouched: false,
               terminalState: "unknown",
               verification: { status: "not_applicable", strength: "local_only", nativeReference: null },
@@ -1060,7 +1153,7 @@ export function registerDraftCommand(x: Command): void {
                 validation: { local: PASSED_LOCAL_VALIDATION, live: NOT_REACHED_LIVE_VALIDATION },
                 warnings: content.warnings,
                 gotchas: ["The clean content artifact exists, but the inspection receipt may be absent, partial, or replaced."],
-                assets: NO_ASSETS,
+                assets: preloadedCoverAssets,
                 platformTouched: false,
                 terminalState: "unknown",
                 verification: { status: "not_applicable", strength: "local_only", nativeReference: null },
@@ -1086,15 +1179,23 @@ export function registerDraftCommand(x: Command): void {
           gotchas: format === "article" && content.article?.codeBlockCount
             ? ["Article code blocks require manual Insert → Code or screenshot handling."]
             : [],
+          assets: format === "article" ? xArticleCoverAsset(true, true) : NO_ASSETS,
         }), { json: !!opts.json, budget: output });
         process.exit(0);
       }
 
       const outcome = await executeXDraftRealRun(
-        { content, inspect: opts.inspect, basePath },
+        format === "article"
+          ? { content, inspect: opts.inspect, cover: articleCover! }
+          : { content, inspect: opts.inspect, basePath },
         productionXDraftRealRunDependencies,
       );
-      emitTransportReceipt(receiptForXDraftOutcome(outcome, format, content.warnings), {
+      emitTransportReceipt(receiptForXDraftOutcome(
+        outcome,
+        format,
+        content.warnings,
+        articleCover,
+      ), {
         json: !!opts.json,
         budget: output,
       });
