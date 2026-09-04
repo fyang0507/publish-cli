@@ -8,18 +8,31 @@ import {
 } from "./contentInput.js";
 import { generateArticle, prepareWechatArticle, type GeneratedArticle } from "../wechat/content.js";
 import {
-  createServerValidationReceipt,
   isLocalValidationError,
+  type LocalValidationProblem,
 } from "../capabilities/validation.js";
 import {
   TerminalOutputBudget,
-  emitTerminalOutput,
   isTerminalProjectionError,
-  projectTerminalText,
-  renderTerminalErrorMessage,
-  renderTerminalInline,
   terminalProjectionFailureMessage,
 } from "../terminalOutput.js";
+import {
+  createDryRunReceipt,
+  createLocalInputFailureReceipt,
+  createTransportReceipt,
+  emitTransportReceipt,
+  NOT_REACHED_LIVE_VALIDATION,
+  PASSED_LOCAL_VALIDATION,
+  type ReceiptAsset,
+  type ReceiptRemoteResidue,
+  type TransportReceipt,
+} from "../transportReceipt.js";
+import type { WeChatClient } from "../wechat/client.js";
+import type {
+  StageArticleResult,
+  WeChatDraftStageErrorSnapshot,
+  WeChatDraftStageProgress,
+} from "../wechat/draft.js";
 
 /**
  * `publish wechat draft` — owned-content publisher for the WeChat Official Account
@@ -58,6 +71,7 @@ interface WechatDraftOptions extends ContentInputOptions {
   keepLinks?: boolean; // --keep-links => opts.keepLinks
   out?: string;
   dryRun?: boolean; // --dry-run => opts.dryRun
+  json?: boolean;
 }
 
 export type WechatAuthorFallbackResolver = () => string;
@@ -102,6 +116,437 @@ export function resolveWechatDraftInput(
   };
 }
 
+export interface WechatDraftRealRunDependencies {
+  createClient(): Promise<WeChatClient>;
+  stage(client: WeChatClient, article: GeneratedArticle): Promise<unknown>;
+  snapshotStageError(error: unknown): WeChatDraftStageErrorSnapshot | null;
+  snapshotStageResult(value: unknown, article: GeneratedArticle): StageArticleResult | null;
+}
+
+export type WechatDraftRealRunOutcome = Readonly<
+  | { kind: "staged"; result: StageArticleResult; cleanupFailed: boolean }
+  | { kind: "stage_failed"; failure: WeChatDraftStageErrorSnapshot; cleanupFailed: boolean }
+  | {
+      kind: "runtime_failed";
+      stage: "client_create" | "stage_result" | "stage_unknown";
+      platformTouched: boolean;
+      nativeDraftPossible: boolean;
+      cleanupFailed: boolean;
+    }
+>;
+
+/** Guard client construction, stage result closure, and cleanup without losing primary facts. */
+export async function executeWechatDraftRealRun(
+  article: GeneratedArticle,
+  dependencies: WechatDraftRealRunDependencies,
+): Promise<WechatDraftRealRunOutcome> {
+  let client: WeChatClient;
+  try {
+    client = await dependencies.createClient();
+  } catch {
+    return Object.freeze({
+      kind: "runtime_failed",
+      stage: "client_create",
+      platformTouched: false,
+      nativeDraftPossible: false,
+      cleanupFailed: false,
+    });
+  }
+
+  type PrimaryOutcome =
+    | { kind: "staged"; result: StageArticleResult }
+    | { kind: "stage_failed"; failure: WeChatDraftStageErrorSnapshot }
+    | {
+        kind: "runtime_failed";
+        stage: "stage_result" | "stage_unknown";
+        platformTouched: true;
+        nativeDraftPossible: true;
+      };
+  let primary: PrimaryOutcome;
+  let returned: unknown;
+  let stageThrown = false;
+  let stageError: unknown;
+  try {
+    returned = await dependencies.stage(client, article);
+  } catch (error) {
+    stageThrown = true;
+    stageError = error;
+  }
+
+  if (stageThrown) {
+    let failure: WeChatDraftStageErrorSnapshot | null = null;
+    try {
+      failure = dependencies.snapshotStageError(stageError);
+    } catch {
+      failure = null;
+    }
+    primary = failure === null
+      ? {
+          kind: "runtime_failed",
+          stage: "stage_unknown",
+          platformTouched: true,
+          nativeDraftPossible: true,
+        }
+      : { kind: "stage_failed", failure };
+  } else {
+    let result: StageArticleResult | null = null;
+    try {
+      result = dependencies.snapshotStageResult(returned, article);
+    } catch {
+      result = null;
+    }
+    primary = result === null
+      ? {
+          kind: "runtime_failed",
+          stage: "stage_result",
+          platformTouched: true,
+          nativeDraftPossible: true,
+        }
+      : { kind: "staged", result };
+  }
+
+  let cleanupFailed = false;
+  try {
+    await client.close();
+  } catch {
+    cleanupFailed = true;
+  }
+  return Object.freeze({ ...primary, cleanupFailed }) as WechatDraftRealRunOutcome;
+}
+
+function initialWechatAssets(article: GeneratedArticle): readonly ReceiptAsset[] {
+  return [
+    {
+      index: 0,
+      role: "cover",
+      requested: true,
+      resolved: true,
+      set: null,
+      uploaded: false,
+      observed: false,
+      verified: null,
+      remoteReference: null,
+    },
+    ...article.bodyImages.map((_, index) => ({
+      index: index + 1,
+      role: "body_image" as const,
+      requested: true as const,
+      resolved: true as const,
+      set: null,
+      uploaded: false,
+      observed: false,
+      verified: null,
+      remoteReference: null,
+    })),
+  ];
+}
+
+function assetsForWechatProgress(
+  article: GeneratedArticle,
+  progress: WeChatDraftStageProgress,
+  failureKind: WeChatDraftStageErrorSnapshot["failureKind"] | null,
+): readonly ReceiptAsset[] {
+  const uploadedBodies = new Map(
+    progress.uploadedBodyImages.map((entry) => [entry.index, entry.remoteReference] as const),
+  );
+  const unresolvedAttempt = failureKind === "delivery_unknown";
+  const coverUploaded = progress.thumbMediaId !== null;
+  const coverState = coverUploaded
+    ? true
+    : progress.coverUploadAttempted && progress.phase === "cover_upload" && unresolvedAttempt
+      ? null
+      : false;
+  return [
+    {
+      index: 0,
+      role: "cover",
+      requested: true,
+      resolved: true,
+      set: null,
+      uploaded: coverState,
+      observed: coverState,
+      verified: null,
+      remoteReference: progress.thumbMediaId,
+    },
+    ...article.bodyImages.map((_, index) => {
+      const reference = uploadedBodies.get(index) ?? null;
+      const isUnresolvedCurrentAttempt = reference === null &&
+        progress.phase === "body_image_upload" &&
+        progress.bodyUploadAttemptedCount === index + 1 &&
+        unresolvedAttempt;
+      const uploaded = reference !== null ? true : isUnresolvedCurrentAttempt ? null : false;
+      return {
+        index: index + 1,
+        role: "body_image" as const,
+        requested: true as const,
+        resolved: true as const,
+        set: null,
+        uploaded,
+        observed: uploaded,
+        verified: null,
+        remoteReference: reference,
+      };
+    }),
+  ];
+}
+
+function residueForWechatFailure(
+  failure: WeChatDraftStageErrorSnapshot,
+): readonly ReceiptRemoteResidue[] {
+  const residue: ReceiptRemoteResidue[] = [];
+  if (failure.progress.thumbMediaId !== null) {
+    residue.push({
+      kind: "asset",
+      state: "permanent_cover_uploaded_before_native_draft_failure",
+      assetIndex: 0,
+      reference: failure.progress.thumbMediaId,
+      retryRisk: "duplicate",
+    });
+  } else if (failure.phase === "cover_upload" && failure.failureKind === "delivery_unknown") {
+    residue.push({
+      kind: "asset",
+      state: "cover_upload_delivery_unknown",
+      assetIndex: 0,
+      reference: null,
+      retryRisk: "unknown",
+    });
+  }
+  for (const body of failure.progress.uploadedBodyImages) {
+    residue.push({
+      kind: "asset",
+      state: "body_image_uploaded_before_native_draft_failure",
+      assetIndex: body.index + 1,
+      reference: body.remoteReference,
+      retryRisk: "duplicate",
+    });
+  }
+  if (
+    failure.phase === "body_image_upload" && failure.failureKind === "delivery_unknown" &&
+    failure.progress.bodyUploadAttemptedCount > failure.progress.uploadedBodyImages.length
+  ) {
+    residue.push({
+      kind: "asset",
+      state: "body_image_upload_delivery_unknown",
+      assetIndex: failure.progress.bodyUploadAttemptedCount,
+      reference: null,
+      retryRisk: "unknown",
+    });
+  }
+  if (failure.phase === "draft_add" && failure.failureKind === "delivery_unknown") {
+    residue.push({
+      kind: "native_draft",
+      state: "draft_add_delivery_unknown",
+      assetIndex: null,
+      reference: null,
+      retryRisk: "duplicate",
+    });
+  }
+  return residue;
+}
+
+export function receiptForWechatStageSuccess(
+  article: GeneratedArticle,
+  result: StageArticleResult,
+  cleanupFailed = false,
+): Readonly<TransportReceipt> {
+  return createTransportReceipt({
+    channel: "wechat",
+    action: "draft",
+    format: "article",
+    mode: "real",
+    validation: {
+      local: PASSED_LOCAL_VALIDATION,
+      live: { status: "passed", problems: [], notes: ["draft/add returned a native media_id."] },
+    },
+    warnings: cleanupFailed
+      ? [...article.warnings, "Client cleanup failed after the native media_id was returned."]
+      : article.warnings,
+    gotchas: cleanupFailed
+      ? ["The native draft already exists. Do not restage because cleanup failure does not undo draft/add."]
+      : ["Review the native draft in the WeChat draft box before publication."],
+    assets: assetsForWechatProgress(article, result.progress, null),
+    platformTouched: true,
+    terminalState: "native_draft_verified",
+    verification: {
+      status: "verified",
+      strength: "native_id_returned",
+      nativeReference: result.mediaId,
+    },
+    remoteResidue: cleanupFailed
+      ? [{
+          kind: "native_draft",
+          state: "native_draft_created_before_client_cleanup_failure",
+          assetIndex: null,
+          reference: result.mediaId,
+          retryRisk: "duplicate",
+        }]
+      : [],
+    error: cleanupFailed
+      ? {
+          source: "runtime",
+          stage: "client_close",
+          code: "wechat_client_cleanup_failed",
+          httpStatus: null,
+          sanitizedMessage: "The WeChat client cleanup failed after draft/add returned a native media_id.",
+          classification: "known",
+          retryable: false,
+          inputRelated: false,
+          suggestedCorrection: "Treat the native draft as created, inspect it in the draft box, and do not restage blindly.",
+        }
+      : null,
+    exit: cleanupFailed
+      ? { class: "runtime_or_platform_failure", code: 1 }
+      : { class: "success", code: 0 },
+  });
+}
+
+export function receiptForWechatStageFailure(
+  article: GeneratedArticle,
+  failure: WeChatDraftStageErrorSnapshot,
+  cleanupFailed = false,
+): Readonly<TransportReceipt> {
+  const draftPossible = failure.phase === "draft_add" && failure.failureKind === "delivery_unknown";
+  const residue = [...residueForWechatFailure(failure)];
+  return createTransportReceipt({
+    channel: "wechat",
+    action: "draft",
+    format: "article",
+    mode: "real",
+    validation: {
+      local: PASSED_LOCAL_VALIDATION,
+      live: { status: "failed", problems: [], notes: [
+        failure.failureKind === "api_rejection"
+          ? "WeChat returned an explicit API rejection."
+          : "Request delivery or returned completion evidence is unknown.",
+      ] },
+    },
+    warnings: cleanupFailed
+      ? [...article.warnings, "Client cleanup also failed; the primary staging evidence is retained."]
+      : article.warnings,
+    gotchas: [
+      ...(residue.some((entry) => entry.kind === "asset")
+        ? ["Remote cover/body assets were created or may exist even though no native draft was confirmed."]
+        : []),
+      ...(draftPossible
+        ? ["A native draft may exist. Inspect the WeChat draft box before any retry; never restage blindly."]
+        : []),
+    ],
+    assets: assetsForWechatProgress(article, failure.progress, failure.failureKind),
+    platformTouched: true,
+    terminalState: draftPossible
+      ? "native_draft_possible"
+      : failure.failureKind === "api_rejection" ? "platform_rejected" : "no_native_draft",
+    verification: { status: "unverified", strength: "none", nativeReference: null },
+    remoteResidue: residue,
+    error: {
+      source: "platform",
+      stage: failure.phase,
+      code: failure.platformCode,
+      httpStatus: failure.httpStatus,
+      sanitizedMessage: failure.sanitizedMessage,
+      classification: failure.failureKind === "api_rejection" ? "known" : "unknown",
+      retryable: failure.platformCode === "40164" ? false : null,
+      inputRelated: failure.platformCode === "40164" ? false : null,
+      suggestedCorrection: failure.platformCode === "40164"
+        ? "Add the fixed egress IP to the account allowlist, run publish wechat check, then make a separate attempt. Previously uploaded asset residue remains reported."
+        : draftPossible
+          ? "Inspect the WeChat draft box before deciding whether a separate attempt is safe."
+          : "Resolve the reported API or transport failure before a separate attempt; account for any reported asset residue.",
+    },
+    exit: { class: "runtime_or_platform_failure", code: 1 },
+  });
+}
+
+function receiptForWechatRuntimeFailure(input: {
+  article: GeneratedArticle | null;
+  mode: "dry_run" | "real";
+  stage: string;
+  code: string;
+  platformTouched: boolean;
+  nativeDraftPossible?: boolean;
+  cleanupFailed?: boolean;
+  artifactResidue?: boolean;
+}): Readonly<TransportReceipt> {
+  const nativeDraftPossible = input.nativeDraftPossible ?? false;
+  const assets = input.article === null
+    ? []
+    : input.platformTouched
+      ? initialWechatAssets(input.article).map((asset) => ({
+          ...asset,
+          uploaded: null,
+          observed: null,
+        }))
+      : initialWechatAssets(input.article);
+  const remoteResidue: ReceiptRemoteResidue[] = [];
+  if (nativeDraftPossible) {
+    remoteResidue.push({
+      kind: "native_draft",
+      state: "stage_outcome_unknown",
+      assetIndex: null,
+      reference: null,
+      retryRisk: "duplicate",
+    });
+  }
+  if (input.artifactResidue) {
+    remoteResidue.push({
+      kind: "artifact",
+      state: "requested_artifact_may_be_absent_partial_or_replaced",
+      assetIndex: null,
+      reference: null,
+      retryRisk: "unknown",
+    });
+  }
+  return createTransportReceipt({
+    channel: "wechat",
+    action: "draft",
+    format: "article",
+    mode: input.mode,
+    validation: {
+      local: PASSED_LOCAL_VALIDATION,
+      live: input.platformTouched
+        ? { status: "failed", problems: [], notes: ["The staging boundary returned no trustworthy typed result."] }
+        : NOT_REACHED_LIVE_VALIDATION,
+    },
+    warnings: input.article?.warnings ?? [],
+    gotchas: [
+      ...(nativeDraftPossible
+        ? ["A native draft may exist. Inspect the draft box and do not restage blindly."]
+        : []),
+      ...(input.cleanupFailed ? ["Client cleanup also failed."] : []),
+      ...(input.artifactResidue ? ["The local inspection artifact may be absent, partial, or replaced."] : []),
+    ],
+    assets,
+    platformTouched: input.platformTouched,
+    terminalState: nativeDraftPossible ? "native_draft_possible" : "no_native_draft",
+    verification: {
+      status: input.platformTouched ? "unverified" : "not_applicable",
+      strength: "none",
+      nativeReference: null,
+    },
+    remoteResidue,
+    error: {
+      source: "runtime",
+      stage: input.stage,
+      code: input.code,
+      httpStatus: null,
+      sanitizedMessage: input.artifactResidue
+        ? "The requested local WeChat inspection artifact could not be written safely."
+        : input.platformTouched
+          ? "The WeChat staging boundary returned no trustworthy typed completion evidence."
+          : "The WeChat staging runtime could not be initialized before API access.",
+      classification: "unknown",
+      retryable: nativeDraftPossible ? false : null,
+      inputRelated: false,
+      suggestedCorrection: nativeDraftPossible
+        ? "Inspect the WeChat draft box before deciding whether a separate attempt is safe."
+        : input.artifactResidue
+          ? "Choose a writable --out destination before a separate attempt. No API access occurred."
+          : "Repair the local WeChat runtime or egress setup before a separate attempt.",
+    },
+    exit: { class: "runtime_or_platform_failure", code: 1 },
+  });
+}
+
 export function registerWechatDraftCommand(
   parent: Command,
   resolveAuthorFallback: WechatAuthorFallbackResolver,
@@ -119,6 +564,7 @@ export function registerWechatDraftCommand(
     .option("--keep-links", "Keep safe inline external links (default: rewrite external http(s) links to citations)")
     .option("--out <file.html>", "Write the rendered inline-styled HTML to a file for inspection")
     .option("--dry-run", "Render + validate only; NO network, NO token, NO upload, NO draft/add")
+    .option("--json", "Emit one versioned machine-readable transport receipt")
     .addHelpText(
       "after",
       "\nFile/stdin frontmatter:\n" +
@@ -146,25 +592,44 @@ export function registerWechatDraftCommand(
     )
     .action(async (opts: WechatDraftOptions) => {
       const output = new TerminalOutputBudget();
-      const emit = (stream: "stdout" | "stderr", message: string) =>
-        emitTerminalOutput(output, stream, message);
+      const finish = (receipt: Readonly<TransportReceipt>): void => {
+        emitTransportReceipt(receipt, { json: !!opts.json, budget: output });
+        process.exitCode = receipt.exit.code;
+      };
+      const localFailure = (problem: LocalValidationProblem, message: string): void => {
+        finish(createLocalInputFailureReceipt({
+          channel: "wechat",
+          action: "draft",
+          format: "article",
+          mode: opts.dryRun ? "dry_run" : "real",
+          problem,
+          message,
+        }));
+      };
+      const projectionProblem = (): LocalValidationProblem => ({
+        phase: "local",
+        code: "terminal_projection_failed",
+        field: "text",
+        actual: "unsafe_or_oversized",
+        expected: "bounded Unicode-scalar terminal evidence",
+        unit: "utf16_code_units",
+      });
+
       let input: ResolvedWechatDraftInput;
       try {
         input = resolveWechatDraftInput(opts, resolveAuthorFallback);
       } catch (error) {
-        if (!isLocalValidationError(error)) throw error;
-        try {
-          emit("stderr", renderTerminalErrorMessage(error.message));
-        } catch {
-          console.error(terminalProjectionFailureMessage());
-        }
-        process.exit(2);
+        if (isLocalValidationError(error)) localFailure(error.problem, error.message);
+        else finish(receiptForWechatRuntimeFailure({
+          article: null,
+          mode: opts.dryRun ? "dry_run" : "real",
+          stage: "local_input",
+          code: "wechat_input_runtime_failed",
+          platformTouched: false,
+        }));
+        return;
       }
 
-      // Relative cover / body-image paths resolve against the --from file's directory
-      // (so `./imgs/x.png` loads next to the article), or the CWD for inline --text / stdin.
-      // DETERMINISTIC generation (no LLM, no network). Throws on a missing title
-      // or cover — a usage error (exit 2), same tier as resolveContentInput.
       let article: GeneratedArticle;
       let inspection: string;
       try {
@@ -173,8 +638,6 @@ export function registerWechatDraftCommand(
           author: opts.author,
           authorFallback: input.authorFallback,
           digest: opts.digest,
-          // A --cover flag is relative to the invocation CWD (resolved here); a
-          // frontmatter coverImage is relative to the markdown dir (baseDir, below).
           cover: opts.cover ? resolve(opts.cover) : undefined,
           sourceUrl: opts.sourceUrl,
           frontmatter: input.frontmatter,
@@ -184,136 +647,97 @@ export function registerWechatDraftCommand(
         article = prepared.article;
         inspection = prepared.inspection;
       } catch (error) {
-        if (!isLocalValidationError(error) && !isTerminalProjectionError(error)) throw error;
-        if (isTerminalProjectionError(error)) {
-          console.error(terminalProjectionFailureMessage());
+        if (isLocalValidationError(error)) localFailure(error.problem, error.message);
+        else if (isTerminalProjectionError(error)) {
+          localFailure(projectionProblem(), terminalProjectionFailureMessage());
         } else {
-          try {
-            emit("stderr", renderTerminalErrorMessage(error.message));
-          } catch {
-            console.error(terminalProjectionFailureMessage());
-          }
+          finish(receiptForWechatRuntimeFailure({
+            article: null,
+            mode: opts.dryRun ? "dry_run" : "real",
+            stage: "local_generation",
+            code: "wechat_generation_runtime_failed",
+            platformTouched: false,
+          }));
         }
-        process.exit(2);
+        return;
       }
 
-      // Prepare every caller-derived path plus the complete pre-network output
-      // budget before rendering content or creating an artifact.
-      let outputArtifact: { path: string; receipt: string } | null = null;
-      try {
-        output.consume(inspection);
-        if (opts.out) {
-          const path = resolve(opts.out);
-          const terminalPath = renderTerminalInline(projectTerminalText(path, { lineMode: "inline" }));
-          const receipt = `\nWrote rendered HTML to ${terminalPath}`;
-          output.consume(receipt);
-          outputArtifact = { path, receipt };
-        }
-      } catch {
-        console.error(terminalProjectionFailureMessage());
-        process.exit(2);
-      }
-      console.log(inspection);
-
-      // --out: write the exact inline-styled HTML for eyeballing. Body <img src>
-      // still point at LOCAL paths here — a real run rewrites them to WeChat URLs.
-      if (outputArtifact) {
+      if (!opts.json) {
         try {
-          writeFileSync(outputArtifact.path, article.html, "utf-8");
+          output.consume(inspection);
+          console.log(inspection);
         } catch {
-          emit(
-            "stderr",
-            "\n✗ Local WeChat --out artifact write failed. The requested HTML artifact may be absent, partial, or replaced. " +
-              "No token, client, upload, or draft API action followed.",
-          );
-          process.exit(2);
+          localFailure(projectionProblem(), terminalProjectionFailureMessage());
+          return;
         }
-        console.log(outputArtifact.receipt);
       }
 
-      // --dry-run is NETWORK-FREE: the deterministic render + metadata validation
-      // above is the whole run. No token minted, no image uploaded, no draft/add.
+      if (opts.out) {
+        try {
+          writeFileSync(resolve(opts.out), article.html, "utf-8");
+        } catch {
+          finish(receiptForWechatRuntimeFailure({
+            article,
+            mode: opts.dryRun ? "dry_run" : "real",
+            stage: "artifact_write",
+            code: "wechat_artifact_write_failed",
+            platformTouched: false,
+            artifactResidue: true,
+          }));
+          return;
+        }
+      }
+
       if (opts.dryRun) {
-        emit("stdout",
-          "\n[dry-run] Deterministic render + local validation passed; measured image facts are above, " +
-            "and listed server-authoritative constraints remain unverified. " +
-            "No token minted, no images uploaded, no draft/add call — nothing staged.\n" +
-            "  Re-run without --dry-run to upload the cover/body images and stage the native draft.",
-        );
-        process.exit(0);
+        finish(createDryRunReceipt({
+          channel: "wechat",
+          action: "draft",
+          format: "article",
+          warnings: article.warnings,
+          gotchas: [
+            "Server-authoritative title, digest, image quota, and draft acceptance constraints remain unverified.",
+          ],
+          assets: initialWechatAssets(article),
+          liveNotes: ["No token, upload, or draft/add API action was attempted."],
+        }));
+        return;
       }
 
-      // Real run: resolve egress + client, then stage. The command OWNS the client
-      // (and its one EgressHandle), so egress (proxy / ssh tunnel) is torn down
-      // exactly once in the finally. Imported lazily so the dry-run path above never
-      // loads the egress/undici stack.
-      const { createWeChatClient, WeChatApiError, parseEgressIpFrom40164 } = await import("../wechat/client.js");
-      const { stageArticleDraft } = await import("../wechat/draft.js");
-
-      let exitCode = 0;
-      const client = await createWeChatClient();
+      let dependencies: WechatDraftRealRunDependencies;
       try {
-        const res = await stageArticleDraft(client, article);
-        const mediaId = renderTerminalInline(projectTerminalText(res.mediaId, { lineMode: "inline" }));
-        const thumbMediaId = renderTerminalInline(projectTerminalText(res.thumbMediaId, { lineMode: "inline" }));
-        const draftBoxUrl = renderTerminalInline(projectTerminalText(res.draftBoxUrl, { lineMode: "inline" }));
-        emit("stdout",
-          `\n✓ Staged a native WeChat draft (article) — NEVER published.\n` +
-            `  media_id: ${mediaId}\n` +
-            `  thumb_media_id: ${thumbMediaId}\n` +
-            (res.uploadedImages.length ? `  body images uploaded: ${res.uploadedImages.length}\n` : "") +
-            `  ${draftBoxUrl}`,
-        );
-      } catch (err) {
-        exitCode = 1;
-        if (err instanceof WeChatApiError) {
-          const knownIpError = err.errcode === 40164;
-          const receipt = createServerValidationReceipt({
-            source: "wechat_api",
-            stage: err.endpoint,
-            outcome: "rejected",
-            code: String(err.errcode),
-            message: err.errmsg,
-            classified: knownIpError,
-            retryable: knownIpError ? false : null,
-            inputRelated: knownIpError ? false : null,
-            suggestedCorrection: knownIpError
-              ? "Add the fixed egress IP to the account allowlist, then rerun publish wechat check."
-              : null,
-            platformTouched: true,
-            observedState: "nothing_staged",
-            published: false,
-          });
-          if (err.errcode === 40164) {
-            // IP not allowlisted — the ordered uploads (§5) aborted before any
-            // partial work, so nothing was staged. Surface the exact egress IP.
-            const ip = parseEgressIpFrom40164(err.errmsg);
-            emit("stderr", "\n✗ WeChat rejected the egress IP (40164 — not in whitelist). Nothing was staged.");
-            if (ip) {
-              emit("stderr", `  WeChat sees this machine as ${renderTerminalInline(projectTerminalText(ip, { lineMode: "inline" }))}.`);
-            }
-            emit("stderr",
-              "  Add it at 微信开发者平台 → 开发管理 → 开发接口管理 → IP白名单:\n" +
-                "    https://developers.weixin.qq.com/platform/\n" +
-                "  (Needs an admin WeChat QR re-scan. Run 'publish wechat check' to re-verify.)",
-            );
-          } else {
-            emit("stderr",
-              `\n✗ WeChat API error on ${renderTerminalInline(projectTerminalText(err.endpoint, { lineMode: "inline" }))}: ` +
-              `${err.errcode} ${renderTerminalInline(projectTerminalText(receipt.sanitizedMessage, { lineMode: "inline" }))}. Nothing was staged.`,
-            );
-          }
-          emit("stderr", `  server receipt: ${renderTerminalInline(projectTerminalText(JSON.stringify(receipt), { lineMode: "inline" }))}`);
-        } else {
-          const detail = isTerminalProjectionError(err)
-            ? terminalProjectionFailureMessage()
-            : renderTerminalInline(projectTerminalText((err as Error).message, { lineMode: "inline" }));
-          emit("stderr", `\n✗ Failed to stage the WeChat draft: ${detail}`);
-        }
-      } finally {
-        await client.close();
+        const clientModule = await import("../wechat/client.js");
+        const draftModule = await import("../wechat/draft.js");
+        dependencies = {
+          createClient: clientModule.createWeChatClient,
+          stage: draftModule.stageArticleDraft,
+          snapshotStageError: draftModule.snapshotWeChatDraftStageError,
+          snapshotStageResult: draftModule.snapshotStageArticleResult,
+        };
+      } catch {
+        finish(receiptForWechatRuntimeFailure({
+          article,
+          mode: "real",
+          stage: "runtime_import",
+          code: "wechat_runtime_import_failed",
+          platformTouched: false,
+        }));
+        return;
       }
 
-      process.exit(exitCode);
+      const outcome = await executeWechatDraftRealRun(article, dependencies);
+      const receipt = outcome.kind === "staged"
+        ? receiptForWechatStageSuccess(article, outcome.result, outcome.cleanupFailed)
+        : outcome.kind === "stage_failed"
+          ? receiptForWechatStageFailure(article, outcome.failure, outcome.cleanupFailed)
+          : receiptForWechatRuntimeFailure({
+              article,
+              mode: "real",
+              stage: outcome.stage,
+              code: `wechat_${outcome.stage}_failed`,
+              platformTouched: outcome.platformTouched,
+              nativeDraftPossible: outcome.nativeDraftPossible,
+              cleanupFailed: outcome.cleanupFailed,
+            });
+      finish(receipt);
     });
 }

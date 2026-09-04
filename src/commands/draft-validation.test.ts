@@ -243,7 +243,7 @@ test("invalid X reply targets are zero-state before content, ledger, or platform
         assert.equal(result.signal, null, `${mode}: ${target}\n${output(result)}`);
         assert.match(output(result), /Invalid --to: Expected \[1-9\]\[0-9\]\{4,24\}/);
         assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED|s3cr3t/);
-        assert.ok(output(result).length < 1_000, `${mode}: unbounded error output`);
+        assert.ok(output(result).length < 4_000, `${mode}: unbounded error output`);
         assert.equal(existsSync(dataDir), false, `${mode}: data dir was created`);
         assert.equal(existsSync(repoDir), false, `${mode}: data repo was created`);
       }
@@ -313,21 +313,18 @@ test("valid X reply dry-runs render tweet and lossless thread previews without r
       assert.equal(result.stderr, "");
       assert.match(result.stdout, new RegExp(`Replying to tweet ${unverifiedTargetId}:`));
       assert.match(result.stdout, testCase.format);
-      assert.match(result.stdout, /\[dry-run\] Local content validation and generation passed for syntactically valid reply target/);
-      assert.match(result.stdout, /No draft was staged/);
+      assert.match(result.stdout, /mode: dry-run/);
+      assert.match(result.stdout, /validation: local=passed; live=skipped/);
+      assert.match(result.stdout, /platform touched: no/);
+      assert.match(result.stdout, /terminal draft state: dry_run_validated/);
+      assert.match(result.stdout, /Target syntax was validated locally/);
       assert.match(
         result.stdout,
-        /No browser opened; no profile, data-repository, or SQLite runtime state was read or written/,
+        /target existence, visibility, and reply eligibility remain unverified/i,
       );
-      assert.match(result.stdout, /Target ID\/URL syntax was validated locally/);
       assert.match(
         result.stdout,
-        /Target existence, visibility, and reply eligibility were not verified; X remains authoritative for those checks during a real run/,
-      );
-      assert.match(result.stdout, /Reply-ledger claim\/finalization was skipped/);
-      assert.match(
-        result.stdout,
-        /real run first claims the normalized target and may refuse finalized history unless --force is explicitly supplied/,
+        /X target checks, reply-ledger state, and native staging were intentionally skipped/,
       );
       assert.match(result.stdout, /--force never bypasses an in-flight or retained reservation/);
       assert.doesNotMatch(output(result), /PLATFORM_IMPORT_BLOCKED|Already staged/);
@@ -639,7 +636,7 @@ test("X Article fidelity rejects locally before artifacts, runtime imports, prof
         assert.equal(result.signal, null);
         assert.match(output(result), fixtureCase.evidence);
         assert.doesNotMatch(output(result), /RAW_PRIVATE_CANARY|PLATFORM_IMPORT_BLOCKED/);
-        assert.ok(output(result).length < 1_000);
+        assert.ok(output(result).length < 4_000);
         assert.equal(existsSync(dataDir), false);
         assert.equal(existsSync(repoDir), false);
         assert.equal(readFileSync(markdownArtifact, "utf8"), "UNCHANGED_MARKDOWN_SENTINEL");
@@ -690,7 +687,7 @@ test("X Article fidelity rejects locally before artifacts, runtime imports, prof
         assert.equal(result.status, 2, `${name}/${mode}: ${output(result)}`);
         assert.match(output(result), evidence);
         assert.doesNotMatch(output(result), /RAW_PRIVATE_CANARY|user:secret|PLATFORM_IMPORT_BLOCKED/);
-        assert.ok(output(result).length < 1_000);
+        assert.ok(output(result).length < 4_000);
         assert.equal(existsSync(dataDir), false);
         assert.equal(existsSync(repoDir), false);
       }
@@ -1113,7 +1110,7 @@ test("malformed X mapping frontmatter exits 2 before artifacts, state, profiles,
           /actual: malformed_yaml; expected: a valid YAML mapping between leading --- delimiters/,
         );
         assert.doesNotMatch(output(invalid), /workflow-secret|Visible body|PLATFORM_IMPORT_BLOCKED/);
-        assert.doesNotMatch(output(invalid), /format:/);
+        assert.doesNotMatch(output(invalid), /^format:/m);
       }
     }
 
@@ -1134,7 +1131,7 @@ test("malformed X mapping frontmatter exits 2 before artifacts, state, profiles,
         assert.equal(invalid.signal, null, output(invalid));
         assert.match(output(invalid), /actual: malformed_yaml; expected: a valid YAML mapping/);
         assert.doesNotMatch(output(invalid), /stdin-secret|Body|PLATFORM_IMPORT_BLOCKED/);
-        assert.doesNotMatch(output(invalid), /format:/);
+        assert.doesNotMatch(output(invalid), /^format:/m);
       }
     }
 
@@ -1160,7 +1157,7 @@ test("malformed X mapping frontmatter exits 2 before artifacts, state, profiles,
     );
     assert.doesNotMatch(
       output(unterminatedDraft),
-      /workflow-secret|Visible body|format:|PLATFORM_IMPORT_BLOCKED/,
+      /workflow-secret|Visible body|^format:|PLATFORM_IMPORT_BLOCKED/m,
     );
 
     const weighted = runCli(fixture, [
@@ -1715,7 +1712,8 @@ test("valid dry-runs also avoid platform/browser/API imports", () => {
     assert.match(linkedinHelp.stdout, /Only a returned Save as draft action followed by a full intended-text match/);
     assert.match(linkedinHelp.stdout, /rejected Save click has unknown\s+delivery/);
     assert.match(linkedinHelp.stdout, /Both uncertain states exit 1 because a native draft may exist/);
-    assert.match(linkedinHelp.stdout, /manually compare LinkedIn Drafts in the exact same CLI-owned LinkedIn profile/);
+    assert.match(linkedinHelp.stdout, /open feed\/\?shareActive=true in the exact same CLI-owned LinkedIn profile/);
+    assert.match(linkedinHelp.stdout, /choose Start a post on the feed/);
     assert.match(linkedinHelp.stdout, /--inspect is secondary diagnosis after comparison and cannot prove absence/);
     assert.doesNotMatch(output(linkedinHelp), /PLATFORM_IMPORT_BLOCKED/);
 
@@ -1737,7 +1735,7 @@ test("valid dry-runs also avoid platform/browser/API imports", () => {
       wechatInspection.stdout,
       /server-authoritative\/unverified: maximum_bytes_per_image.*maximum_body_image_count/,
     );
-    assert.match(wechatInspection.stdout, /listed server-authoritative constraints remain unverified/);
+    assert.match(wechatInspection.stdout, /Server-authoritative title, digest, image quota, and draft acceptance constraints remain unverified/);
     assert.doesNotMatch(output(wechatInspection), /PLATFORM_IMPORT_BLOCKED/);
     assert.deepEqual(readdirSync(fixture.dataDir), []);
     assert.deepEqual(readdirSync(fixture.repoDir), []);
@@ -1753,26 +1751,20 @@ test("local artifact write failures stay bounded and content-free before platfor
     fixture.dir,
     `write-\u001b]0;owned\u0007${rawForgedReceipt}`,
   );
-  const xFirstWriteError =
-    "\n✗ Local X dry-run artifact write failed. The requested artifact may be absent, partial, or replaced. " +
-    "No browser, profile, reply ledger, or native staging action followed.\n";
-  const xSecondWriteError =
-    "\n✗ Local X Article inspection receipt write failed after the clean content artifact write returned. " +
-    "The clean content artifact may already exist; the inspection receipt may be absent, partial, or replaced. " +
-    "No browser, profile, or native staging action followed.\n";
-  const wechatWriteError =
-    "\n✗ Local WeChat --out artifact write failed. The requested HTML artifact may be absent, partial, or replaced. " +
-    "No token, client, upload, or draft API action followed.\n";
-
   const assertSafeFailure = (
     result: SpawnSyncReturns<string>,
-    expectedStderr: string,
+    expectedCode: RegExp,
   ): void => {
     const combined = output(result);
-    assert.equal(result.status, 2, combined);
+    assert.equal(result.status, 1, combined);
     assert.equal(result.signal, null, combined);
-    assert.equal(result.stderr, expectedStderr);
-    assert.ok(result.stderr.length < 400, "write failure receipt must stay bounded");
+    assert.match(result.stderr, /Transport receipt \(publish\.transport-receipt\/v1\)/);
+    assert.match(result.stderr, /platform touched: no/);
+    assert.match(result.stderr, /published: false/);
+    assert.match(result.stderr, /exit: runtime_or_platform_failure \(1\)/);
+    assert.match(result.stderr, /residue: artifact/);
+    assert.match(result.stderr, expectedCode);
+    assert.ok(result.stderr.length < 4_000, "write failure receipt must stay bounded");
     assert.doesNotMatch(combined, /[\u001b\u0007]/u);
     assert.equal(combined.includes(rawForgedReceipt), false, combined);
     assert.equal(combined.includes(hostileDir), false, combined);
@@ -1789,7 +1781,7 @@ test("local artifact write failures stay bounded and content-free before platfor
     const tweetFailure = runCli(fixture, [
       "x", "draft", "--format", "tweet", "--from", tweetSource, "--dry-run",
     ]);
-    assertSafeFailure(tweetFailure, xFirstWriteError);
+    assertSafeFailure(tweetFailure, /code=x_artifact_write_failed/);
     assert.equal(readFileSync(tweetSource, "utf8"), "Exact tweet artifact bytes.");
     assert.equal(readdirSync(tweetArtifact).length, 0);
 
@@ -1802,7 +1794,7 @@ test("local artifact write failures stay bounded and content-free before platfor
     const articleFailure = runCli(fixture, [
       "x", "draft", "--format", "article", "--from", articleSource, "--dry-run",
     ]);
-    assertSafeFailure(articleFailure, xSecondWriteError);
+    assertSafeFailure(articleFailure, /code=x_inspection_artifact_write_failed/);
     assert.equal(readFileSync(articleArtifact, "utf8"), exactArticle);
     assert.equal(readdirSync(articleInspectionArtifact).length, 0);
 
@@ -1816,7 +1808,7 @@ test("local artifact write failures stay bounded and content-free before platfor
         "--cover", cover, "--out", wechatFailurePath,
         ...(dryRun ? ["--dry-run"] : []),
       ], undefined, { cwd: fixture.dir });
-      assertSafeFailure(result, wechatWriteError);
+      assertSafeFailure(result, /code=wechat_artifact_write_failed/);
       assert.equal(readdirSync(wechatFailurePath).length, 0);
     }
 

@@ -104,6 +104,17 @@ publish reddit draft --subreddit agents --title "Title" --from post.md
 publish wechat draft --from article.md --cover cover.png
 ```
 
+Add `--json` to any draft command (or `x reply`) to receive exactly one
+`publish.transport-receipt/v1` JSON document. It reports the selected channel
+and format, local/live/skipped validation, warnings and gotchas, ordered asset
+progress, whether the platform was touched, terminal native-draft state,
+verification strength/reference, partial remote residue, `published:false`, and
+the exit class. Large evidence sets stay bounded: the receipt includes total,
+listed, and omitted counts plus a SHA-256 identity of each exact ordered set and
+complete asset-stage truth counts. Human summaries are rendered from the same frozen receipt.
+Exit 0 means a valid dry-run or positively verified native stage, exit 1 means a
+runtime/platform/durable-state failure, and exit 2 means invalid caller input.
+
 These examples are illustrative. Consult the selected channel's `info` response
 and action help before execution.
 

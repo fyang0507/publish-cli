@@ -2,12 +2,16 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   executeLinkedInDraftRealRun,
+  receiptForLinkedInDraftOutcome,
   type LinkedInDraftRealRunDependencies,
   type LinkedInDraftRealRunOutcome,
 } from "./linkedin-draft.js";
 import { generatePost, type GeneratedPost } from "../linkedin/content.js";
 import type { StagePostResult } from "../linkedin/draftPoster.js";
-import { LinkedInDraftStageError } from "../linkedin/saveProgress.js";
+import {
+  createLinkedInMediaStageEvidence,
+  LinkedInDraftStageError,
+} from "../linkedin/saveProgress.js";
 
 const RAW_CANARY =
   "selector=[data-secret] PRIVATE_PATH_CANARY/operator/session cookie=li-secret page=Private LinkedIn composer\u001b[31m";
@@ -18,14 +22,16 @@ function post(markdown = "Offline LinkedIn draft body."): GeneratedPost {
 
 function result(
   savePhase: "save_delivered_unverified" | "verified",
-  mediaAttached = 0,
+  mediaCount = 0,
 ): StagePostResult {
   return {
     format: "post",
     saveMechanism: "composer_close_save",
     savePhase,
     verified: savePhase === "verified",
-    mediaAttached,
+    platformTouched: true,
+    composerModified: true,
+    media: createLinkedInMediaStageEvidence(mediaCount, true),
   };
 }
 
@@ -53,7 +59,11 @@ test("LinkedIn command exposes every branded failure phase with fixed recovery g
       { post: post(), inspect: true, media: [] },
       dependencies(async () => async (_post, options) => {
         assert.deepEqual(options, { inspect: true, media: [] });
-        const error = new LinkedInDraftStageError(phase);
+        const error = new LinkedInDraftStageError(phase, {
+          platformTouched: true,
+          composerModified: true,
+          media: [],
+        });
         Object.defineProperty(error, "cause", { value: new Error(RAW_CANARY) });
         throw error;
       }),
@@ -69,8 +79,9 @@ test("LinkedIn command exposes every branded failure phase with fixed recovery g
       assert.doesNotMatch(outcome.message, /draft may exist/i);
     } else {
       assert.match(outcome.message, /native LinkedIn draft may exist/i);
-      assert.match(outcome.message, /Before any retry, manually compare LinkedIn Drafts/);
-      assert.match(outcome.message, /exact same CLI-owned LinkedIn profile used by this run/);
+      assert.match(outcome.message, /Before any retry, open feed\/\?shareActive=true/);
+      assert.match(outcome.message, /choose Start a post on the feed/);
+      assert.match(outcome.message, /exact same CLI-owned LinkedIn profile/);
       assert.match(outcome.message, /If a matching draft exists or the comparison is uncertain, do not retry/);
       assert.match(outcome.message, /Only after that comparison may --inspect help/);
       assert.match(outcome.message, /not evidence that no draft exists/);
@@ -89,6 +100,8 @@ test("loader failures prove not attempted, but any untyped invoked rejection is 
   assert.equal(loader.kind, "stage_runtime_failed");
   assert.equal(loader.savePhase, "save_not_attempted");
   assert.equal(loader.exitCode, 1);
+  assert.equal(loader.platformTouched, false);
+  assert.equal(loader.composerModified, false);
   assertNoRawLeak(loader);
 
   const nonFunction = await executeLinkedInDraftRealRun(
@@ -114,6 +127,8 @@ test("loader failures prove not attempted, but any untyped invoked rejection is 
     );
     assert.equal(invoked.savePhase, "save_delivery_unknown");
     assert.equal(invoked.exitCode, 1);
+    assert.equal(invoked.platformTouched, true);
+    assert.equal(invoked.composerModified, true);
     assert.match(invoked.message, /draft may exist/i);
     assertNoRawLeak(invoked);
   }
@@ -133,6 +148,71 @@ test("returned verified false exits 1 and never emits a success receipt", async 
   assertNoRawLeak(outcome);
 });
 
+test("local staging snapshot rejection exits 2 without loading runtime", async () => {
+  let loaded = false;
+  const outcome = await executeLinkedInDraftRealRun(
+    { post: {} as GeneratedPost, media: [] },
+    dependencies(async () => {
+      loaded = true;
+      return async () => result("verified");
+    }),
+  );
+  assert.equal(loaded, false);
+  assert.equal(outcome.kind, "input_rejected");
+  assert.equal(outcome.exitCode, 2);
+  assert.equal(outcome.platformTouched, false);
+  assert.equal(outcome.composerModified, false);
+});
+
+test("receipts preserve set-only media facts and composer residue", async () => {
+  const staged = await executeLinkedInDraftRealRun(
+    { post: post(), media: ["/safe/a.png", "/safe/b.png"] },
+    dependencies(async () => async () => result("verified", 2)),
+  );
+  const successReceipt = receiptForLinkedInDraftOutcome(staged);
+  assert.equal(successReceipt.platformTouched, true);
+  assert.equal(successReceipt.terminalState, "native_draft_verified");
+  assert.equal(successReceipt.verification.strength, "exact_content_reopen");
+  assert.deepEqual(successReceipt.assets.map((asset) => ({
+    index: asset.index,
+    requested: asset.requested,
+    resolved: asset.resolved,
+    set: asset.set,
+    uploaded: asset.uploaded,
+    observed: asset.observed,
+    verified: asset.verified,
+  })), [
+    { index: 0, requested: true, resolved: true, set: true, uploaded: null, observed: null, verified: null },
+    { index: 1, requested: true, resolved: true, set: true, uploaded: null, observed: null, verified: null },
+  ]);
+  assert.equal(Object.isFrozen(successReceipt), true);
+  assert.equal(Object.isFrozen(successReceipt.assets), true);
+
+  const failed = await executeLinkedInDraftRealRun(
+    { post: post(), media: ["/safe/a.png", "/safe/b.png"] },
+    dependencies(async () => async () => {
+      throw new LinkedInDraftStageError("save_not_attempted", {
+        platformTouched: true,
+        composerModified: true,
+        media: createLinkedInMediaStageEvidence(2, null),
+      });
+    }),
+  );
+  const failureReceipt = receiptForLinkedInDraftOutcome(failed);
+  assert.equal(failureReceipt.exit.code, 1);
+  assert.equal(failureReceipt.platformTouched, true);
+  assert.deepEqual(failureReceipt.assets.map((asset) => asset.set), [null, null]);
+  assert.deepEqual(failureReceipt.remoteResidue, [{
+    kind: "composer",
+    state: "composer_residue_unknown",
+    assetIndex: null,
+    reference: null,
+    retryRisk: "unknown",
+  }]);
+  assert.match(failureReceipt.error?.suggestedCorrection ?? "", /exact CLI-owned LinkedIn profile/);
+  assert.doesNotMatch(JSON.stringify(failureReceipt), /LinkedIn Drafts/);
+});
+
 test("malformed, accessor, proxy, contradictory, and media-mismatched results fail unknown", async () => {
   const throwing = Object.defineProperty({}, "format", {
     get() {
@@ -144,7 +224,9 @@ test("malformed, accessor, proxy, contradictory, and media-mismatched results fa
     format: "post",
     saveMechanism: "composer_close_save",
     verified: true,
-    mediaAttached: 0,
+    platformTouched: true,
+    composerModified: true,
+    media: [],
   } as Record<string, unknown>;
   let phaseReads = 0;
   Object.defineProperty(stateful, "savePhase", {
@@ -165,7 +247,7 @@ test("malformed, accessor, proxy, contradictory, and media-mismatched results fa
     stateful,
     proxied,
     { ...result("verified"), verified: false },
-    { ...result("verified"), mediaAttached: 1 },
+    { ...result("verified"), media: createLinkedInMediaStageEvidence(1, true) },
     { ...result("verified"), note: RAW_CANARY },
   ];
 
@@ -200,7 +282,8 @@ test("only a closed verified return exits 0 and receipts use pre-invocation fact
   assert.equal(outcome.stream, "stdout");
   assert.match(outcome.message, /✓ Staged a NATIVE LinkedIn draft.*NEVER posted/s);
   assert.match(outcome.message, /complete intended text verified after reopening the composer: yes/);
-  assert.match(outcome.message, /media attached: 2/);
+  assert.match(outcome.message, /media file-setting calls returned: 2/);
+  assert.match(outcome.message, /attachment and persistence remain unverified/);
   assert.match(outcome.message, /FIRST COMMENT/);
   assertNoRawLeak(outcome);
 });

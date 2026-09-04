@@ -669,10 +669,11 @@ registerHooks({ resolve(specifier, context, nextResolve) {
       RECOVERY_FLAG,
     ]);
     assert.equal(recovered.status, 0, combined(recovered));
-    assert.match(recovered.stdout, /Cleared the stale X reply reservation/);
+    assert.match(recovered.stdout, /terminal draft state: local_state_updated/);
+    assert.match(recovered.stdout, /state=reservation_recovered/);
     assert.match(recovered.stdout, /exact CLI-owned profile used by that run/);
-    assert.match(recovered.stdout, /no matching reply draft was found/);
-    assert.match(recovered.stdout, /No native staging was attempted/);
+    assert.match(recovered.stdout, /no matching reply draft/);
+    assert.match(recovered.stdout, /no native staging was attempted/i);
     assert.doesNotMatch(combined(recovered), /X_STAGING_IMPORT_BLOCKED/);
     assert.equal(reservationRow(dbFile, TARGET_A), undefined);
 

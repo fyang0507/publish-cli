@@ -286,7 +286,7 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(linkedin, /rejected Save click has unknown delivery/);
   assert.match(linkedin, /complete text does not equal the complete intended text after only line-ending and NFC normalization/);
   assert.match(linkedin, /Only positive full-text verification after reopening the composer exits 0/);
-  assert.match(linkedin, /Before any retry, manually compare LinkedIn Drafts in the exact same CLI-owned LinkedIn profile used by that run/);
+  assert.match(linkedin, /Before any retry, reopen the composer in the exact same CLI-owned LinkedIn profile at `https:\/\/www\.linkedin\.com\/feed\/\?shareActive=true` or through feed `Start a post`/);
   assert.match(linkedin, /Only after that comparison may `--inspect` help diagnose selector drift/);
   assert.match(linkedin, /Raw browser errors, selectors, page text, credentials, cookies, private paths/);
   assert.doesNotMatch(linkedin, /Run `publish linkedin info`|readiness\.ready/);
