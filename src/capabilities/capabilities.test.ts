@@ -138,6 +138,26 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   const x = `${CHANNEL_INFO_SOURCES.x.cliBoundary}\n${CHANNEL_INFO_SOURCES.x.authentication}\n${CHANNEL_INFO_SOURCES.x.platformGuidance}`;
   assert.match(x, /watch List/);
   assert.match(x, /tweet, thread, Article, or reply drafts/);
+  assert.match(x, /Before any non-dry-run `create-watch-list`, inspect the proposed member delta with `--dry-run`/);
+  assert.match(
+    x,
+    /large first build.*account-wide member-add lock.*native UI across every List/s,
+  );
+  assert.match(
+    x,
+    /live observation on 2026-07-01.*72-member build.*about 350 ms per add.*recovery around 24 hours/s,
+  );
+  assert.match(x, /recovery time and all current server limits remain X-authoritative, not a retry timer/);
+  assert.match(x, /command stops; do not retry member adds until X allows them again/);
+  assert.match(x, /adds only the missing delta, throttled at about three seconds per add.*safer.*not a guarantee/s);
+  assert.match(x, /Account watching uses an X List timeline, not one profile load per account/);
+  assert.match(x, /caller owns editorial selection strategy/);
+  assert.match(
+    x,
+    /rubric must be self-contained because the classifier receives only that rubric and each candidate post.*does not receive a source essay, campaign brief, workspace files, or ambient agent context/s,
+  );
+  assert.match(x, /`history` reads only live posts and replies.*staged tweet\/thread\/reply drafts and Article drafts are never history results/s);
+  assert.match(x, /successful empty result requires a usable profile-timeline capture and extraction.*fails nonzero and loud rather than reporting an empty history/s);
   assert.match(x, /5:2/);
   assert.match(x, /280/);
   assert.match(x, /publish x draft --format article --from/);
@@ -155,6 +175,7 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /title formatting, links, code, entity-like spellings, and caller-owned edge whitespace\/format characters reject locally/);
   assert.match(x, /A consumed H1 never causes a following body H1\/H2 to disappear/);
   assert.match(x, /lossless Article Markdown subset is closed/);
+  assert.match(x, /native editor exposes exactly two heading levels, Heading and Subheading.*ATX H1\/H2 body headings; inline-code styling is unsupported/s);
   assert.match(x, /Body blocks may be paragraphs, parser-confirmed standalone local image paragraphs, ATX H1\/H2 headings, flat single-paragraph quotes, one tight flat bullet or start-at-1 ordered list group at a time, and top-level backtick\/tilde fences/);
   assert.match(x, /Inline content may be plain or escaped text, emphasis, strong emphasis, soft breaks, and title-free exact safe absolute HTTP\(S\) links/);
   assert.match(x, /Active links use ordinary `\[label\]\(destination\)` syntax whose raw destination bytes equal the staged href/);
@@ -729,6 +750,62 @@ test("WeChat leaves unknown 字 measurement to the server and omits derived dige
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("X action help keeps List, watch, history, and Article input boundaries discoverable", () => {
+  const createWatchListHelp = spawnSync(
+    process.execPath,
+    [CLI_PATH, "x", "create-watch-list", "--help"],
+    { encoding: "utf8" },
+  );
+  assert.equal(createWatchListHelp.status, 0);
+  for (const evidence of [
+    /List member-add safety \(read before any mutation\)/,
+    /Run --dry-run first to inspect the exact proposed delta/,
+    /large initial build.*account-wide member-add lock.*native UI across every List/s,
+    /Live observation 2026-07-01.*72-member build.*about 350 ms per add.*recovery was around 24 hours/s,
+    /duration and all current limits remain X\/server-authoritative, not a retry timer/,
+    /command stops.*Do not retry member adds until X permits them again/s,
+    /existing --x-list adds only the missing delta.*about 3 seconds each.*safer.*not guaranteed/s,
+    /can mutate List creation, membership, and privacy, but it never publishes content/,
+  ]) assert.match(createWatchListHelp.stdout, evidence);
+
+  const watchHelp = spawnSync(process.execPath, [CLI_PATH, "x", "watch", "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(watchHelp.status, 0);
+  for (const evidence of [
+    /Watch accounts through one X List timeline, not one profile load per account/,
+    /Editorial selection strategy belongs to the caller/,
+    /must supply a self-contained rubric.*classifier receives only that rubric and each candidate post/s,
+    /never a source essay, campaign brief, workspace files, or ambient agent context/,
+    /intended replier, audience, positive and negative selection criteria, and what useful additional value means/,
+    /--no-triage when the caller will judge raw candidates/,
+    /never publishes or stages content/,
+  ]) assert.match(watchHelp.stdout, evidence);
+
+  const historyHelp = spawnSync(process.execPath, [CLI_PATH, "x", "history", "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(historyHelp.status, 0);
+  for (const evidence of [
+    /only live posts and replies authored by the requested X profile/,
+    /Staged tweet\/thread\/reply drafts and Article drafts are never history results/,
+    /empty success requires usable profile-timeline capture and extraction/,
+    /Missing or unusable capture\/extraction evidence fails nonzero and loud.*never reported as an empty history/s,
+    /never publishes or stages content/,
+  ]) assert.match(historyHelp.stdout, evidence);
+
+  const draftHelp = spawnSync(process.execPath, [CLI_PATH, "x", "draft", "--help"], {
+    encoding: "utf8",
+  });
+  assert.equal(draftHelp.status, 0);
+  assert.match(
+    draftHelp.stdout,
+    /native editor exposes exactly two heading levels, Heading and Subheading.*ATX H1\/H2 body headings/s,
+  );
+  assert.match(draftHelp.stdout, /H3-H6 and Setext headings reject locally/);
+  assert.match(draftHelp.stdout, /Inline backtick-code styling is unsupported and rejects locally/);
 });
 
 test("info CLI has no --format and non-ready external info exits zero", () => {

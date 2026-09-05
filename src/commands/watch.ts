@@ -64,6 +64,14 @@ export function registerWatchCommand(x: Command): void {
     .option("--format <fmt>", "Output format: text | json | markdown (md). Default text")
     .option("--json", "Alias for --format json (machine JSON)")
     .option("--out <file>", "Write output to a file instead of stdout")
+    .addHelpText(
+      "after",
+      "\nAccount-watch and triage boundary:\n" +
+        "  Watch accounts through one X List timeline, not one profile load per account. Build or refresh it with create-watch-list, then pass its id with --x-list.\n" +
+        "  Editorial selection strategy belongs to the caller. With triage enabled, --persona, --persona-from, or watch.yaml must supply a self-contained rubric: the classifier receives only that rubric and each candidate post, never a source essay, campaign brief, workspace files, or ambient agent context.\n" +
+        "  State the intended replier, audience, positive and negative selection criteria, and what useful additional value means. Use --no-triage when the caller will judge raw candidates.\n" +
+        "  This command reads and ranks candidates; it never publishes or stages content.\n",
+    )
     .action(async (opts: WatchXOptions) => {
       try {
         await runWatchX(opts);

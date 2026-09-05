@@ -37,6 +37,13 @@ export function registerHistoryCommand(x: Command): void {
     .option("--json", "Alias for --format json (machine JSON)")
     .option("--out <file>", "Write output to a file instead of stdout")
     .option("--inspect", "Headful browser if a (re-)login is needed, so a human can calibrate")
+    .addHelpText(
+      "after",
+      "\nHistory truth boundary:\n" +
+        "  Results are only live posts and replies authored by the requested X profile. Staged tweet/thread/reply drafts and Article drafts are never history results.\n" +
+        "  An empty success requires usable profile-timeline capture and extraction. Missing or unusable capture/extraction evidence fails nonzero and loud; it is never reported as an empty history.\n" +
+        "  This command reads X and may write only the requested --out artifact; it never publishes or stages content.\n",
+    )
     .action(async (opts: HistoryOptions) => {
       try {
         await runHistory(opts);
