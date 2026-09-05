@@ -634,6 +634,7 @@ export interface ArticleDraftStageDependencies {
     cover: Readonly<XArticleCoverPreload>,
   ): Promise<XArticleCoverHandoff>;
   settle(page: Page): Promise<void>;
+  /** Independent full-content and two-sided persisted-cover facts at `editUrl`. */
   verify(
     page: Page,
     editUrl: string,
@@ -764,19 +765,29 @@ async function stageArticleSnapshot(
           };
         }
       }
-      const appliedCoverChainComplete = stagedCover.set === true &&
-        stagedCover.applyPhase === "returned";
-      const finalObserved = appliedCoverChainComplete &&
-        (stagedCover.observed || reopen?.cover === true);
+      const returnedSet = stagedCover.set === true &&
+        stagedCover.setPhase === "set_returned" &&
+        // Preserve Apply provenance independently. The calibrated pre-set
+        // baseline attributes either an explicit Apply or native auto-apply to
+        // this one returned set; a positive click is not required when the
+        // complete persisted native state is independently authoritative.
+        (stagedCover.applyPhase === "not_attempted" ||
+          stagedCover.applyPhase === "delivery_unknown" ||
+          stagedCover.applyPhase === "returned");
+      const coverVerified = reopen === null
+        ? null
+        : returnedSet && reopen.cover;
+      const finalObserved = stagedCover.observed || coverVerified === true;
       const cover = Object.freeze({
         ...stagedCover,
-        // The production verifier proves the same calibrated cover both before
-        // navigation and after reopen, so it may repair only a transient early
-        // observation miss after the set+Apply chain returned.
+        // A returned set is mandatory. The production verifier proves the same
+        // calibrated cover both before navigation and after canonical reopen;
+        // retain that cover fact independently if title/body later mismatch.
+        // Top-level success below additionally requires exact title/body. That
+        // complete native state may close an uncertain Apply interaction without
+        // rewriting its provenance. Neither delivery action is ever retried.
         observed: finalObserved,
-        verified: reopen === null
-          ? null
-          : appliedCoverChainComplete && reopen.cover,
+        verified: coverVerified,
       });
       const verified = reopen !== null && reopen.content && cover.verified === true;
       return {
@@ -881,11 +892,15 @@ export async function stageArticleCover(
       ...base,
       set,
       setPhase,
-      applyPhase: "not_reached" as const,
+      applyPhase: "not_attempted" as const,
     }, editUrl);
   }
 
-  let applyPhase: XArticleCoverHandoff["applyPhase"] = "not_observed";
+  // The exact Apply control has not yet been clicked. Missing/ambiguous controls
+  // and pre-click settle/probe failures remain `not_attempted`; the outer
+  // canonical-reopen verifier may still prove that X auto-applied the returned
+  // set. Neither the set nor Apply interaction is ever retried.
+  let applyPhase: XArticleCoverHandoff["applyPhase"] = "not_attempted";
   let apply: ElementHandle<HTMLElement> | null;
   try {
     await deps.settleAfterSet(page);
@@ -910,7 +925,7 @@ export async function stageArticleCover(
       await apply.click();
       applyPhase = "returned";
     } catch {
-      applyPhase = "failed";
+      applyPhase = "delivery_unknown";
     }
     if (applyPhase === "returned") {
       try {
@@ -1606,9 +1621,12 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
       expectedTitle,
       expectedBody,
     );
-    if (!content || !isExactArticleEditRoute(page, editUrl)) {
+    if (!isExactArticleEditRoute(page, editUrl)) {
       return Object.freeze({ content: false, cover: false });
     }
+    // Preserve cover persistence independently when the canonical editor
+    // remains exact but full title/body comparison is negative. Overall Article
+    // success still requires both closed facts in stageArticleSnapshot.
     const afterReloadCover = await waitForCalibratedArticleCoverObservation(
       page,
       editUrl,
@@ -1616,7 +1634,7 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
       expectedCoverHeight,
     );
     return Object.freeze({
-      content: true,
+      content,
       cover: beforeReloadCover.status === "observed" &&
         afterReloadCover.status === "observed" &&
         sameArticleCoverObservation(

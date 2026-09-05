@@ -615,6 +615,12 @@ function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
   const handoff = outcome.articleHandoff;
   if (handoff === null) return [];
   const gotchas: string[] = [];
+  const applyPhaseFact = handoff.cover.applyPhase === "not_attempted"
+    ? "X Article cover Apply phase=not_attempted: no Apply click was invoked."
+    : handoff.cover.applyPhase === "delivery_unknown"
+      ? "X Article cover Apply phase=delivery_unknown: one exact Apply click was invoked once and its promise rejected; delivery is unknown and no retry was attempted."
+      : "X Article cover Apply phase=returned: one exact Apply click promise fulfilled.";
+  gotchas.push(applyPhaseFact);
   const count = handoff.codeBlockCount;
   if (count === "many" || count > 0) {
     const countLabel = count === "many"
@@ -627,6 +633,14 @@ function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
   if (handoff.cover.verified !== true) {
     gotchas.push(
       "The exact X Article cover was not positively observed after reopening the captured edit URL; compare the native draft in the exact CLI-owned profile and do not retry blindly.",
+    );
+  } else if (
+    outcome.kind === "staged" &&
+    outcome.savePhase === "verified" &&
+    handoff.cover.applyPhase !== "returned"
+  ) {
+    gotchas.push(
+      "Independent two-sided canonical persistence proved the exact cover and full title/body without claiming Apply returned.",
     );
   }
   return gotchas;
@@ -875,7 +889,7 @@ export function registerDraftCommand(x: Command): void {
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
         "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or other visible-row changes remain unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
-        "  Article success requires one unique title/body editor root, one direct set on its calibrated same-parent cover input, one attributable crop dialog and exact Apply return, a unique above-title post-apply cover observation, then matching title/body plus the same cover identity, box, and natural dimensions after reopening the canonical edit URL recaptured after autosave settle. An immediate post-Create URL is provisional; a missing/invalid late sample or conflicting positive samples are never used for navigation or verification.\n" +
+        "  Article success requires one unique title/body editor root, a clean pre-set cover/dialog baseline, one direct returned set on its calibrated same-parent cover input, and authoritative native persistence: a unique above-title hosted cover with exact expected dimensions before canonical reopen, matching full title/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward. When one exact Apply control is observable it is clicked once; Apply provenance remains not_attempted, delivery_unknown, or returned and is never retried or rewritten. A complete native-state proof may close not_attempted or delivery_unknown without claiming Apply returned. An immediate post-Create URL is provisional; a missing/invalid late sample or conflicting positive samples are never used for navigation or verification.\n" +
         "  A returned Article outcome reports bounded body/code facts and distinct cover requested/resolved/set/uploaded/observed/verified evidence. A rejected native cover-input set leaves set unknown because delivery may have occurred; the CLI never retries, clicks the media button, or uses another upload route. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
         "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
         "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +

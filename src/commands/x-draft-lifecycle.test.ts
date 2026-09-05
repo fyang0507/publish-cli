@@ -452,7 +452,7 @@ test("verified and returned-unverified Article receipts preserve only closed han
       cover: verifiedCover({
         set: false,
         setPhase: "target_unavailable",
-        applyPhase: "not_reached",
+        applyPhase: "not_attempted",
         observed: false,
         verified: false,
       }),
@@ -463,20 +463,20 @@ test("verified and returned-unverified Article receipts preserve only closed han
       cover: verifiedCover({
         set: null,
         setPhase: "set_delivery_unknown",
-        applyPhase: "not_reached",
+        applyPhase: "not_attempted",
         observed: false,
         verified: null,
       }),
-      expected: [/heroAction=exact preloaded cover delivery unknown/, /set=unknown/, /apply=not_reached/, /HERO PERSISTENCE UNVERIFIED/],
+      expected: [/heroAction=exact preloaded cover delivery unknown/, /set=unknown/, /apply=not_attempted/, /HERO PERSISTENCE UNVERIFIED/],
     },
     {
       codeBlockCount: 0,
       cover: verifiedCover({
-        applyPhase: "not_observed",
+        applyPhase: "not_attempted",
         observed: true,
         verified: false,
       }),
-      expected: [/heroAction=exact preloaded cover set; persistence not verified/, /codeBlockCount=0/, /observed=yes; verified=no; apply=not_observed/, /HERO PERSISTENCE UNVERIFIED/],
+      expected: [/heroAction=exact preloaded cover set; persistence not verified/, /codeBlockCount=0/, /observed=yes; verified=no; apply=not_attempted/, /HERO PERSISTENCE UNVERIFIED/],
     },
     {
       codeBlockCount: 0,

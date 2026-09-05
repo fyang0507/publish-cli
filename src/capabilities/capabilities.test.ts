@@ -254,8 +254,13 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Background feed, navigation, modal labels, prefixes, substring matches/);
   assert.match(x, /pre-existing identical visible rows, duplicate post-Save matches/);
   assert.match(x, /no stable native row ID.*does not prove the rendered rows are the complete drafts list or that this run caused the added value/s);
-  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code facts, and distinct cover `requested`, `resolved`, `set`, `uploaded`, post-apply `observed`, and canonical-reopen `verified` evidence/);
-  assert.match(x, /Positive Article success requires a unique title\/body editor root, one direct set on its calibrated same-parent cover input, one newly attributable crop dialog with one exact Apply control, a unique above-title post-apply cover observation, canonical reopen, title\/body match, and the same persisted cover identity, box, and natural dimensions/);
+  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code facts, distinct cover `requested`, `resolved`, `set`, `uploaded`, `observed`, and canonical-reopen `verified` evidence, plus the tri-state Apply provenance/);
+  assert.match(x, /Apply interaction is one-shot when one exact control is observable: `not_attempted` records no click.*`delivery_unknown` records one exact click whose promise rejected.*`returned` records one fulfilled exact click/s);
+  assert.match(x, /Positive Article success requires a unique title\/body editor root; zero pre-set dialogs and no pre-existing calibrated cover; one direct returned set on its calibrated same-parent cover input/);
+  assert.match(x, /authoritative native persistence at the same exact canonical edit URL: a unique above-title hosted cover with exact expected dimensions before reopen, exact complete title\/body after reopen, and the same hosted source identity, box, and natural dimensions afterward/);
+  assert.match(x, /complete proof may close an Apply phase of `not_attempted` or `delivery_unknown` without claiming Apply returned/);
+  assert.match(x, /missing returned-set or any weak, missing, or mismatched content\/cover evidence remains unverified/);
+  assert.match(x, /Every returned Article JSON receipt retains the exact Apply phase and its closed meaning in a bounded gotcha/);
   assert.match(x, /immediate post-Create URL sample is provisional.*missing\/invalid late sample or two conflicting positive samples is never used for navigation or verification/s);
   assert.match(x, /rejected native cover-input set leaves `set` unknown.*never retried, routed through another input, or replaced by a media-button click/s);
   assert.match(x, /receipt uses the frozen pre-loader copy after exact returned-handoff comparison/);
@@ -713,7 +718,9 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /no stable native row id and does not prove full-list completeness or causality/,
     /Article requires one explicit --cover path; tweet and thread reject that flag/,
     /never scans neighboring files and never crops, resizes, compresses, or converts the cover/,
-    /Article success requires one unique title\/body editor root, one direct set on its calibrated same-parent cover input, one attributable crop dialog and exact Apply return, a unique above-title post-apply cover observation, then matching title\/body plus the same cover identity, box, and natural dimensions/,
+    /Article success requires one unique title\/body editor root, a clean pre-set cover\/dialog baseline, one direct returned set on its calibrated same-parent cover input, and authoritative native persistence/,
+    /Apply provenance remains not_attempted, delivery_unknown, or returned and is never retried or rewritten/,
+    /complete native-state proof may close not_attempted or delivery_unknown without claiming Apply returned/,
     /immediate post-Create URL is provisional; a missing\/invalid late sample or conflicting positive samples are never used for navigation or verification/,
     /returned Article outcome reports bounded body\/code facts and distinct cover requested\/resolved\/set\/uploaded\/observed\/verified evidence/i,
     /rejected native cover-input set leaves set unknown.*never retries, clicks the media button, or uses another upload route/s,
