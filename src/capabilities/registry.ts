@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { AUTH_PLATFORMS, type AuthPlatform } from "../auth/types.js";
@@ -13,6 +14,34 @@ const REQUIRED_SECTIONS = [
   "Authentication",
   "Platform specification and gotchas",
 ] as const;
+
+export type ChannelInfoSourceFailureCode =
+  | "channel_info_source_unavailable"
+  | "channel_info_source_invalid";
+
+export class ChannelInfoSourceError extends Error {
+  readonly code: ChannelInfoSourceFailureCode;
+  readonly channel: AuthPlatform;
+  readonly sourceName: string;
+
+  constructor(channel: AuthPlatform, code: ChannelInfoSourceFailureCode) {
+    const sourceName = `capabilities/${channel}.md`;
+    super(
+      code === "channel_info_source_unavailable"
+        ? `${sourceName}: selected channel info source is unavailable.`
+        : `${sourceName}: selected channel info source is invalid.`,
+    );
+    this.name = "ChannelInfoSourceError";
+    this.code = code;
+    this.channel = channel;
+    this.sourceName = sourceName;
+  }
+}
+
+export interface ChannelInfoSourceLoaderOptions {
+  sourceDirectory?: string;
+  readSource?: (path: string) => string;
+}
 
 function requireString(value: unknown, field: string, sourceName: string): string {
   if (typeof value !== "string" || !value.trim()) {
@@ -118,17 +147,31 @@ export function parseChannelInfoMarkdown(
   };
 }
 
-function loadChannelInfoSources(): Readonly<Record<AuthPlatform, ChannelInfoSource>> {
-  const entries = AUTH_PLATFORMS.map((channel) => {
-    const path = `${SOURCE_DIRECTORY}${channel}.md`;
-    const source = parseChannelInfoMarkdown(readFileSync(path, "utf8"), path, channel);
-    return [channel, Object.freeze(source)] as const;
-  });
-  return Object.freeze(Object.fromEntries(entries)) as Readonly<Record<AuthPlatform, ChannelInfoSource>>;
+export function getChannelInfoSource(
+  channel: AuthPlatform,
+  options: ChannelInfoSourceLoaderOptions = {},
+): ChannelInfoSource {
+  const sourceDirectory = options.sourceDirectory ?? SOURCE_DIRECTORY;
+  const readSource = options.readSource ?? ((path: string) => readFileSync(path, "utf8"));
+  const path = join(sourceDirectory, `${channel}.md`);
+  let markdown: string;
+  try {
+    markdown = readSource(path);
+  } catch {
+    throw new ChannelInfoSourceError(channel, "channel_info_source_unavailable");
+  }
+  try {
+    return Object.freeze(parseChannelInfoMarkdown(markdown, `capabilities/${channel}.md`, channel));
+  } catch {
+    throw new ChannelInfoSourceError(channel, "channel_info_source_invalid");
+  }
 }
 
-export const CHANNEL_INFO_SOURCES = loadChannelInfoSources();
-
-export function getChannelInfoSource(channel: AuthPlatform): ChannelInfoSource {
-  return CHANNEL_INFO_SOURCES[channel];
+/** Explicit whole-repository validation seam; normal info execution never calls this. */
+export function loadAllChannelInfoSources(
+  options: ChannelInfoSourceLoaderOptions = {},
+): Readonly<Record<AuthPlatform, ChannelInfoSource>> {
+  return Object.freeze(Object.fromEntries(
+    AUTH_PLATFORMS.map((channel) => [channel, getChannelInfoSource(channel, options)]),
+  )) as Readonly<Record<AuthPlatform, ChannelInfoSource>>;
 }

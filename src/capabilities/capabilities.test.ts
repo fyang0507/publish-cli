@@ -6,7 +6,10 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AUTH_PLATFORMS, createAuthProbeRegistry, type AuthReadiness } from "../auth/index.js";
-import { executeChannelInfo, renderChannelInfo } from "../commands/channel-info.js";
+import {
+  executeChannelInfo,
+  renderChannelInfo,
+} from "../commands/channel-info.js";
 import { generatePost } from "../linkedin/content.js";
 import { generateContent } from "../x/content.js";
 import { preloadXArticleCover } from "../x/articleCover.js";
@@ -14,7 +17,8 @@ import { generateArticle } from "../wechat/content.js";
 import {
   CHANNEL_INFO_SCHEMA_VERSION,
   CHANNEL_INFO_SOURCE_SCHEMA_VERSION,
-  CHANNEL_INFO_SOURCES,
+  getChannelInfoSource,
+  loadAllChannelInfoSources,
   LINKEDIN_POST_MAX_UTF16_CODE_UNITS,
   X_STANDARD_POST_MAX_WEIGHTED_LENGTH,
   countUtf16CodeUnits,
@@ -28,6 +32,7 @@ import {
 
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const CHECKED_AT = "2026-09-01T00:00:00.000Z";
+const CHANNEL_INFO_SOURCES = loadAllChannelInfoSources();
 
 function pngHeader(width: number, height: number): Buffer {
   const buffer = Buffer.alloc(24);
@@ -443,7 +448,10 @@ test("info keeps Markdown guidance separate from readiness, sanitizes failures, 
   const success = await executeChannelInfo("x", async () => ready("x"));
   assert.equal(success.exitCode, 0);
   assert.equal(success.envelope.schemaVersion, CHANNEL_INFO_SCHEMA_VERSION);
+  assert.equal(success.envelope.mode, "readiness");
+  assert.deepEqual(success.envelope.access, { readinessProbe: "attempted" });
   assert.equal(success.envelope.info.channel, "x");
+  if (success.envelope.mode !== "readiness") assert.fail("expected readiness mode");
   assert.equal(success.envelope.readiness.ready, true);
 
   const notReadyReceipt = ready("reddit");
@@ -452,6 +460,7 @@ test("info keeps Markdown guidance separate from readiness, sanitizes failures, 
   const notReady = await executeChannelInfo("reddit", async () => notReadyReceipt);
   assert.equal(notReady.exitCode, 0);
   assert.equal(notReady.envelope.info.channel, "reddit");
+  if (notReady.envelope.mode !== "readiness") assert.fail("expected readiness mode");
   assert.equal(notReady.envelope.readiness.ready, false);
 
   const failure = await executeChannelInfo("linkedin", async () => {
@@ -459,6 +468,7 @@ test("info keeps Markdown guidance separate from readiness, sanitizes failures, 
   }, () => Date.parse(CHECKED_AT));
   assert.equal(failure.exitCode, 0);
   assert.equal(failure.envelope.info.channel, "linkedin");
+  if (failure.envelope.mode !== "readiness") assert.fail("expected readiness mode");
   assert.equal(failure.envelope.readiness.status, "probe_inconclusive");
   assert.doesNotMatch(JSON.stringify(failure.envelope), /SECRET_VALUE|raw token/);
 });
@@ -468,9 +478,11 @@ test("human info is readiness-first and renders the three Markdown sections", ()
   readiness.healed = ["token_refreshed"];
   const rendered = renderChannelInfo({
     schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
+    mode: "readiness",
     channel: "wechat",
     info: CHANNEL_INFO_SOURCES.wechat,
     readiness,
+    access: { readinessProbe: "attempted" },
   });
   assert.ok(rendered.indexOf("Readiness: ready") < rendered.indexOf("## CLI boundary"));
   assert.match(rendered, /Healed: token_refreshed/);
@@ -487,9 +499,11 @@ test("external readiness descriptors remain actionable without a typed static wo
   const xhsReadiness = await registry.xhs();
   const xhsRendered = renderChannelInfo({
     schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
+    mode: "readiness",
     channel: "xhs",
     info: CHANNEL_INFO_SOURCES.xhs,
     readiness: xhsReadiness,
+    access: { readinessProbe: "attempted" },
   });
   assert.match(xhsRendered, /external preflight required \(agent_check_required\)/);
   assert.match(xhsRendered, /Next owner: agent_browser/);
@@ -502,9 +516,11 @@ test("external readiness descriptors remain actionable without a typed static wo
   const acresReadiness = await registry["1point3acres"]();
   const acresRendered = renderChannelInfo({
     schemaVersion: CHANNEL_INFO_SCHEMA_VERSION,
+    mode: "readiness",
     channel: "1point3acres",
     info: CHANNEL_INFO_SOURCES["1point3acres"],
     readiness: acresReadiness,
+    access: { readinessProbe: "attempted" },
   });
   assert.match(acresRendered, /human login required \(human_login_required\)/);
   assert.match(acresRendered, /human open and log in/i);
@@ -708,6 +724,9 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   const help = spawnSync(process.execPath, [CLI_PATH, "x", "info", "--help"], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.doesNotMatch(help.stdout, /--format/);
+  assert.match(help.stdout, /--static/);
+  assert.match(help.stdout, /without profile, browser,\s+network, API, token, or platform access/);
+  assert.match(help.stdout, /readiness is explicitly skipped/);
   assert.doesNotMatch(help.stdout, /WeChat|token_refreshed/);
 
   const wechatInfoHelp = spawnSync(process.execPath, [CLI_PATH, "wechat", "info", "--help"], { encoding: "utf8" });
