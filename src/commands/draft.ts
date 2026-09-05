@@ -41,6 +41,7 @@ import {
   snapshotXArticleStageInput,
   snapshotXContentFormat,
   snapshotXNonArticleExecuteRequest,
+  type XArticleStageSnapshot,
   type XNonArticleStageSnapshot,
   type XArticleStageSnapshotFailure,
 } from "../x/articleStageSnapshot.js";
@@ -70,6 +71,13 @@ import {
   snapshotXArticleCoverPreload,
   type XArticleCoverPreload,
 } from "../x/articleCover.js";
+import {
+  emptyXArticleBodyImagePreloadSet,
+  preloadXArticleBodyImages,
+  snapshotXArticleBodyImagePreloadSet,
+  xArticleBodyImagePreloadsMatchBlocks,
+  type XArticleBodyImagePreloadSet,
+} from "../x/articleBodyImages.js";
 
 /**
  * `publish x draft` — owned-content publisher for the X channel. Creates a
@@ -110,6 +118,7 @@ export interface XDraftRealRunInput {
   inspect?: boolean;
   basePath?: string;
   cover?: Readonly<XArticleCoverPreload>;
+  bodyImages?: Readonly<XArticleBodyImagePreloadSet>;
 }
 
 export interface XDraftRealRunDependencies {
@@ -179,6 +188,24 @@ function beforeSaveFailure(
         ? `  Local X staging input snapshot validation failed closed (reason=${snapshotFailure}).\n`
         : "") +
       "  No saved-draft outcome is claimed. Verify the local runtime and browser flow before a separate retry.",
+  };
+}
+
+function bodyImageInspectRequired(): XDraftRealRunOutcome {
+  return {
+    kind: "save_incomplete",
+    savePhase: "save_not_attempted",
+    saveMechanism: "article_create_autosave",
+    exitCode: 2,
+    stream: "stderr",
+    draftRowEvidence: null,
+    articleHandoff: null,
+    platformTouched: false,
+    nativeReference: null,
+    message:
+      "\n✗ X article draft staging stopped before native Create/autosave. NEVER posted.\n" +
+      "  Body-image Articles currently require --inspect because the calibrated native Media input is created only in the headed editor flow.\n" +
+      "  No runtime, profile, browser, artifact, or native draft action was invoked.",
   };
 }
 
@@ -257,6 +284,16 @@ function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
       "  HERO PERSISTENCE UNVERIFIED: inspect the captured Article draft in the exact CLI-owned profile before any retry.",
     );
   }
+  if (handoff.bodyImages.length > 0) {
+    lines.push(`  Body image occurrences: ${handoff.bodyImages.length}; ordered native insertion evidence:`);
+    for (const image of handoff.bodyImages) {
+      lines.push(
+        `  body_image[${image.occurrenceIndex}] block=${image.blockIndex}; ${image.contentType}; ${image.width}x${image.height}; ` +
+        `set=${image.set === null ? "unknown" : image.set ? "yes" : "no"}; uploaded=unknown; ` +
+        `observed=${image.observed ? "yes" : "no"}; verified=${image.verified === null ? "unknown" : image.verified ? "yes" : "no"}.`,
+      );
+    }
+  }
   return lines.join("\n");
 }
 
@@ -304,6 +341,23 @@ function stagedOutcome(result: StageDraftResult): XDraftRealRunOutcome {
   };
 }
 
+function bodyImageHandoffMatchesPreloads(
+  handoff: XArticleDraftHandoff,
+  preloads: Readonly<XArticleBodyImagePreloadSet>,
+): boolean {
+  return handoff.bodyImages.length === preloads.occurrences.length &&
+    handoff.bodyImages.every((image, offset) => {
+      const preload = preloads.occurrences[offset];
+      return preload !== undefined &&
+        image.occurrenceIndex === preload.occurrenceIndex &&
+        image.blockIndex === preload.blockIndex &&
+        image.contentType === preload.bytes.contentType &&
+        image.width === preload.bytes.width &&
+        image.height === preload.bytes.height &&
+        image.sourceSha256 === preload.bytes.sourceSha256;
+    });
+}
+
 export async function executeXDraftRealRun(
   input: XDraftRealRunInput,
   deps: XDraftRealRunDependencies,
@@ -344,6 +398,9 @@ export async function executeXDraftRealRun(
   let expectedArticleCodeLinkAdvisories:
     readonly Readonly<ArticleCodeLinkAdvisory>[] | null = null;
   let expectedArticleCover: Readonly<XArticleCoverPreload> | null = null;
+  let expectedArticleBodyImages: Readonly<XArticleBodyImagePreloadSet> =
+    emptyXArticleBodyImagePreloadSet();
+  let expectedArticleImageBlocks: XArticleStageSnapshot["imageBlocks"] = Object.freeze([]);
   try {
     if (format === "article") {
       const snapshot = snapshotXArticleStageInput(callerContent, format);
@@ -351,6 +408,7 @@ export async function executeXDraftRealRun(
       expectedArticleCodeBlockCount = snapshot.receiptCodeBlockCount;
       expectedArticleCodeAdvisories = snapshot.codeAdvisories;
       expectedArticleCodeLinkAdvisories = snapshot.codeLinkAdvisories;
+      expectedArticleImageBlocks = snapshot.imageBlocks;
     } else {
       nonArticleSnapshot = snapshotXNonArticleExecuteRequest(
         input,
@@ -373,14 +431,31 @@ export async function executeXDraftRealRun(
   let basePath: string | undefined;
   if (format === "article") {
     try {
-      inspect = input.inspect;
-      expectedArticleCover = snapshotXArticleCoverPreload(input.cover);
+      const inspectDescriptor = Object.getOwnPropertyDescriptor(input, "inspect");
+      const coverDescriptor = Object.getOwnPropertyDescriptor(input, "cover");
+      const bodyImagesDescriptor = Object.getOwnPropertyDescriptor(input, "bodyImages");
+      if (
+        (inspectDescriptor && (!inspectDescriptor.enumerable || !("value" in inspectDescriptor))) ||
+        !coverDescriptor || !coverDescriptor.enumerable || !("value" in coverDescriptor) ||
+        (bodyImagesDescriptor &&
+          (!bodyImagesDescriptor.enumerable || !("value" in bodyImagesDescriptor)))
+      ) return beforeSaveFailure(format, "unexpected_property");
+      inspect = inspectDescriptor?.value;
+      expectedArticleCover = snapshotXArticleCoverPreload(coverDescriptor.value);
+      const bodyImagesValue = bodyImagesDescriptor?.value ?? emptyXArticleBodyImagePreloadSet();
+      const bodyImages = snapshotXArticleBodyImagePreloadSet(bodyImagesValue);
+      if (bodyImages === null) return beforeSaveFailure(format, "invalid_value");
+      expectedArticleBodyImages = bodyImages;
     } catch {
       return beforeSaveFailure(format, "property_read_failed");
     }
     if (
       (inspect !== undefined && typeof inspect !== "boolean") ||
-      expectedArticleCover === null
+      expectedArticleCover === null ||
+      !xArticleBodyImagePreloadsMatchBlocks(
+        expectedArticleBodyImages,
+        stageContent.article!.blocks,
+      )
     ) {
       return beforeSaveFailure(format, "invalid_value");
     }
@@ -389,6 +464,16 @@ export async function executeXDraftRealRun(
     basePath = nonArticleSnapshot!.basePath;
   }
 
+  // Live calibration showed that X creates the attributable body-media input
+  // only in the headed editor. Enforce that local requirement before loading
+  // browser code or touching a persistent profile.
+  if (
+    format === "article" &&
+    expectedArticleImageBlocks.length > 0 &&
+    inspect !== true
+  ) {
+    return bodyImageInspectRequired();
+  }
   // One final immutable Article request owns every value that may cross the
   // dynamic staging-loader boundary. Both content and cover are already
   // detached from caller paths/objects at this point.
@@ -396,8 +481,13 @@ export async function executeXDraftRealRun(
     ? Object.freeze({
         content: stageContent,
         cover: expectedArticleCover!,
+        bodyImages: expectedArticleBodyImages,
         inspect,
-        stageOptions: Object.freeze({ inspect, cover: expectedArticleCover! }),
+        stageOptions: Object.freeze({
+          inspect,
+          cover: expectedArticleCover!,
+          bodyImages: expectedArticleBodyImages,
+        }),
       })
     : null;
 
@@ -540,8 +630,13 @@ export async function executeXDraftRealRun(
         candidate.articleHandoff.cover.height !== expectedArticleCover!.height ||
         candidate.articleHandoff.cover.ratio !== expectedArticleCover!.ratio ||
         candidate.articleHandoff.cover.sourceSha256 !== expectedArticleCover!.sourceSha256 ||
+        !bodyImageHandoffMatchesPreloads(
+          candidate.articleHandoff,
+          expectedArticleBodyImages,
+        ) ||
         (candidate.savePhase === "verified" &&
           (candidate.articleHandoff.cover.verified !== true ||
+            candidate.articleHandoff.bodyImages.some((image) => image.verified !== true) ||
             candidate.nativeReference === null)) ||
         !isXDraftRowEvidenceCompatible(
           candidate.saveMechanism,
@@ -582,21 +677,45 @@ export async function executeXDraftRealRun(
 function xArticleAssets(
   outcome: XDraftRealRunOutcome,
   inputCover: Readonly<XArticleCoverPreload> | null,
+  inputBodyImages: Readonly<XArticleBodyImagePreloadSet> = emptyXArticleBodyImagePreloadSet(),
 ): readonly ReceiptAsset[] {
   const cover = outcome.articleHandoff?.cover;
+  const bodyAssets: ReceiptAsset[] = outcome.articleHandoff
+    ? outcome.articleHandoff.bodyImages.map((image) => ({
+        index: image.occurrenceIndex,
+        role: "body_image" as const,
+        requested: image.requested,
+        resolved: image.resolved,
+        set: image.set,
+        uploaded: image.uploaded,
+        observed: image.observed,
+        verified: image.verified,
+        remoteReference: null,
+      }))
+    : inputBodyImages.occurrences.map((occurrence) => ({
+        index: occurrence.occurrenceIndex,
+        role: "body_image" as const,
+        requested: true,
+        resolved: true,
+        set: outcome.platformTouched ? null : false,
+        uploaded: outcome.platformTouched ? null : false,
+        observed: outcome.platformTouched ? null : false,
+        verified: outcome.platformTouched ? null : false,
+        remoteReference: null,
+      }));
   if (!cover) {
-    if (inputCover === null) return NO_ASSETS;
+    if (inputCover === null) return bodyAssets;
     return [{
       index: 0,
       role: "cover",
       requested: true,
       resolved: true,
-      set: false,
-      uploaded: false,
-      observed: false,
-      verified: false,
+      set: outcome.platformTouched ? null : false,
+      uploaded: outcome.platformTouched ? null : false,
+      observed: outcome.platformTouched ? null : false,
+      verified: outcome.platformTouched ? null : false,
       remoteReference: null,
-    }];
+    }, ...bodyAssets];
   }
   return [{
     index: 0,
@@ -608,7 +727,7 @@ function xArticleAssets(
     observed: cover.observed,
     verified: cover.verified,
     remoteReference: null,
-  }];
+  }, ...bodyAssets];
 }
 
 function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
@@ -643,6 +762,11 @@ function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
       "Independent two-sided canonical persistence proved the exact cover and full title/body without claiming Apply returned.",
     );
   }
+  if (handoff.bodyImages.some((image) => image.verified !== true)) {
+    gotchas.push(
+      "One or more X Article body-image occurrences were not positively observed in order after reopening the captured edit URL; compare the exact native draft before any retry.",
+    );
+  }
   return gotchas;
 }
 
@@ -651,6 +775,7 @@ export function receiptForXDraftOutcome(
   format: XFormat,
   warnings: readonly string[] = [],
   inputCover: Readonly<XArticleCoverPreload> | null = null,
+  inputBodyImages: Readonly<XArticleBodyImagePreloadSet> = emptyXArticleBodyImagePreloadSet(),
 ): Readonly<TransportReceipt> {
   const verified = outcome.kind === "staged" && outcome.savePhase === "verified";
   const saveMayExist = outcome.savePhase === "save_delivery_unknown" ||
@@ -723,7 +848,7 @@ export function receiptForXDraftOutcome(
         : []),
       ...xArticleGotchas(outcome),
     ],
-    assets: xArticleAssets(outcome, inputCover),
+    assets: xArticleAssets(outcome, inputCover, inputBodyImages),
     platformTouched: outcome.platformTouched,
     terminalState,
     verification: {
@@ -842,6 +967,28 @@ function xArticleCoverAsset(
   }];
 }
 
+function xArticleLocalAssets(
+  coverRequested: boolean,
+  coverResolved: boolean,
+  bodyImageCount = 0,
+  bodyImagesResolved = false,
+): readonly ReceiptAsset[] {
+  return [
+    ...xArticleCoverAsset(coverRequested, coverResolved),
+    ...Array.from({ length: bodyImageCount }, (_, offset): ReceiptAsset => ({
+      index: offset + 1,
+      role: "body_image",
+      requested: true,
+      resolved: bodyImagesResolved,
+      set: false,
+      uploaded: false,
+      observed: false,
+      verified: false,
+      remoteReference: null,
+    })),
+  ];
+}
+
 export function registerDraftCommand(x: Command): void {
   x
     .command("draft")
@@ -852,7 +999,7 @@ export function registerDraftCommand(x: Command): void {
     .option("--cover <path>", "Required for Article: prepared exact-5:2 JPEG, PNG, or WebP; never transformed")
     .option("--long", "Use the local 25,000-code-point guard for Premium long posts; X acceptance is server-authoritative")
     .option("--dry-run", "Only generate content; do not open the browser")
-    .option("--inspect", "Headful browser so a human can watch/calibrate selectors")
+    .option("--inspect", "Headful browser; required for a real Article containing body images")
     .option("--json", "Emit one versioned machine-readable transport receipt")
     .addHelpText(
       "after",
@@ -878,24 +1025,31 @@ export function registerDraftCommand(x: Command): void {
         "  Terminal inspection replaces each excluded fence with its block number and digest. File-backed Article dry-runs put the excluded-code count and bounded advisories in a separate .x-article.inspection.txt receipt; only the clean .x-article.md artifact retains raw code, so inspection metadata cannot become EOF-fenced code payload.\n" +
         "  Excluded-code link advisories carry block provenance, explicit truncation facts, and safe URL/label projections bounded to 512/240 code points; they never suppress or alter an exact active prose href. More than 10000 code blocks or 1000000 UTF-16 code units of complete rendered code/code-link evidence exits 2 locally rather than dropping identity facts.\n" +
         "  Run `publish x info` for the owned Article Markdown support matrix and stop conditions.\n" +
+        "\nArticle body images:\n" +
+        "  Use one local Markdown image token with empty alt text and no title attribute as the complete top-level paragraph: ![](diagram.png) or an empty-alt resolved reference such as ![][diagram]. Nonempty-alt, mixed/nested, titled, remote, data, blob, file-URL, missing, or ambiguous-reference images exit 2 locally before artifacts or staging-runtime/profile/browser access; native alt editing is not calibrated. Fenced and fully escaped image-looking text is not an asset.\n" +
+        "  File-backed relative image paths resolve against the Markdown file's directory. Stdin-relative paths resolve against one working-directory snapshot taken at invocation; absolute local paths are accepted. Each unique regular file is opened once and validated as GIF/JPEG/PNG/WebP by magic, matching extension, and positive dimensions. Exact immutable bytes are staged without cropping, resizing, recompression, conversion, or an invented X limit.\n" +
+        "  A real image-bearing Article requires --inspect. Images are inserted in Markdown order through one newly created exact Add Media → Media file input per occurrence. Each target is set once; a missing/ambiguous target, rejected delivery, or absent/ambiguous ordered observation stops later images without fallback or automatic retry. Observation accepts only the exact noneditable native Media atom and excludes only that atom's UI text. X may rewrite uploaded bytes: a same-origin blob preview must be nonempty with a valid digest, positive byte count, expected available MIME, and exact dimensions. Its first positive native digest is domain-bound and must remain stable; source digest and size remain requested-input evidence. Hosted URL identity is separately domain-bound, so identity-kind transitions fail closed. Positive persistence requires the same ordered identity kind, digest, and dimensions before and after reopening the same canonical draft URL; preview URLs are never emitted.\n" +
         "\nArticle cover input:\n" +
         "  Article requires one explicit --cover path; tweet and thread reject that flag. The CLI reads one regular JPEG/PNG/WebP once, verifies its header, matching extension, readable dimensions, and exact 5:2 ratio before staging-runtime/profile/browser access.\n" +
         "  The detached validated bytes are staged unchanged. The CLI never scans neighboring files and never crops, resizes, compresses, or converts the cover.\n" +
         "\nArticle staging snapshot:\n" +
-        "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/code-count plus exact cover-byte snapshot and pre-renders its native HTML/plain inputs.\n" +
-        "  It reparses canonical Markdown with the same Article parser and requires the complete code block/advisory/code-link sets to correspond before any sink. Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +
+        "  Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title/Markdown/block/run/link/image/code-count plus exact cover and ordered body-image byte snapshots, then pre-renders its native text segments.\n" +
+        "  It reparses canonical Markdown with the same Article parser and requires the complete code block/advisory/code-link/body-image sets to correspond before any sink. Malformed, accessor/proxy, cyclic, sparse/oversized, count-inconsistent, or unsafe-active-href Article structures exit 2 locally with save_not_attempted; runtime and native Save/autosave failures retain exit 1 semantics.\n" +
         "  If the root format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism. Active inline hrefs require exact safe absolute HTTP(S); supported percent bytes remain exact and are not decoded by safety validation. URL-looking advisories from excluded code are bounded but never become active anchors.\n" +
         "\nNative-save outcome:\n" +
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
         "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or other visible-row changes remain unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
         "  Article success requires one unique title/body editor root, a clean pre-set cover/dialog baseline, one direct returned set on its calibrated same-parent cover input, and authoritative native persistence: a unique above-title hosted cover with exact expected dimensions before canonical reopen, matching full title/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward. When one exact Apply control is observable it is clicked once; Apply provenance remains not_attempted, delivery_unknown, or returned and is never retried or rewritten. A complete native-state proof may close not_attempted or delivery_unknown without claiming Apply returned. An immediate post-Create URL is provisional; a missing/invalid late sample or conflicting positive samples are never used for navigation or verification.\n" +
-        "  A returned Article outcome reports bounded body/code facts and distinct cover requested/resolved/set/uploaded/observed/verified evidence. A rejected native cover-input set leaves set unknown because delivery may have occurred; the CLI never retries, clicks the media button, or uses another upload route. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
+        "  A returned Article outcome reports bounded body/code facts, distinct cover requested/resolved/set/uploaded/observed/verified evidence at asset index 0, and occurrence-ordered body-image evidence at indexes 1 onward. A stopped image run retains truthful partial set/observed/verified facts. A rejected native cover or body-image input set leaves set unknown because delivery may have occurred; the CLI never retries or uses another upload route. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
         "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
         "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +
         "  Never retry automatically. --inspect and selector calibration do not prove persistence.\n",
     )
     .action(async (opts: DraftXOptions) => {
+      // One invocation-owned base for stdin-relative Article assets. Never read
+      // cwd again after parsing or across an await boundary.
+      const invocationCwd = process.cwd();
       const output = new TerminalOutputBudget();
       const emit = (stream: "stdout" | "stderr", message: string) =>
         emitTerminalOutput(output, stream, message);
@@ -1024,9 +1178,13 @@ export function registerDraftCommand(x: Command): void {
 
       let md: string;
       let sourceLineOffset = 0;
+      let articleImageBaseDirectory = invocationCwd;
       try {
-        const input = resolveContentInputDetails(opts);
+        const input = resolveContentInputDetails(opts, invocationCwd);
         md = input.markdown;
+        if (input.kind === "file" && input.sourcePath !== undefined) {
+          articleImageBaseDirectory = dirname(input.sourcePath);
+        }
         if (input.kind !== "text") {
           const sourceName = input.kind === "stdin"
             ? "stdin (--from -)"
@@ -1068,6 +1226,35 @@ export function registerDraftCommand(x: Command): void {
           preloadedCoverAssets,
         );
       }
+
+      let articleBodyImages = emptyXArticleBodyImagePreloadSet();
+      if (format === "article") {
+        const bodyImageCount = content.article!.blocks.reduce(
+          (count, block) => count + (block.kind === "image" ? 1 : 0),
+          0,
+        );
+        try {
+          articleBodyImages = preloadXArticleBodyImages(
+            content.article!.blocks,
+            articleImageBaseDirectory,
+          );
+        } catch (error) {
+          return stopForPreStageFailure(
+            error,
+            "body_image_preload",
+            "x_article_body_image_preload_runtime_failed",
+            xArticleLocalAssets(true, true, bodyImageCount, false),
+          );
+        }
+      }
+      const preloadedArticleAssets = format === "article"
+        ? xArticleLocalAssets(
+            true,
+            true,
+            articleBodyImages.occurrences.length,
+            true,
+          )
+        : NO_ASSETS;
 
       let dryRunArtifacts: {
         contentPath: string;
@@ -1125,7 +1312,7 @@ export function registerDraftCommand(x: Command): void {
           error,
           "terminal_preparation",
           "x_terminal_preparation_runtime_failed",
-          preloadedCoverAssets,
+          preloadedArticleAssets,
         );
       }
       if (!opts.json) console.log(inspection);
@@ -1143,7 +1330,7 @@ export function registerDraftCommand(x: Command): void {
               validation: { local: PASSED_LOCAL_VALIDATION, live: NOT_REACHED_LIVE_VALIDATION },
               warnings: content.warnings,
               gotchas: ["The requested local artifact may be absent, partial, or replaced."],
-              assets: preloadedCoverAssets,
+              assets: preloadedArticleAssets,
               platformTouched: false,
               terminalState: "unknown",
               verification: { status: "not_applicable", strength: "local_only", nativeReference: null },
@@ -1167,7 +1354,7 @@ export function registerDraftCommand(x: Command): void {
                 validation: { local: PASSED_LOCAL_VALIDATION, live: NOT_REACHED_LIVE_VALIDATION },
                 warnings: content.warnings,
                 gotchas: ["The clean content artifact exists, but the inspection receipt may be absent, partial, or replaced."],
-                assets: preloadedCoverAssets,
+                assets: preloadedArticleAssets,
                 platformTouched: false,
                 terminalState: "unknown",
                 verification: { status: "not_applicable", strength: "local_only", nativeReference: null },
@@ -1193,14 +1380,19 @@ export function registerDraftCommand(x: Command): void {
           gotchas: format === "article" && content.article?.codeBlockCount
             ? ["Article code blocks require manual Insert → Code or screenshot handling."]
             : [],
-          assets: format === "article" ? xArticleCoverAsset(true, true) : NO_ASSETS,
+          assets: preloadedArticleAssets,
         }), { json: !!opts.json, budget: output });
         process.exit(0);
       }
 
       const outcome = await executeXDraftRealRun(
         format === "article"
-          ? { content, inspect: opts.inspect, cover: articleCover! }
+          ? {
+              content,
+              inspect: opts.inspect,
+              cover: articleCover!,
+              bodyImages: articleBodyImages,
+            }
           : { content, inspect: opts.inspect, basePath },
         productionXDraftRealRunDependencies,
       );
@@ -1209,6 +1401,7 @@ export function registerDraftCommand(x: Command): void {
         format,
         content.warnings,
         articleCover,
+        articleBodyImages,
       ), {
         json: !!opts.json,
         budget: output,

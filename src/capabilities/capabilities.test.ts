@@ -150,7 +150,7 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /title formatting, links, code, entity-like spellings, and caller-owned edge whitespace\/format characters reject locally/);
   assert.match(x, /A consumed H1 never causes a following body H1\/H2 to disappear/);
   assert.match(x, /lossless Article Markdown subset is closed/);
-  assert.match(x, /Body blocks may be paragraphs, ATX H1\/H2 headings, flat single-paragraph quotes, one tight flat bullet or start-at-1 ordered list group at a time, and top-level backtick\/tilde fences/);
+  assert.match(x, /Body blocks may be paragraphs, parser-confirmed standalone local image paragraphs, ATX H1\/H2 headings, flat single-paragraph quotes, one tight flat bullet or start-at-1 ordered list group at a time, and top-level backtick\/tilde fences/);
   assert.match(x, /Inline content may be plain or escaped text, emphasis, strong emphasis, soft breaks, and title-free exact safe absolute HTTP\(S\) links/);
   assert.match(x, /Active links use ordinary `\[label\]\(destination\)` syntax whose raw destination bytes equal the staged href/);
   assert.match(x, /angle-bracket, padded, multiline, titled, or backslash-normalized destinations reject locally/);
@@ -158,7 +158,12 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /nonempty spaces\/tabs-only physical line rejects when the parser swallows it into a root paragraph or supported quote child.*tabs that remain content inside a paragraph, heading, quote, or fenced payload are preserved/s);
   assert.match(x, /Literal tabs anywhere in a list root\/item reject locally because the CommonMark list tokenizer can expand them/);
   assert.match(x, /caller-owned Unicode trim\/control\/format edges on body ATX headings, parser-trimmed non-CommonMark-blank list edges or continuation lines, and other source-normalized link destinations also stop before artifacts or native staging/);
-  assert.match(x, /H3-H6, Setext headings, thematic breaks, reference definitions, raw HTML, indented code.*adjacent distinct same-kind list groups.*inline code, hard breaks, images, U\+0000, unescaped entity-like spellings.*exit 2 locally/s);
+  assert.match(x, /H3-H6, Setext headings, thematic breaks, unrelated or ambiguous reference definitions, raw HTML, indented code.*adjacent distinct same-kind list groups.*inline code, hard breaks, mixed or nested images, titled or remote\/URL-backed images, U\+0000, unescaped entity-like spellings.*exit 2 locally/s);
+  assert.match(x, /body image must be one parser-confirmed image token with empty alt text.*complete top-level paragraph/s);
+  assert.match(x, /Real staging for an Article with body images requires headed `--inspect`/);
+  assert.match(x, /X may deterministically rewrite uploaded bytes.*same-origin X `blob:` preview must fetch as a nonempty native representation.*first positive native digest is domain-bound.*source digest and size remain requested-input evidence/s);
+  assert.match(x, /same identity kind and digest.*same dimensions both before and after reopening/s);
+  assert.match(x, /Private preview URLs are never emitted/);
   assert.match(x, /before inspection rendering, artifact writes, staging-runtime\/profile\/browser imports, or platform\/state access/);
   assert.match(x, /Invalid backtick info is not classified as a fence and must still fit the closed ordinary-inline subset/);
   assert.match(x, /short\/escaped fence-looking text can remain literal prose.*Mixed, shorter, or trailing-text pseudo-closers remain payload/s);
@@ -168,7 +173,10 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
   assert.match(x, /Every Article requires one explicit `--cover <path>`/);
   assert.match(x, /never scans neighboring files and never crops, resizes, compresses, or converts the cover/);
-  assert.match(x, /rejected native cover-input set leaves `set` unknown.*never retried, routed through another input, or replaced by a media-button click/s);
+  assert.match(
+    x,
+    /rejected native cover or body-image input set leaves `set` unknown.*never retried, routed through another input, or replaced by a different upload route/s,
+  );
   assert.match(
     x,
     /leading H1.*later heading lines.*image-only lines.*`Key: value`-shaped lines among the first eight lines of the normalized Markdown body/s,
@@ -238,8 +246,14 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Tweet\/thread\/reply staging treats the close→Save click as the persistence action/);
   assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
   assert.match(x, /Article verification reopens only that post-settle canonical edit URL and matches the complete intended title and body.*prefixes, truncation, or extra tails are not positive evidence/s);
-  assert.match(x, /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed request snapshot containing the title, canonical Markdown, block\/run\/mark\/link, excluded-code, advisory, count, and detached cover-byte facts/);
-  assert.match(x, /reparses canonical Markdown with the same Article parser and requires the complete code-block, code-advisory, and code-link-advisory sets to correspond/);
+  assert.match(
+    x,
+    /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed request snapshot containing the title, canonical Markdown, block\/run\/mark\/link\/image, excluded-code, advisory, count, detached cover-byte facts, and ordered detached body-image byte facts/,
+  );
+  assert.match(
+    x,
+    /reparses canonical Markdown with the same Article parser and requires the complete code-block, code-advisory, code-link-advisory, and body-image occurrence sets to correspond/,
+  );
   assert.match(x, /More than 10,000 Article code blocks, or more than 1,000,000 UTF-16 code units.*rejects locally/s);
   assert.match(x, /Malformed, throwing\/accessor\/proxy, cyclic, sparse\/oversized, count-inconsistent, or unsafe-active-href structures fail locally with bounded `save_not_attempted` evidence and exit 2/);
   assert.match(x, /format cannot be classified safely, that local failure remains a typed generic `save_not_attempted` boundary and names no Article or composer save mechanism/);
@@ -257,12 +271,19 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code facts, distinct cover `requested`, `resolved`, `set`, `uploaded`, `observed`, and canonical-reopen `verified` evidence, plus the tri-state Apply provenance/);
   assert.match(x, /Apply interaction is one-shot when one exact control is observable: `not_attempted` records no click.*`delivery_unknown` records one exact click whose promise rejected.*`returned` records one fulfilled exact click/s);
   assert.match(x, /Positive Article success requires a unique title\/body editor root; zero pre-set dialogs and no pre-existing calibrated cover; one direct returned set on its calibrated same-parent cover input/);
-  assert.match(x, /authoritative native persistence at the same exact canonical edit URL: a unique above-title hosted cover with exact expected dimensions before reopen, exact complete title\/body after reopen, and the same hosted source identity, box, and natural dimensions afterward/);
-  assert.match(x, /complete proof may close an Apply phase of `not_attempted` or `delivery_unknown` without claiming Apply returned/);
-  assert.match(x, /missing returned-set or any weak, missing, or mismatched content\/cover evidence remains unverified/);
+  assert.match(x, /authoritative native persistence at the same exact canonical edit URL: a unique above-title hosted cover with exact expected dimensions before reopen, exact complete title\/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward/);
+  assert.match(
+    x,
+    /For image-bearing Articles, success additionally requires every occurrence-ordered body-image receipt to show a returned exact set, exact in-body Media-atom observation, and the same domain-bound blob-byte or hosted-URL identity and dimensions after canonical reopen/,
+  );
+  assert.match(x, /Complete cover proof may close an Apply phase of `not_attempted` or `delivery_unknown` without claiming Apply returned/);
+  assert.match(x, /missing returned-set or any weak, missing, or mismatched content\/cover\/body-image evidence remains unverified/);
   assert.match(x, /Every returned Article JSON receipt retains the exact Apply phase and its closed meaning in a bounded gotcha/);
   assert.match(x, /immediate post-Create URL sample is provisional.*missing\/invalid late sample or two conflicting positive samples is never used for navigation or verification/s);
-  assert.match(x, /rejected native cover-input set leaves `set` unknown.*never retried, routed through another input, or replaced by a media-button click/s);
+  assert.match(
+    x,
+    /rejected native cover or body-image input set leaves `set` unknown.*never retried, routed through another input, or replaced by a different upload route/s,
+  );
   assert.match(x, /receipt uses the frozen pre-loader copy after exact returned-handoff comparison/);
   assert.match(x, /Reply target identity is a separate closed fact/);
   assert.match(x, /Live calibration on 2026-09-03 found no exact numeric target-id signal/);
@@ -719,11 +740,14 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /Article requires one explicit --cover path; tweet and thread reject that flag/,
     /never scans neighboring files and never crops, resizes, compresses, or converts the cover/,
     /Article success requires one unique title\/body editor root, a clean pre-set cover\/dialog baseline, one direct returned set on its calibrated same-parent cover input, and authoritative native persistence/,
+    /Observation accepts only the exact noneditable native Media atom and excludes only that atom's UI text/,
+    /X may rewrite uploaded bytes.*same-origin blob preview must be nonempty with a valid digest, positive byte count, expected available MIME, and exact dimensions.*first positive native digest is domain-bound.*source digest and size remain requested-input evidence.*identity-kind transitions fail closed/s,
+    /same ordered identity kind, digest, and dimensions before and after reopening the same canonical draft URL; preview URLs are never emitted/,
     /Apply provenance remains not_attempted, delivery_unknown, or returned and is never retried or rewritten/,
     /complete native-state proof may close not_attempted or delivery_unknown without claiming Apply returned/,
     /immediate post-Create URL is provisional; a missing\/invalid late sample or conflicting positive samples are never used for navigation or verification/,
-    /returned Article outcome reports bounded body\/code facts and distinct cover requested\/resolved\/set\/uploaded\/observed\/verified evidence/i,
-    /rejected native cover-input set leaves set unknown.*never retries, clicks the media button, or uses another upload route/s,
+    /returned Article outcome reports bounded body\/code facts, distinct cover requested\/resolved\/set\/uploaded\/observed\/verified evidence.*body-image evidence/s,
+    /rejected native cover or body-image input set leaves set unknown.*never retries or uses another upload route/s,
     /rejected Save\/Create action has unknown delivery.*returned action without a positive reopen match is unverified/s,
     /Both exit 1 because a draft may exist/,
     /compare X Unsent\/Drafts or X Articles → Drafts manually in the exact CLI-owned profile/,

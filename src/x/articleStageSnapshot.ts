@@ -127,10 +127,21 @@ export interface XArticleStageSnapshot {
   readonly markdown: string;
   readonly html: string;
   readonly plain: string;
+  /** N+1 immutable rich-text segments surrounding N ordered image blocks. */
+  readonly segments: readonly XArticleStageTextSegment[];
+  readonly imageBlocks: readonly Readonly<Extract<ArticleBlock, { kind: "image" }>>[];
   readonly codeBlockCount: number;
   readonly receiptCodeBlockCount: number | "many";
   readonly codeAdvisories: readonly ArticleCodeBlockFlag[];
   readonly codeLinkAdvisories: readonly Readonly<ArticleCodeLinkAdvisory>[];
+}
+
+export interface XArticleStageTextSegment {
+  readonly index: number;
+  readonly html: string;
+  readonly plain: string;
+  /** Exact local segment identity; never a claim about X's normalization. */
+  readonly sourceSha256: string;
 }
 
 export interface XNonArticleStageSnapshot {
@@ -614,17 +625,19 @@ function snapshotRun(
 interface SnapshotBlocks {
   blocks: ArticleBlock[];
   codeBlocks: Array<Extract<ArticleBlock, { kind: "code" }>>;
+  imageBlocks: Array<Extract<ArticleBlock, { kind: "image" }>>;
   hrefs: Set<string>;
 }
 
 function snapshotBlocks(value: unknown, context: SnapshotContext): SnapshotBlocks {
   const codeBlocks: Array<Extract<ArticleBlock, { kind: "code" }>> = [];
+  const imageBlocks: Array<Extract<ArticleBlock, { kind: "image" }>> = [];
   const hrefs = new Set<string>();
   const blocks = withDenseArray(value, MAX_BLOCKS, context, (entry) =>
     withPlainRecord(
       entry,
       ["kind"],
-      ["level", "runs", "index", "lang", "text"],
+      ["level", "runs", "index", "lang", "text", "source", "alt"],
       context,
       (reader): ArticleBlock => {
         const kind = reader.read("kind");
@@ -632,6 +645,8 @@ function snapshotBlocks(value: unknown, context: SnapshotContext): SnapshotBlock
           if (
             reader.has("level") ||
             reader.has("runs") ||
+            reader.has("source") ||
+            reader.has("alt") ||
             !reader.has("index") ||
             !reader.has("text")
           ) fail("unexpected_property");
@@ -640,6 +655,25 @@ function snapshotBlocks(value: unknown, context: SnapshotContext): SnapshotBlock
           const text = boundedString(reader.read("text"), MAX_TEXT_CODE_UNITS, context);
           const block = Object.freeze({ kind, index, lang, text });
           codeBlocks.push(block);
+          return block;
+        }
+
+        if (kind === "image") {
+          if (
+            reader.has("level") ||
+            reader.has("runs") ||
+            reader.has("lang") ||
+            reader.has("text") ||
+            !reader.has("index") ||
+            !reader.has("source") ||
+            !reader.has("alt")
+          ) fail("unexpected_property");
+          const index = positiveSafeInteger(reader.read("index"));
+          const source = boundedString(reader.read("source"), MAX_TEXT_CODE_UNITS, context);
+          const alt = boundedString(reader.read("alt"), MAX_TEXT_CODE_UNITS, context);
+          if (!source || source.includes("\0")) fail("invalid_value");
+          const block = Object.freeze({ kind, index, source, alt });
+          imageBlocks.push(block);
           return block;
         }
 
@@ -655,6 +689,8 @@ function snapshotBlocks(value: unknown, context: SnapshotContext): SnapshotBlock
           reader.has("index") ||
           reader.has("lang") ||
           reader.has("text") ||
+          reader.has("source") ||
+          reader.has("alt") ||
           !reader.has("runs")
         ) fail("unexpected_property");
         let level: 1 | 2 | undefined;
@@ -674,7 +710,12 @@ function snapshotBlocks(value: unknown, context: SnapshotContext): SnapshotBlock
         ) as ArticleBlock;
       },
     ));
-  return { blocks: Object.freeze(blocks) as ArticleBlock[], codeBlocks, hrefs };
+  return {
+    blocks: Object.freeze(blocks) as ArticleBlock[],
+    codeBlocks,
+    imageBlocks,
+    hrefs,
+  };
 }
 
 function snapshotCodeFlags(
@@ -1006,6 +1047,7 @@ function verifyCodeCorrespondence(
 
 function verifyCanonicalCodeSet(
   markdown: string,
+  allBlocks: readonly ArticleBlock[],
   blocks: Array<Extract<ArticleBlock, { kind: "code" }>>,
   flags: readonly ArticleCodeBlockFlag[],
   linkFlags: LinkFlag[],
@@ -1021,6 +1063,10 @@ function verifyCanonicalCodeSet(
     const parsedBlocks = parsed.blocks.filter(
       (block): block is Extract<ArticleBlock, { kind: "code" }> => block.kind === "code",
     );
+    const parsedImages = parsed.blocks.flatMap((block, blockIndex) =>
+      block.kind === "image" ? [{ block, blockIndex }] : []);
+    const actualImages = allBlocks.flatMap((block, blockIndex) =>
+      block.kind === "image" ? [{ block, blockIndex }] : []);
     if (
       parsed.markdown !== markdown ||
       parsed.codeBlockCount !== blocks.length ||
@@ -1031,6 +1077,16 @@ function verifyCanonicalCodeSet(
           block.index !== actual.index ||
           block.lang !== actual.lang ||
           block.text !== actual.text;
+      }) ||
+      parsedImages.length !== actualImages.length ||
+      parsedImages.some((entry, index) => {
+        const actual = actualImages[index];
+        return actual === undefined ||
+          entry.blockIndex !== actual.blockIndex ||
+          entry.block.index !== index + 1 ||
+          entry.block.index !== actual.block.index ||
+          entry.block.source !== actual.block.source ||
+          entry.block.alt !== actual.block.alt;
       }) ||
       !sameXArticleCodeAdvisories(parsed.codeFlags, flags) ||
       !sameXArticleLinkFlags(parsed.linkFlags, linkFlags)
@@ -1163,6 +1219,9 @@ export function htmlFromArticleBlocks(blocks: ArticleBlock[]): {
       case "code":
         codeBlockCount += 1;
         break;
+      case "image":
+        // Native media is inserted separately at this exact block boundary.
+        break;
     }
     index += 1;
   }
@@ -1172,10 +1231,40 @@ export function htmlFromArticleBlocks(blocks: ArticleBlock[]): {
 export function plainTextFromArticleBlocks(blocks: ArticleBlock[]): string {
   const lines: string[] = [];
   for (const block of blocks) {
-    if (block.kind === "code") continue;
+    if (block.kind === "code" || block.kind === "image") continue;
     lines.push(block.runs.map((run) => run.text).join(""));
   }
   return lines.join("\n\n");
+}
+
+/** Render N+1 immutable rich-text segments around N ordered native image slots. */
+export function articleTextSegments(
+  blocks: ArticleBlock[],
+): readonly XArticleStageTextSegment[] {
+  const segments: XArticleStageTextSegment[] = [];
+  let pending: ArticleBlock[] = [];
+  const push = () => {
+    const rendered = htmlFromArticleBlocks(pending);
+    const plain = plainTextFromArticleBlocks(pending);
+    segments.push(Object.freeze({
+      index: segments.length,
+      html: rendered.html,
+      plain,
+      sourceSha256: createHash("sha256")
+        .update(`${rendered.html.length}:${rendered.html}${plain.length}:${plain}`, "utf8")
+        .digest("hex"),
+    }));
+    pending = [];
+  };
+  for (const block of blocks) {
+    if (block.kind === "image") {
+      push();
+    } else {
+      pending.push(block);
+    }
+  }
+  push();
+  return Object.freeze(segments);
 }
 
 /**
@@ -1249,6 +1338,7 @@ export function snapshotXArticleStageInput(
       ) fail("accounting_mismatch");
       verifyCanonicalCodeSet(
         article.markdown,
+        article.blocks,
         article.codeBlocks,
         codeFlags,
         linkFlags,
@@ -1273,7 +1363,9 @@ export function snapshotXArticleStageInput(
       const blocks = article.blocks;
       const rendered = htmlFromArticleBlocks(blocks);
       const plain = plainTextFromArticleBlocks(blocks);
+      const segments = articleTextSegments(blocks);
       if (rendered.codeBlockCount !== article.codeBlockCount) fail("accounting_mismatch");
+      if (segments.length !== article.imageBlocks.length + 1) fail("accounting_mismatch");
 
       const copiedArticle = Object.freeze({
         title: article.title,
@@ -1299,6 +1391,8 @@ export function snapshotXArticleStageInput(
         markdown: article.markdown,
         html: rendered.html,
         plain,
+        segments,
+        imageBlocks: Object.freeze(article.imageBlocks),
         codeBlockCount: article.codeBlockCount,
         receiptCodeBlockCount,
         codeAdvisories: codeFlags,

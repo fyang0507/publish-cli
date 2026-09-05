@@ -297,9 +297,9 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
     generateContent(source, { format: "article" }),
     (error: unknown) => {
       assert.ok(error instanceof LocalValidationError);
-      assert.equal(error.problem.code, "x_article_inline_unsupported");
-      assert.match(error.message, /unsupported image inline at source line 7/);
-      assert.match(error.message, /No artifact or native draft was created/);
+      assert.equal(error.problem.code, "x_article_image_unsupported");
+      assert.match(error.message, /unsupported body image at source line 7/);
+      assert.match(error.message, /no artifact or native draft was created/);
       return true;
     },
     "#58 owns body-image transport; Article generation must reject instead of silently omitting it",
@@ -776,6 +776,17 @@ test("shared content-source failures use structured local validation", () => {
 
   const dir = mkdtempSync(join(tmpdir(), "publish-content-source-"));
   try {
+    writeFileSync(join(dir, "post.md"), "snapshot body");
+    assert.deepEqual(resolveContentInputDetails({ from: "post.md" }, dir), {
+      markdown: "snapshot body",
+      kind: "file",
+      sourcePath: join(dir, "post.md"),
+    });
+    expectLocalProblem(() => resolveContentInputDetails({ from: "post.md" }, "relative"), {
+      code: "content_source_base_invalid",
+      actual: "invalid_base",
+      unit: null,
+    });
     expectLocalProblem(() => resolveContentInputDetails({ from: dir }), {
       code: "content_source_not_regular_file",
       actual: "non-file",

@@ -18,6 +18,7 @@ import {
   X_COMPOSER_SELECTORS,
   isCalibratedXArticleCoverCrop,
   isCalibratedXArticleCoverTarget,
+  observeCalibratedArticleCover,
   sameArticleCoverObservation,
   stageArticleCover,
   waitForCalibratedArticleCoverObservation,
@@ -434,6 +435,36 @@ test("calibrated cover observation polling caps persistent invalid or ambiguous 
   assert.equal(observationCalls, 33);
   assert.equal(waits.length, 32);
   assert.ok(waits.every((milliseconds) => milliseconds === 250));
+});
+
+test("reopen cover observation tolerates body media without treating it as the cover", async () => {
+  const rawCover = {
+    src: "https://pbs.twimg.com/media/cover-fixture?format=png",
+    x: 10,
+    y: 20,
+    width: 500,
+    height: 200,
+    naturalWidth: 5,
+    naturalHeight: 2,
+  };
+  const page = {
+    url() { return EDIT_URL; },
+    locator() {
+      return {
+        async evaluateAll() {
+          // The production DOM projection counted two images inside the body,
+          // but emitted only the one candidate outside the body and above title.
+          return { validEditor: true, bodyMediaCount: 2, candidates: [rawCover] };
+        },
+      };
+    },
+  } as unknown as Page;
+
+  const observed = await observeCalibratedArticleCover(page, EDIT_URL, 5, 2, null);
+  assert.equal(observed.status, "observed");
+
+  const baseline = await observeCalibratedArticleCover(page, EDIT_URL, 5, 2);
+  assert.deepEqual(baseline, { status: "invalid" });
 });
 
 test("cover staging sets the calibrated input once and records the full Apply chain", async () => {

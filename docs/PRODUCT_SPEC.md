@@ -280,7 +280,22 @@ Generation rules (all in plain code, **not** an LLM, so output is reproducible a
 - Open the **X composer** and **type the generated content** into it:
   - **tweet** → the composer text box.
   - **thread** → add each post in order via the composer's "add post" affordance.
-  - **article** → use the **Articles composer** for long-form.
+  - **article** → use the **Articles composer** for long-form. Parser-confirmed
+    standalone top-level Markdown image paragraphs may stage local JPEG, PNG,
+    WebP, or GIF body images in source occurrence order. Empty-alt inline and
+    resolved reference-image forms are supported; nonempty-alt, mixed/nested,
+    titled, remote, data, blob, and file-URL image forms stop locally because
+    native alt editing is not calibrated.
+- File-backed Article image paths resolve relative to the canonical Markdown
+  file. Stdin-relative paths use one invocation working-directory snapshot;
+  absolute local paths are accepted. Each unique image file is opened once,
+  validated by magic/type, matching extension, and positive dimensions, then
+  staged as exact immutable bytes without transformation or an invented X
+  size/count limit.
+- A real Article containing body images requires **`--inspect`**. Each image is
+  delivered once through one newly created exact native Media input. Missing or
+  ambiguous controls, rejected delivery, or uncertain ordered observation stop
+  fail-closed without a fallback route or automatic retry.
 - **Save it as a native draft / leave it unsent** so it sits **one click from publishing**.
 - It **MUST NOT publish / click Post.** Stopping at "draft on X" is the hard boundary of this deliverable (the Post action is future scope behind the SEND-GATE, §5).
 
@@ -305,7 +320,7 @@ All commands live under the **`publish`** binary (built with **commander**).
 |---|---|
 | `publish x create-watch-list [--from-following] [--handle <h>] [--name <n>] [--x-list <id>] [--private\|--public] [--limit <n>] [--dry-run] [--json] [--inspect]` | Build/populate the account-watch List from the accounts `--handle` follows (default: logged-in `X_USERNAME`), then read `member_count` back to verify. Precursor to `watch --x-list`. Never posts (writes List membership only). |
 | `publish x watch [--query <q>...] [--x-list <id>...] [--persona <text>] [--config <watch.yaml>] [--no-triage] [--json] [--inspect]` | Read recent posts from watched queries/Lists (by driving the session's shared logged-in browser and capturing X's `SearchTimeline` / `ListLatestTweetsTimeline` GraphQL responses), dedupe in SQLite, triage with the cheap Gemini model, emit ranked follow-up candidates (human text by default, machine JSON with `--json`). Accounts are watched via a List, not one-by-one. X is anti-headless, so unattended runs currently need `--inspect` (headful). |
-| `publish x draft --from <base.md> --format <tweet\|thread\|article> [--cover <path>] [--long] [--dry-run] [--json] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Article requires an explicit, locally validated exact-5:2 JPEG/PNG/WebP `--cover`; tweet/thread reject that flag. Cover bytes are never transformed. Never posts. `--dry-run` generates content only (no browser); `--json` emits one channel-independent transport receipt; `--inspect` runs headful for calibration. |
+| `publish x draft --from <base.md> --format <tweet\|thread\|article> [--cover <path>] [--long] [--dry-run] [--json] [--inspect]` | Generate X content from a canonical base draft and **stage it as a native draft on X** via the persistent logged-in profile. Article requires an explicit, locally validated exact-5:2 JPEG/PNG/WebP `--cover`; tweet/thread reject that flag. Standalone empty-alt local Markdown image paragraphs can stage exact JPEG/PNG/WebP/GIF body-image bytes; image-bearing real runs require headed `--inspect`, accept only calibrated native Media atoms, bind the first positive native blob digest (or separate hosted identity) through canonical reopen, and stop after any uncertain one-shot insertion. Source byte facts remain requested-input evidence because X may rewrite the native representation. Never posts. `--dry-run` generates content only (no browser); `--json` emits one channel-independent transport receipt. |
 | `publish --help` | Must work and list the above commands and options. |
 
 **Flag notes**

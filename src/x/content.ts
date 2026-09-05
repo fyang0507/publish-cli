@@ -189,6 +189,8 @@ export type ArticleBlock =
   | { kind: "bullet"; runs: InlineRun[] }
   | { kind: "ordered"; runs: InlineRun[] }
   | { kind: "quote"; runs: InlineRun[] }
+  /** Parser-confirmed top-level Markdown image, resolved and staged separately. */
+  | { kind: "image"; index: number; source: string; alt: string }
   /** Fenced code — X can't render code; the human pastes a screenshot here. */
   | { kind: "code"; index: number; lang?: string; text: string };
 

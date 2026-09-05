@@ -380,6 +380,7 @@ test("excluded-code link identity rejects a present undefined text key before st
     codeAdvisories: canonicalSnapshot.codeAdvisories,
     codeLinkAdvisories: canonicalSnapshot.codeLinkAdvisories,
     cover: verifiedCover(),
+    bodyImages: [],
   };
 
   const hostile = structuredClone(content) as GeneratedContent;
@@ -638,6 +639,7 @@ test("verified and returned-unverified receipts reuse frozen code and code-link 
     codeAdvisories: snapshot.codeAdvisories,
     codeLinkAdvisories: snapshot.codeLinkAdvisories,
     cover: verifiedCover(),
+    bodyImages: [],
   };
   assert.ok(snapshotXArticleDraftHandoff(handoff));
   for (const phase of ["verified", "save_delivered_unverified"] as const) {
@@ -682,6 +684,7 @@ test("returned Article handoff arrays cannot forge or leak code-derived evidence
     codeAdvisories: snapshot.codeAdvisories,
     codeLinkAdvisories: snapshot.codeLinkAdvisories,
     cover: verifiedCover(),
+    bodyImages: [],
   };
   const returned = (articleHandoff: unknown): StageDraftResult => ({
     format: "article",

@@ -26,6 +26,10 @@ export function xArticleStageCopiedTextCodeUnits(
       total += block.text.length + (block.lang?.length ?? 0);
       continue;
     }
+    if (block.kind === "image") {
+      total += block.source.length + block.alt.length;
+      continue;
+    }
     for (const run of block.runs) {
       total += run.text.length + (run.href?.length ?? 0);
     }
