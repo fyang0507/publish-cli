@@ -13,6 +13,10 @@ import {
   X_ARTICLE_COVER_DIMENSION_REPRESENTATION_LIMIT,
   type XArticleCoverContentType,
 } from "./articleCover.js";
+import {
+  X_ARTICLE_BODY_IMAGE_DIMENSION_REPRESENTATION_LIMIT,
+  type XArticleBodyImageContentType,
+} from "./articleBodyImages.js";
 
 /**
  * Closed evidence contract for X draft persistence progress (issue #82).
@@ -314,7 +318,7 @@ export interface XArticleCoverHandoff {
 }
 
 export interface XArticleDraftHandoff {
-  body: "rich_html";
+  body: "rich_html" | "segmented_rich_html";
   /** Generated #95 handoffs are exact; `many` remains a legacy type only. */
   codeBlockCount: number | "many";
   /** Complete bounded identity for every code block excluded from native HTML. */
@@ -322,6 +326,31 @@ export interface XArticleDraftHandoff {
   /** Bounded inert URL-looking facts derived from those excluded blocks. */
   codeLinkAdvisories: readonly Readonly<ArticleCodeLinkAdvisory>[];
   cover: XArticleCoverHandoff;
+  /** One closed native insertion record per parser-confirmed occurrence. */
+  bodyImages: readonly XArticleBodyImageHandoff[];
+}
+
+/** Closed, path-free facts for one ordered X Article body-image occurrence. */
+export interface XArticleBodyImageHandoff {
+  readonly occurrenceIndex: number;
+  readonly blockIndex: number;
+  readonly contentType: XArticleBodyImageContentType;
+  readonly width: number;
+  readonly height: number;
+  readonly sourceSha256: string;
+  readonly requested: true;
+  readonly resolved: true;
+  readonly set: boolean | null;
+  readonly setPhase:
+    | "not_attempted"
+    | "target_unavailable"
+    | "set_delivery_unknown"
+    | "set_returned";
+  readonly uploaded: null;
+  readonly observed: boolean;
+  readonly verified: boolean | null;
+  /** Hash of the attributed remote media identity; never the CDN URL itself. */
+  readonly sourceIdentitySha256: string | null;
 }
 
 export const X_ARTICLE_CODE_BLOCK_COUNT_LIMIT = X_ARTICLE_CODE_ADVISORY_COUNT_MAX;
@@ -863,12 +892,117 @@ function articleHandoffRecord(
   }
 }
 
+const X_ARTICLE_BODY_IMAGE_HANDOFF_LIMIT = 50_000;
+
+function snapshotXArticleBodyImageHandoffs(
+  value: unknown,
+): readonly XArticleBodyImageHandoff[] | null {
+  if (!Array.isArray(value)) return null;
+  try {
+    if (isProxy(value) || value.length > X_ARTICLE_BODY_IMAGE_HANDOFF_LIMIT) return null;
+    const out: XArticleBodyImageHandoff[] = [];
+    let previousBlockIndex = -1;
+    for (let index = 0; index < value.length; index += 1) {
+      const element = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!element || !("value" in element) || !element.enumerable) return null;
+      const source = articleHandoffRecord(element.value, [
+        "occurrenceIndex",
+        "blockIndex",
+        "contentType",
+        "width",
+        "height",
+        "sourceSha256",
+        "requested",
+        "resolved",
+        "set",
+        "setPhase",
+        "uploaded",
+        "observed",
+        "verified",
+        "sourceIdentitySha256",
+      ]);
+      if (!source) return null;
+      const occurrenceIndex = source.get("occurrenceIndex");
+      const blockIndex = source.get("blockIndex");
+      const contentType = source.get("contentType");
+      const width = source.get("width");
+      const height = source.get("height");
+      const sourceSha256 = source.get("sourceSha256");
+      const requested = source.get("requested");
+      const resolved = source.get("resolved");
+      const set = source.get("set");
+      const setPhase = source.get("setPhase");
+      const uploaded = source.get("uploaded");
+      const observed = source.get("observed");
+      const verified = source.get("verified");
+      const sourceIdentitySha256 = source.get("sourceIdentitySha256");
+      if (
+        occurrenceIndex !== index + 1 ||
+        !Number.isSafeInteger(blockIndex) ||
+        (blockIndex as number) < 0 ||
+        (blockIndex as number) <= previousBlockIndex ||
+        (contentType !== "image/gif" &&
+          contentType !== "image/jpeg" &&
+          contentType !== "image/png" &&
+          contentType !== "image/webp") ||
+        !Number.isInteger(width) ||
+        (width as number) <= 0 ||
+        (width as number) > X_ARTICLE_BODY_IMAGE_DIMENSION_REPRESENTATION_LIMIT ||
+        !Number.isInteger(height) ||
+        (height as number) <= 0 ||
+        (height as number) > X_ARTICLE_BODY_IMAGE_DIMENSION_REPRESENTATION_LIMIT ||
+        typeof sourceSha256 !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(sourceSha256) ||
+        requested !== true ||
+        resolved !== true ||
+        (set !== true && set !== false && set !== null) ||
+        (setPhase !== "not_attempted" &&
+          setPhase !== "target_unavailable" &&
+          setPhase !== "set_delivery_unknown" &&
+          setPhase !== "set_returned") ||
+        uploaded !== null ||
+        typeof observed !== "boolean" ||
+        (verified !== true && verified !== false && verified !== null) ||
+        (sourceIdentitySha256 !== null &&
+          (typeof sourceIdentitySha256 !== "string" ||
+            !/^[a-f0-9]{64}$/u.test(sourceIdentitySha256))) ||
+        ((setPhase === "set_returned") !== (set === true)) ||
+        ((setPhase === "target_unavailable" || setPhase === "not_attempted") !==
+          (set === false)) ||
+        ((setPhase === "set_delivery_unknown") !== (set === null)) ||
+        (observed !== (sourceIdentitySha256 !== null)) ||
+        (verified === true && !(set === true && observed === true))
+      ) return null;
+      previousBlockIndex = blockIndex as number;
+      out.push(Object.freeze({
+        occurrenceIndex,
+        blockIndex,
+        contentType,
+        width,
+        height,
+        sourceSha256,
+        requested,
+        resolved,
+        set,
+        setPhase,
+        uploaded,
+        observed,
+        verified,
+        sourceIdentitySha256,
+      }) as XArticleBodyImageHandoff);
+    }
+    return Object.freeze(out);
+  } catch {
+    return null;
+  }
+}
+
 /** Snapshot one Article handoff exactly once and reject contradictory facts. */
 export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHandoff | null {
   try {
     const source = articleHandoffRecord(
       value,
-      ["body", "codeBlockCount", "codeAdvisories", "codeLinkAdvisories", "cover"],
+      ["body", "codeBlockCount", "codeAdvisories", "codeLinkAdvisories", "cover", "bodyImages"],
     );
     if (!source) return null;
     const body = source.get("body");
@@ -877,6 +1011,7 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
     const codeLinkAdvisories = snapshotXArticleCodeLinkAdvisories(
       source.get("codeLinkAdvisories"),
     );
+    const bodyImages = snapshotXArticleBodyImageHandoffs(source.get("bodyImages"));
     const coverSource = articleHandoffRecord(source.get("cover"), [
       "selection",
       "contentType",
@@ -894,7 +1029,7 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
       "verified",
     ]);
     if (
-      body !== "rich_html" ||
+      (body !== "rich_html" && body !== "segmented_rich_html") ||
       !(
         codeBlockCount === "many" ||
         (Number.isInteger(codeBlockCount) &&
@@ -911,7 +1046,9 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
       articleCodeAdvisoryRenderSize(codeAdvisories) +
           articleCodeLinkAdvisoryRenderSize(codeLinkAdvisories) >
         X_ARTICLE_CODE_ADVISORY_RENDER_MAX_CODE_UNITS ||
-      coverSource === null
+      coverSource === null ||
+      bodyImages === null ||
+      (bodyImages.length === 0) !== (body === "rich_html")
     ) return null;
 
     const cover = {
@@ -970,6 +1107,7 @@ export function snapshotXArticleDraftHandoff(value: unknown): XArticleDraftHando
       codeAdvisories,
       codeLinkAdvisories,
       cover: Object.freeze(cover) as XArticleCoverHandoff,
+      bodyImages,
     });
   } catch {
     return null;

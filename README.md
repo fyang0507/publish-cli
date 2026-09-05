@@ -105,6 +105,33 @@ publish reddit draft --subreddit agents --title "Title" --from post.md
 publish wechat draft --from article.md --cover cover.png
 ```
 
+X Article body images use ordinary Markdown image paragraphs in the canonical
+source, for example `![](images/diagram.png)` or the empty-alt reference form
+`![][diagram]`. Each image must be the only content in its top-level paragraph,
+must have empty alt text and no Markdown title attribute, and must name a local
+JPEG, PNG, WebP, or GIF. Nonempty-alt, mixed/nested, titled, remote, or
+URL-backed images reject locally because native alt editing is not calibrated.
+Relative paths in a file-backed Article are
+resolved from that Markdown file's directory. Relative paths read from stdin
+are resolved from one working-directory snapshot taken at invocation; absolute
+local paths are also accepted. Each unique file is read once and its exact
+validated bytes are staged without resizing, recompression, conversion, or
+other transformation. X does not expose a stable body-image limit here, so
+server acceptance remains authoritative.
+
+Real image-bearing Article staging requires `--inspect` (headed mode). Each
+body image uses one newly created native Media input once, in Markdown
+occurrence order; a missing/ambiguous target, rejected delivery, or uncertain
+observation stops the run without fallback or automatic retry. Observation is
+limited to the calibrated noneditable Media atom. X-native control text inside
+that exact atom is excluded from Markdown comparison; other text is not. A
+same-origin blob preview must fetch as a nonempty native representation with
+the expected available MIME and dimensions. X may rewrite the uploaded bytes,
+so the first positively observed native digest becomes the domain-bound
+persistence identity and must survive canonical reopen. The source digest and
+size remain request evidence; private preview URLs are never emitted. The command
+still stops at a verified native draft for human review and never posts.
+
 Add `--json` to any draft command (or `x reply`) to receive exactly one
 `publish.transport-receipt/v1` JSON document. It reports the selected channel
 and format, local/live/skipped validation, warnings and gotchas, ordered asset

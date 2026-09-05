@@ -38,9 +38,9 @@ const LINK_NOTE =
   "Links cost reach — keep this OUT of the opening tweet; move it to a reply or the end of the thread.";
 
 const ARTICLE_SUPPORTED_BLOCKS =
-  "paragraphs, ATX H1/H2 headings, flat single-paragraph quotes/lists, and top-level fenced code";
+  "paragraphs, ATX H1/H2 headings, flat single-paragraph quotes/lists, top-level fenced code, and top-level image-only paragraphs";
 const ARTICLE_SUPPORTED_INLINES =
-  "plain or escaped text, emphasis, strong emphasis, soft breaks, and title-free HTTP(S) links";
+  "plain or escaped text, emphasis, strong emphasis, soft breaks, title-free HTTP(S) links, and an image only when it is the paragraph's sole inline token";
 
 interface ArticleToken {
   type?: unknown;
@@ -52,6 +52,7 @@ interface ArticleToken {
   lang?: unknown;
   href?: unknown;
   title?: unknown;
+  tag?: unknown;
   ordered?: unknown;
   start?: unknown;
   loose?: unknown;
@@ -415,6 +416,173 @@ function exactInlineLinkDestination(raw: string): string | null {
   // titled, and backslash-normalized destination syntax. The exact caller
   // bytes between parentheses must be the href sent to native staging.
   return destination.length > 0 ? destination : null;
+}
+
+type ArticleImageSyntax =
+  | { kind: "inline" }
+  | { kind: "reference"; tag: string };
+
+/** Find the closing bracket of the parser-confirmed image label. */
+function imageLabelEnd(raw: string): number | null {
+  if (!raw.startsWith("![")) return null;
+  let depth = 1;
+  for (let index = 2; index < raw.length; index += 1) {
+    const char = raw[index];
+    if (char === "\\") {
+      index += 1;
+      continue;
+    }
+    if (char === "`") {
+      let runEnd = index + 1;
+      while (raw[runEnd] === "`") runEnd += 1;
+      const marker = raw.slice(index, runEnd);
+      const closer = raw.indexOf(marker, runEnd);
+      if (closer !== -1) {
+        index = closer + marker.length - 1;
+        continue;
+      }
+    }
+    if (char === "[") {
+      depth += 1;
+      continue;
+    }
+    if (char === "]") {
+      depth -= 1;
+      if (depth === 0) return index;
+    }
+  }
+  return null;
+}
+
+function normalizedReferenceTag(value: string): string {
+  // Marked's reference resolver lowercases labels and collapses their
+  // whitespace before looking them up in the root definition table.
+  return value.replace(/\s+/gu, " ").toLowerCase();
+}
+
+/** Classify only syntax which Marked already confirmed as an image token. */
+function articleImageSyntax(raw: string): ArticleImageSyntax | null {
+  const labelEnd = imageLabelEnd(raw);
+  if (labelEnd === null) return null;
+  const label = raw.slice(2, labelEnd);
+  const suffix = raw.slice(labelEnd + 1);
+  if (suffix.startsWith("(") && suffix.endsWith(")")) {
+    return { kind: "inline" };
+  }
+  if (suffix === "") {
+    return { kind: "reference", tag: normalizedReferenceTag(label) };
+  }
+  if (suffix.startsWith("[") && suffix.endsWith("]")) {
+    const explicit = suffix.slice(1, -1);
+    // Collapsed reference images use their alt-label source as the key.
+    return {
+      kind: "reference",
+      tag: normalizedReferenceTag(explicit || label),
+    };
+  }
+  return null;
+}
+
+function inlineImageHasExplicitEmptyTitle(raw: string): boolean {
+  // Marked normalizes syntactically present empty titles to null. Retain the
+  // closed title-free contract by checking this one otherwise-lost syntax bit.
+  return /(?:[ \t]+(?:\n[ \t]*)?|\n[ \t]*)(?:""|''|\(\))[ \t\n]*\)$/u.test(raw);
+}
+
+function imageDefinitions(
+  positioned: PositionedArticleToken[],
+): Map<string, ArticleToken | null> {
+  const definitions = new Map<string, ArticleToken | null>();
+  for (const { token } of positioned) {
+    if (token.type !== "def" || typeof token.tag !== "string") continue;
+    if (definitions.has(token.tag)) {
+      definitions.set(token.tag, null);
+    } else {
+      definitions.set(token.tag, token);
+    }
+  }
+  return definitions;
+}
+
+function soleParagraphImage(token: ArticleToken): ArticleToken | null {
+  if (token.type !== "paragraph") return null;
+  const inlines = tokenArray(token.tokens);
+  if (!inlines || inlines.length !== 1 || inlines[0].type !== "image") return null;
+  return inlines[0];
+}
+
+function unsupportedImage(sourceLine: number, reason: string): LocalValidationError {
+  return articleError(
+    "x_article_image_unsupported",
+    `${reason} at source line ${sourceLine}`,
+    "one title-free parser-confirmed local image path as the complete top-level paragraph",
+    `X Article Markdown contains an unsupported body image at source line ${sourceLine}. ` +
+      "Use one title-free local image path on its own top-level paragraph; no artifact or native draft was created.",
+  );
+}
+
+function articleImageBlock(
+  image: ArticleToken,
+  index: number,
+  sourceLine: number,
+  definitions: ReadonlyMap<string, ArticleToken | null>,
+): { block: Extract<ArticleBlock, { kind: "image" }>; referenceTag: string | null } {
+  if (
+    typeof image.raw !== "string" ||
+    typeof image.href !== "string" ||
+    typeof image.text !== "string"
+  ) {
+    throw unsupportedImage(sourceLine, "invalid parser image token");
+  }
+  const syntax = articleImageSyntax(image.raw);
+  if (!syntax) throw unsupportedImage(sourceLine, "unclassifiable image syntax");
+
+  const definition = syntax.kind === "reference"
+    ? definitions.get(syntax.tag)
+    : undefined;
+  if (syntax.kind === "reference" && !definition) {
+    throw unsupportedImage(sourceLine, "missing or ambiguous image definition");
+  }
+  if (
+    (image.title !== null && image.title !== undefined) ||
+    (syntax.kind === "inline" && inlineImageHasExplicitEmptyTitle(image.raw)) ||
+    (syntax.kind === "reference" && definition?.title !== undefined)
+  ) {
+    throw unsupportedImage(sourceLine, "titled image");
+  }
+
+  const source = image.href;
+  if (
+    source.length === 0 ||
+    source.length > ARTICLE_HREF_MAX_CODE_UNITS ||
+    source.trim() !== source ||
+    unpairedSurrogateOffset(source) !== -1 ||
+    /^(?:https?|data|blob|file):/iu.test(source) ||
+    source.startsWith("//")
+  ) {
+    throw unsupportedImage(sourceLine, "empty, remote, or invalid image destination");
+  }
+  if (
+    image.text.length !== 0 ||
+    image.text.length > ARTICLE_BLOCK_TEXT_MAX_CODE_UNITS ||
+    unpairedSurrogateOffset(image.text) !== -1
+  ) {
+    // The calibrated native body-media flow does not expose a closed alt-text
+    // editor. Accepting non-empty alt text would silently discard caller-owned
+    // semantics, so keep that syntax outside the production contract until the
+    // native alt surface is separately calibrated.
+    throw unsupportedImage(sourceLine, "non-empty or invalid image alt text");
+  }
+
+  return {
+    block: {
+      kind: "image",
+      index,
+      source,
+      alt: image.text,
+    },
+    referenceTag: syntax.kind === "reference" ? syntax.tag : null,
+  };
 }
 
 function validateListSourceBoundaries(positioned: PositionedArticleToken[]): void {
@@ -1159,6 +1327,32 @@ function convertBody(
   const blocks: ArticleBlock[] = [];
   const codeFlags: ArticleCodeBlockFlag[] = [];
   const codeLinkSources: ArticleCodeLinkSource[] = [];
+  const definitions = imageDefinitions(positioned);
+  const imageBlocks = new Map<
+    ArticleToken,
+    Extract<ArticleBlock, { kind: "image" }>
+  >();
+  const consumedImageDefinitions = new Set<string>();
+  let imageIndex = 0;
+
+  // Resolve all supported root images first. A reference definition may occur
+  // before its image root, but it is non-rendering source only when that exact
+  // definition is consumed by a supported image token.
+  for (const entry of positioned) {
+    const image = soleParagraphImage(entry.token);
+    if (!image) continue;
+    const mapped = articleImageBlock(
+      image,
+      imageIndex + 1,
+      entry.sourceLine,
+      definitions,
+    );
+    imageIndex += 1;
+    imageBlocks.set(entry.token, mapped.block);
+    if (mapped.referenceTag !== null) {
+      consumedImageDefinitions.add(mapped.referenceTag);
+    }
+  }
 
   for (const entry of positioned) {
     const { token, sourceLine } = entry;
@@ -1176,6 +1370,11 @@ function convertBody(
       case "space":
         break;
       case "paragraph": {
+        const imageBlock = imageBlocks.get(token);
+        if (imageBlock) {
+          addBlock(context, blocks, imageBlock);
+          break;
+        }
         const runs = inlineRuns(token.tokens, sourceLine, context);
         if (runs.length === 0) throw unsupportedBlock("empty_paragraph", sourceLine);
         addBlock(context, blocks, { kind: "paragraph", runs });
@@ -1260,7 +1459,14 @@ function convertBody(
       }
       case "html":
       case "hr":
+        throw unsupportedBlock(token.type, sourceLine);
       case "def":
+        if (
+          typeof token.tag === "string" &&
+          consumedImageDefinitions.has(token.tag)
+        ) {
+          break;
+        }
         throw unsupportedBlock(token.type, sourceLine);
       default:
         throw unsupportedBlock(token.type, sourceLine);
@@ -1333,7 +1539,7 @@ function linkFlags(
   // with the same raw URL must never suppress the exact flag required to prove
   // active-href correspondence at the immutable staging boundary.
   for (const block of blocks) {
-    if (block.kind === "code") continue;
+    if (block.kind === "code" || block.kind === "image") continue;
     for (let index = 0; index < block.runs.length; index += 1) {
       const run = block.runs[index];
       if (run.href) {

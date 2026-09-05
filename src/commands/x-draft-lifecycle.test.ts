@@ -11,6 +11,7 @@ import {
 import { generateContent, type GeneratedContent, type XFormat } from "../x/content.js";
 import { snapshotXArticleStageInput } from "../x/articleStageSnapshot.js";
 import { preloadXArticleCover } from "../x/articleCover.js";
+import { emptyXArticleBodyImagePreloadSet } from "../x/articleBodyImages.js";
 import type { StageDraftResult } from "../x/draftPoster.js";
 import {
   isXDraftStageError,
@@ -105,6 +106,7 @@ function articleHandoff(
     codeAdvisories: [],
     codeLinkAdvisories: [],
     cover,
+    bodyImages: [],
   };
 }
 
@@ -119,6 +121,7 @@ function articleHandoffFor(
     codeAdvisories: snapshot.codeAdvisories,
     codeLinkAdvisories: snapshot.codeLinkAdvisories,
     cover,
+    bodyImages: [],
   };
 }
 
@@ -186,7 +189,11 @@ test("tweet, thread, and Article commands expose each typed save phase without r
         }),
         dependencies(async () => async (_content, opts) => {
           assert.deepEqual(opts, format === "article"
-            ? { inspect: true, cover: ARTICLE_COVER }
+            ? {
+                inspect: true,
+                cover: ARTICLE_COVER,
+                bodyImages: emptyXArticleBodyImagePreloadSet(),
+              }
             : { inspect: true, basePath: "PRIVATE_PATH_CANARY/operator/source.md" });
           const error = new XDraftStageError(phase, mechanism(format));
           Object.defineProperty(error, "cause", { value: new Error(RAW_CANARY) });

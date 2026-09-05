@@ -380,7 +380,9 @@ test("the closed Article matrix rejects semantics the native structure cannot pr
     ["# T\n\n> one\n>\n> two", "x_article_block_unsupported", /nested_container block/],
     ["# T\n\nline  \nnext", "x_article_inline_unsupported", /hard_break inline/],
     ["# T\n\n`inline`", "x_article_inline_unsupported", /inline_code inline/],
-    ["# T\n\n![image](body.png)", "x_article_inline_unsupported", /image inline/],
+    ["# T\n\nbefore ![](body.png)", "x_article_inline_unsupported", /image inline/],
+    ["# T\n\n> ![](body.png)", "x_article_inline_unsupported", /image inline/],
+    ["# T\n\n![](https://example.com/body.png)", "x_article_image_unsupported", /unsupported body image/],
     ["# T\n\nbefore <span>x</span> after", "x_article_inline_unsupported", /html inline/],
     ["# T\n\n[x](https://example.com \"tooltip\")", "x_article_inline_unsupported", /link_title inline/],
     ["# T\n\n[](https://example.com)", "x_article_inline_unsupported", /empty_link inline/],
@@ -407,6 +409,11 @@ test("the closed Article matrix rejects semantics the native structure cannot pr
     const error = await rejectedArticle(source, code);
     assert.match(error.message, evidence, source);
   }
+  const nonemptyImageAlt = await rejectedArticle(
+    "# T\n\n![image](body.png)",
+    "x_article_image_unsupported",
+  );
+  assert.match(String(nonemptyImageAlt.problem.actual), /non-empty.*image alt text/);
   for (let level = 3; level <= 6; level += 1) {
     const error = await rejectedArticle(
       `# T\n\n${"#".repeat(level)} Heading ${level}`,

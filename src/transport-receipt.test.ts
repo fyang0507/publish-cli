@@ -310,6 +310,7 @@ const ARTICLE_RECEIPT_HANDOFF: XArticleDraftHandoff = Object.freeze({
     normalizedSourceSha256: "a".repeat(64),
   }]),
   codeLinkAdvisories: Object.freeze([]),
+  bodyImages: Object.freeze([]),
   cover: Object.freeze({
     selection: "explicit" as const,
     contentType: "image/png" as const,

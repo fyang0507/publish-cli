@@ -555,8 +555,8 @@ test("X code-block fidelity is public for draft/reply input and invalid mappings
     assert.match(draftHelp.stdout, /Terminal inspection replaces each excluded fence with its block number and digest/);
     assert.match(draftHelp.stdout, /link advisories carry block provenance.*512\/240 code points/s);
     assert.match(draftHelp.stdout, /More than 10000 code blocks or 1000000 UTF-16 code units/);
-    assert.match(draftHelp.stdout, /Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title\/Markdown\/block\/run\/link\/code-count plus exact cover-byte snapshot/);
-    assert.match(draftHelp.stdout, /reparses canonical Markdown with the same Article parser and requires the complete code block\/advisory\/code-link sets to correspond/);
+    assert.match(draftHelp.stdout, /Before loading the staging runtime, profile, or browser, the real Article path validates and freezes one closed title\/Markdown\/block\/run\/link\/image\/code-count plus exact cover and ordered body-image byte snapshots/);
+    assert.match(draftHelp.stdout, /reparses canonical Markdown with the same Article parser and requires the complete code block\/advisory\/code-link\/body-image sets to correspond/);
     assert.match(draftHelp.stdout, /unsafe-active-href Article structures exit 2 locally with save_not_attempted/);
     assert.match(draftHelp.stdout, /runtime and native Save\/autosave failures retain exit 1 semantics/);
     assert.match(draftHelp.stdout, /format cannot be classified safely, the local exit-2 failure is a typed generic save_not_attempted boundary and names no Article or composer save mechanism/);
@@ -612,7 +612,7 @@ test("X Article fidelity rejects locally before artifacts, runtime imports, prof
       {
         name: "body-image",
         source: "# Title\n\n![RAW_PRIVATE_CANARY](body.png)",
-        evidence: /unsupported image inline/,
+        evidence: /unsupported body image/,
       },
       {
         name: "inline-code",

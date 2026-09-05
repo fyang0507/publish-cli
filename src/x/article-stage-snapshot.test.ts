@@ -33,6 +33,7 @@ import {
   preloadXArticleCover,
   type XArticleCoverPreload,
 } from "./articleCover.js";
+import { emptyXArticleBodyImagePreloadSet } from "./articleBodyImages.js";
 
 const RAW_CANARY =
   "PRIVATE_ARTICLE_SNAPSHOT_CANARY selector=[data-secret] cookie=session-secret";
@@ -73,7 +74,7 @@ function cloneContent(content: GeneratedContent): GeneratedContent {
 function firstLinkedRun(content: GeneratedContent): InlineRun {
   assert.ok(content.article);
   for (const block of content.article.blocks) {
-    if (block.kind === "code") continue;
+    if (block.kind === "code" || block.kind === "image") continue;
     const linked = block.runs.find((run) => run.href !== undefined);
     if (linked) return linked;
   }
@@ -448,7 +449,9 @@ test("hostile Article shapes fail closed with exit 2 before the staging loader",
       prepare() {
         const content = cloneContent(base);
         const block = content.article!.blocks[0];
-        if (block.kind === "code") throw new Error("fixture block must contain runs");
+        if (block.kind === "code" || block.kind === "image") {
+          throw new Error("fixture block must contain runs");
+        }
         block.runs = content.article!.blocks as unknown as InlineRun[];
         return content;
       },
@@ -547,7 +550,7 @@ test("every Article staging field accessor is invoked once then rejected pre-loa
   );
   const syntheticCodeRun = base.article?.blocks
     .find((block) => block.kind === "paragraph" && block.runs.some((run) => run.text === " plain "));
-  if (!syntheticCodeRun || syntheticCodeRun.kind === "code") {
+  if (!syntheticCodeRun || syntheticCodeRun.kind !== "paragraph") {
     throw new Error("missing synthetic inline-code snapshot fixture run");
   }
   const codeRun = syntheticCodeRun.runs.find((run) => run.text === " plain ");
@@ -558,11 +561,11 @@ test("every Article staging field accessor is invoked once then rejected pre-loa
     record: Record<PropertyKey, unknown>;
     key: string;
   };
-  type ProseBlock = Exclude<ArticleBlock, { kind: "code" }>;
+  type ProseBlock = { runs: InlineRun[] };
   const proseBlock = (content: GeneratedContent): ProseBlock => {
     for (const block of content.article!.blocks) {
       if (
-        block.kind !== "code" &&
+        block.kind !== "code" && block.kind !== "image" &&
         block.runs.some((run) => run.bold || run.italic || run.code || run.href)
       ) return block;
     }
@@ -654,8 +657,10 @@ test("nested proxies, sparse arrays, unsafe counts, and extra nested keys fail c
     "# Nested matrix\n\n[linked](https://example.com/safe)\n\n```ts\ncode\n```",
     { format: "article" },
   );
-  const proseBlock = (content: GeneratedContent) => {
-    const block = content.article!.blocks.find((entry) => entry.kind !== "code");
+  const proseBlock = (content: GeneratedContent): { runs: InlineRun[] } => {
+    const block = content.article!.blocks.find(
+      (entry) => entry.kind !== "code" && entry.kind !== "image",
+    );
     if (!block) throw new Error("missing prose block");
     return block;
   };
@@ -1294,6 +1299,7 @@ test("loader and awaited dependency mutation cannot change the staged Article tu
             assert.deepEqual(options, {
               inspect: true,
               cover: ARTICLE_COVER,
+              bodyImages: emptyXArticleBodyImagePreloadSet(),
             });
             return stageArticleDraft(
               {} as BrowserContext,

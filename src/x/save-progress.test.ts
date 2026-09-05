@@ -784,6 +784,7 @@ test("Article handoff snapshot accepts the tri-state Apply matrix and rejects co
     codeAdvisories: [],
     codeLinkAdvisories: [],
     cover,
+    bodyImages: [],
   });
 
   for (const applyPhase of ["not_attempted", "delivery_unknown", "returned"] as const) {

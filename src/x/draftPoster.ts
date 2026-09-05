@@ -31,12 +31,21 @@ import {
   type XArticleCoverPreload,
 } from "./articleCover.js";
 import {
+  emptyXArticleBodyImagePreloadSet,
+  snapshotXArticleBodyImagePreloadSet,
+  xArticleBodyImageFilePayload,
+  xArticleBodyImagePreloadsMatchBlocks,
+  type XArticleBodyImagePreload,
+  type XArticleBodyImagePreloadSet,
+} from "./articleBodyImages.js";
+import {
   normalizeXArticleStageSnapshotFailure,
   snapshotXArticleStageInput,
   snapshotXContentFormat,
   snapshotXNonArticleDirectStageRequest,
   XArticleStageSnapshotError,
   type XArticleStageSnapshot,
+  type XArticleStageTextSegment,
   type XNonArticleStageSnapshot,
 } from "./articleStageSnapshot.js";
 export { htmlFromArticleBlocks } from "./articleStageSnapshot.js";
@@ -57,6 +66,7 @@ import {
   xDraftStageError,
   xDraftRowEvidenceNotApplicable,
   type XArticleCoverHandoff,
+  type XArticleBodyImageHandoff,
   type XArticleDraftHandoff,
   type XDraftRowEvidence,
   type XDraftRowEvidenceUnverified,
@@ -170,6 +180,14 @@ export const X_COMPOSER_SELECTORS = {
   articleCoverApply: '[data-testid="applyButton"]',
   articleCoverPreview: 'img[src^="https://pbs.twimg.com/media/"]',
 
+  // ---- Article body media (issue #58; headed-only calibrated path) ----
+  articleBodyAddMediaButton: 'button[aria-label="Add Media"]',
+  articleBodyMediaMenu: '[role="menu"]',
+  articleBodyMediaMenuItem: '[role="menuitem"]',
+  articleBodyMediaFileInput:
+    'input[type="file"][data-testid="fileInput"][accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime"][multiple]',
+  articleBodyMediaPreview: 'img[src^="https://pbs.twimg.com/media/"]',
+
   // The PUBLISH/POST button — listed ONLY so we are explicit about what we must
   // NEVER click. Nothing in this module ever locates+clicks it.
   // post (FORBIDDEN): 'button[data-testid="tweetButton"]' / 'button[data-testid="tweetButtonInline"]'
@@ -240,9 +258,14 @@ export interface StageDraftOptions extends EnsureSessionOptions {
    * thread drafts.
    */
   cover?: Readonly<XArticleCoverPreload>;
+  /** Exact locally preloaded body-image occurrence set. Never a filesystem path. */
+  bodyImages?: Readonly<XArticleBodyImagePreloadSet>;
   /** Legacy non-Article option retained only for the closed snapshot shape. */
   basePath?: string;
 }
+
+/** Headed Add Media transport and canonical-reopen observation are calibrated. */
+export const X_ARTICLE_BODY_IMAGE_STAGING_CALIBRATED = true;
 
 interface StageDraftResultBase {
   format: GeneratedContent["format"];
@@ -312,6 +335,7 @@ export async function stageDraft(
     let inspect: boolean | undefined;
     let force: boolean | undefined;
     let articleCover: Readonly<XArticleCoverPreload> | null = null;
+    let articleBodyImages = emptyXArticleBodyImagePreloadSet();
     if (articleSnapshot) {
       if (
         typeof opts !== "object" ||
@@ -324,27 +348,39 @@ export async function stageDraft(
       }
       const keys = Reflect.ownKeys(opts);
       if (keys.some((key) => typeof key !== "string" ||
-        (key !== "inspect" && key !== "force" && key !== "cover"))) {
+        (key !== "inspect" && key !== "force" && key !== "cover" && key !== "bodyImages"))) {
         throw new XDraftStageError("save_not_attempted", mechanism);
       }
       const inspectDescriptor = Object.getOwnPropertyDescriptor(opts, "inspect");
       const forceDescriptor = Object.getOwnPropertyDescriptor(opts, "force");
       const coverDescriptor = Object.getOwnPropertyDescriptor(opts, "cover");
+      const bodyImagesDescriptor = Object.getOwnPropertyDescriptor(opts, "bodyImages");
       if (
         (inspectDescriptor && (!("value" in inspectDescriptor) || !inspectDescriptor.enumerable)) ||
         (forceDescriptor && (!("value" in forceDescriptor) || !forceDescriptor.enumerable)) ||
-        !coverDescriptor || !("value" in coverDescriptor) || !coverDescriptor.enumerable
+        !coverDescriptor || !("value" in coverDescriptor) || !coverDescriptor.enumerable ||
+        (bodyImagesDescriptor &&
+          (!("value" in bodyImagesDescriptor) || !bodyImagesDescriptor.enumerable))
       ) {
         throw new XDraftStageError("save_not_attempted", mechanism);
       }
       inspect = inspectDescriptor?.value;
       force = forceDescriptor?.value;
       articleCover = snapshotXArticleCoverPreload(coverDescriptor.value);
+      const bodyImages = snapshotXArticleBodyImagePreloadSet(
+        bodyImagesDescriptor?.value ?? emptyXArticleBodyImagePreloadSet(),
+      );
       if (
         (inspect !== undefined && typeof inspect !== "boolean") ||
         (force !== undefined && typeof force !== "boolean") ||
-        articleCover === null
+        articleCover === null ||
+        bodyImages === null ||
+        !xArticleBodyImagePreloadsMatchBlocks(bodyImages, articleSnapshot.content.article!.blocks)
       ) {
+        throw new XDraftStageError("save_not_attempted", mechanism);
+      }
+      articleBodyImages = bodyImages;
+      if (articleSnapshot.imageBlocks.length > 0 && inspect !== true) {
         throw new XDraftStageError("save_not_attempted", mechanism);
       }
     } else {
@@ -356,6 +392,7 @@ export async function stageDraft(
       : Object.freeze({
           content: articleSnapshot,
           cover: articleCover!,
+          bodyImages: articleBodyImages,
           inspect,
           force,
         });
@@ -371,6 +408,7 @@ export async function stageDraft(
           page,
           articleRequestSnapshot.content,
           articleRequestSnapshot.cover,
+          articleRequestSnapshot.bodyImages,
         );
       }
       return await stageTweetOrThreadDraft(page, nonArticleSnapshot!);
@@ -612,6 +650,947 @@ export async function stageReplyDraft(
  * persisted preview were live-calibrated in 2026-09. Any ambiguity or missing
  * positive evidence keeps the result delivered-but-unverified.
  */
+export interface XArticleBodyImageVisualObservation {
+  readonly sourceIdentitySha256: string;
+  readonly naturalWidth: number;
+  readonly naturalHeight: number;
+}
+
+export type XArticleBodyImageObservationResult =
+  | Readonly<{ status: "none" }>
+  | Readonly<{ status: "invalid" }>
+  | Readonly<{
+      status: "observed";
+      images: readonly Readonly<XArticleBodyImageVisualObservation>[];
+    }>;
+
+interface RawArticleBodyImageObservation {
+  readonly valid: boolean;
+  readonly textSegments: readonly string[];
+  readonly images: readonly Readonly<{
+    sourceKind: "hosted" | "blob";
+    sourceIdentitySha256: string;
+    byteSize: number | null;
+    contentType: string | null;
+    naturalWidth: number;
+    naturalHeight: number;
+    visible: boolean;
+  }>[];
+}
+
+/**
+ * Observe only the unique Article body at one exact edit URL. Text and
+ * calibrated native media blocks are walked in DOM order, producing the closed interleaving
+ * text[0],image[0],text[1]... relation required by #58.
+ */
+export async function observeCalibratedArticleBodyImages(
+  page: Page,
+  editUrl: string,
+  expectedSegments: readonly XArticleStageTextSegment[],
+  expectedImages: readonly Readonly<XArticleBodyImagePreload>[],
+): Promise<XArticleBodyImageObservationResult> {
+  if (
+    !isExactArticleEditRoute(page, editUrl) ||
+    expectedSegments.length !== expectedImages.length + 1
+  ) return Object.freeze({ status: "invalid" });
+  const body = await uniqueVisibleArticleLocator(
+    page,
+    X_COMPOSER_SELECTORS.articleBodyInput,
+    0,
+    false,
+  );
+  if (!body || !isExactArticleEditRoute(page, editUrl)) {
+    return Object.freeze({ status: "invalid" });
+  }
+  let raw: RawArticleBodyImageObservation;
+  try {
+    raw = await body.evaluate(async (root) => {
+      const textSegments: string[] = [""];
+      const candidates: Array<{
+        atom: Element;
+        image: HTMLImageElement;
+        src: string;
+        naturalWidth: number;
+        naturalHeight: number;
+        visible: boolean;
+      }> = [];
+      let valid = true;
+      const hexSha256 = async (value: BufferSource): Promise<string> => {
+        const digest = await crypto.subtle.digest("SHA-256", value);
+        return Array.from(new Uint8Array(digest), (byte) =>
+          byte.toString(16).padStart(2, "0")).join("");
+      };
+      const appendBoundary = (): void => {
+        const current = textSegments.length - 1;
+        if (!textSegments[current].endsWith("\n")) textSegments[current] += "\n";
+      };
+      const calibratedMediaImage = (element: Element): HTMLImageElement | null => {
+        if (
+          element.closest('div[data-testid="composer"][contenteditable="true"]') !== root ||
+          !element.matches('div[role="button"][aria-describedby]') ||
+          (element.getAttribute("aria-describedby") ?? "").trim() === ""
+        ) return null;
+        const directSections = Array.from(element.children).filter((child) =>
+          child.matches('section[contenteditable="false"]'));
+        if (directSections.length !== 1) return null;
+        const section = directSections[0];
+        const groups = section.querySelectorAll('div[role="group"][aria-label="Media"]');
+        const sectionImages = section.querySelectorAll("img");
+        const atomImages = element.querySelectorAll("img");
+        if (
+          groups.length !== 1 ||
+          sectionImages.length !== 1 ||
+          atomImages.length !== 1 ||
+          atomImages[0] !== sectionImages[0] ||
+          !groups[0].contains(sectionImages[0]) ||
+          !(sectionImages[0] instanceof HTMLImageElement)
+        ) return null;
+        return sectionImages[0];
+      };
+      const visit = (node: Node): void => {
+        if (node.nodeType === Node.TEXT_NODE) {
+          textSegments[textSegments.length - 1] += node.nodeValue ?? "";
+          return;
+        }
+        if (!(node instanceof Element)) return;
+        const mediaImage = calibratedMediaImage(node);
+        if (mediaImage !== null) {
+          appendBoundary();
+          const style = window.getComputedStyle(mediaImage);
+          const box = mediaImage.getBoundingClientRect();
+          candidates.push({
+            atom: node,
+            image: mediaImage,
+            src: mediaImage.currentSrc || mediaImage.src,
+            naturalWidth: mediaImage.naturalWidth,
+            naturalHeight: mediaImage.naturalHeight,
+            visible: mediaImage.isConnected &&
+              mediaImage.complete &&
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              box.width > 0 &&
+              box.height > 0,
+          });
+          textSegments.push("");
+          // The complete contenteditable=false native media subtree is UI, not
+          // caller Markdown. Its labels/buttons must never enter a text segment.
+          return;
+        }
+        if (node instanceof HTMLImageElement) {
+          // Never accept an arbitrary image, even if it happens to have a
+          // plausible hosted or blob URL and matching dimensions.
+          valid = false;
+          return;
+        }
+        // X's body `innerText` inserts boundaries around block-level editor
+        // nodes. Preserve that separation here as well; otherwise adjacent
+        // paragraphs such as "one" and "two" collapse to "onetwo" before the
+        // existing whitespace normalizer can compare them. Extra boundaries
+        // are harmless because matching deliberately collapses whitespace.
+        const display = window.getComputedStyle(node).display;
+        const blockBoundary = display !== "none" && display !== "contents" &&
+          !display.startsWith("inline");
+        if (blockBoundary) appendBoundary();
+        for (const child of node.childNodes) visit(child);
+        if (blockBoundary) appendBoundary();
+      };
+      for (const child of root.childNodes) visit(child);
+      const images: Array<{
+        sourceKind: "hosted" | "blob";
+        sourceIdentitySha256: string;
+        byteSize: number | null;
+        contentType: string | null;
+        naturalWidth: number;
+        naturalHeight: number;
+        visible: boolean;
+      }> = [];
+      for (const candidate of candidates) {
+        try {
+          const parsed = new URL(candidate.src);
+          let sourceKind: "hosted" | "blob";
+          let sourceIdentitySha256: string;
+          let byteSize: number | null = null;
+          let contentType: string | null = null;
+          if (
+            parsed.protocol === "https:" &&
+            parsed.hostname === "pbs.twimg.com" &&
+            parsed.username === "" &&
+            parsed.password === "" &&
+            parsed.port === "" &&
+            parsed.pathname.startsWith("/media/") &&
+            parsed.pathname.length > "/media/".length
+          ) {
+            sourceKind = "hosted";
+            sourceIdentitySha256 = await hexSha256(
+              new TextEncoder().encode(`${parsed.origin}${parsed.pathname}`),
+            );
+          } else if (
+            parsed.protocol === "blob:" &&
+            window.location.origin === "https://x.com" &&
+            parsed.origin === window.location.origin &&
+            candidate.src.startsWith(`blob:${window.location.origin}/`) &&
+            parsed.pathname.length > `${window.location.origin}/`.length &&
+            parsed.search === "" &&
+            parsed.hash === ""
+          ) {
+            sourceKind = "blob";
+            const response = await fetch(candidate.src, {
+              cache: "no-store",
+              credentials: "same-origin",
+            });
+            if (!response.ok) {
+              valid = false;
+              continue;
+            }
+            const persisted = await response.blob();
+            byteSize = persisted.size;
+            const persistedType = persisted.type.trim().toLowerCase();
+            contentType = persistedType === "" ? null : persistedType;
+            sourceIdentitySha256 = await hexSha256(await persisted.arrayBuffer());
+          } else {
+            valid = false;
+            continue;
+          }
+          const currentSrc = candidate.image.currentSrc || candidate.image.src;
+          const currentStyle = window.getComputedStyle(candidate.image);
+          const currentBox = candidate.image.getBoundingClientRect();
+          if (
+            calibratedMediaImage(candidate.atom) !== candidate.image ||
+            !candidate.image.isConnected ||
+            !candidate.image.complete ||
+            currentStyle.display === "none" ||
+            currentStyle.visibility === "hidden" ||
+            currentBox.width <= 0 ||
+            currentBox.height <= 0 ||
+            currentSrc !== candidate.src ||
+            candidate.image.naturalWidth !== candidate.naturalWidth ||
+            candidate.image.naturalHeight !== candidate.naturalHeight
+          ) {
+            valid = false;
+            continue;
+          }
+          images.push({
+            sourceKind,
+            sourceIdentitySha256,
+            byteSize,
+            contentType,
+            naturalWidth: candidate.naturalWidth,
+            naturalHeight: candidate.naturalHeight,
+            visible: candidate.visible,
+          });
+        } catch {
+          valid = false;
+        }
+      }
+      return { valid, textSegments, images };
+    });
+  } catch {
+    return Object.freeze({ status: "invalid" });
+  }
+  if (!isExactArticleEditRoute(page, editUrl) || !raw.valid) {
+    return Object.freeze({ status: "invalid" });
+  }
+  if (raw.images.length === 0 && expectedImages.length > 0) {
+    return Object.freeze({ status: "none" });
+  }
+  if (
+    raw.images.length !== expectedImages.length ||
+    raw.textSegments.length !== expectedSegments.length ||
+    raw.textSegments.some(
+      (text, index) => normalizeForMatch(text) !== normalizeForMatch(expectedSegments[index].plain),
+    )
+  ) return Object.freeze({ status: "invalid" });
+
+  const images: XArticleBodyImageVisualObservation[] = [];
+  for (let index = 0; index < raw.images.length; index += 1) {
+    const candidate = raw.images[index];
+    const expected = expectedImages[index]?.bytes;
+    if (
+      !candidate.visible ||
+      expected === undefined ||
+      (candidate.sourceKind !== "blob" && candidate.sourceKind !== "hosted") ||
+      !/^[a-f0-9]{64}$/u.test(candidate.sourceIdentitySha256) ||
+      // X may deterministically rewrite uploaded image bytes. Bind the first
+      // positive native digest as the persistence identity; the preload digest
+      // remains truthful request evidence rather than a claimed native digest.
+      (candidate.sourceKind === "blob" &&
+        (candidate.byteSize === null ||
+          !Number.isSafeInteger(candidate.byteSize) ||
+          candidate.byteSize <= 0 ||
+          (candidate.contentType !== null && candidate.contentType !== expected.contentType))) ||
+      (candidate.sourceKind === "hosted" &&
+        (candidate.byteSize !== null || candidate.contentType !== null)) ||
+      !Number.isSafeInteger(candidate.naturalWidth) ||
+      !Number.isSafeInteger(candidate.naturalHeight) ||
+      candidate.naturalWidth !== expected.width ||
+      candidate.naturalHeight !== expected.height
+    ) return Object.freeze({ status: "invalid" });
+    const identityDomain = candidate.sourceKind === "blob"
+      ? "x-article-body-image:blob-bytes:v1:"
+      : "x-article-body-image:hosted-url:v1:";
+    images.push(Object.freeze({
+      sourceIdentitySha256: createHash("sha256")
+        .update(identityDomain, "utf8")
+        .update(candidate.sourceIdentitySha256, "utf8")
+        .digest("hex"),
+      naturalWidth: candidate.naturalWidth,
+      naturalHeight: candidate.naturalHeight,
+    }));
+  }
+  return Object.freeze({ status: "observed", images: Object.freeze(images) });
+}
+
+const ARTICLE_BODY_IMAGE_OBSERVATION_POLL_ATTEMPTS = 33;
+const ARTICLE_BODY_IMAGE_OBSERVATION_POLL_INTERVAL_MS = 250;
+
+export async function waitForCalibratedArticleBodyImages(
+  page: Page,
+  editUrl: string,
+  expectedSegments: readonly XArticleStageTextSegment[],
+  expectedImages: readonly Readonly<XArticleBodyImagePreload>[],
+  observe: typeof observeCalibratedArticleBodyImages = observeCalibratedArticleBodyImages,
+): Promise<XArticleBodyImageObservationResult> {
+  let last: XArticleBodyImageObservationResult = Object.freeze({ status: "invalid" });
+  for (let attempt = 0; attempt < ARTICLE_BODY_IMAGE_OBSERVATION_POLL_ATTEMPTS; attempt += 1) {
+    if (!isExactArticleEditRoute(page, editUrl)) return Object.freeze({ status: "invalid" });
+    try {
+      const candidate = await observe(page, editUrl, expectedSegments, expectedImages);
+      if (candidate.status === "observed") return candidate;
+      last = candidate;
+    } catch {
+      return Object.freeze({ status: "invalid" });
+    }
+    if (attempt + 1 < ARTICLE_BODY_IMAGE_OBSERVATION_POLL_ATTEMPTS) {
+      try {
+        await page.waitForTimeout(ARTICLE_BODY_IMAGE_OBSERVATION_POLL_INTERVAL_MS);
+      } catch {
+        return Object.freeze({ status: "invalid" });
+      }
+    }
+  }
+  return last;
+}
+
+export function sameArticleBodyImageObservations(
+  before: readonly Readonly<XArticleBodyImageVisualObservation>[],
+  after: readonly Readonly<XArticleBodyImageVisualObservation>[],
+): boolean {
+  return before.length === after.length && before.every((value, index) => {
+    const candidate = after[index];
+    return candidate !== undefined &&
+      value.sourceIdentitySha256 === candidate.sourceIdentitySha256 &&
+      value.naturalWidth === candidate.naturalWidth &&
+      value.naturalHeight === candidate.naturalHeight;
+  });
+}
+
+const ARTICLE_BODY_MEDIA_MENU_NAMES = Object.freeze([
+  "Media",
+  "GIF",
+  "Posts",
+  "Link preview",
+  "Divider",
+  "Code",
+  "LaTeX",
+  "Table",
+] as const);
+
+export interface XArticleBodyMediaTarget {
+  readonly input: ElementHandle<HTMLInputElement>;
+  readonly editUrl: string;
+}
+
+const ARTICLE_BODY_MEDIA_TARGETS = new WeakSet<object>();
+const CONSUMED_ARTICLE_BODY_MEDIA_TARGETS = new WeakSet<object>();
+
+async function placeCalibratedArticleBodyCaretAtEnd(
+  page: Page,
+  body: Locator,
+  editUrl: string,
+): Promise<boolean> {
+  if (!isExactArticleEditRoute(page, editUrl)) return false;
+  try {
+    const exact = await body.evaluate((root) => {
+      if (!(root instanceof HTMLElement) || !root.isContentEditable) return false;
+      root.focus();
+      const range = document.createRange();
+      range.selectNodeContents(root);
+      range.collapse(false);
+      const selection = window.getSelection();
+      if (!selection) return false;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const selected = selection.rangeCount === 1 ? selection.getRangeAt(0) : null;
+      return document.activeElement === root &&
+        selection.rangeCount === 1 &&
+        selection.isCollapsed &&
+        selected !== null &&
+        root.contains(selected.startContainer) &&
+        root.contains(selection.anchorNode);
+    });
+    return exact && isExactArticleEditRoute(page, editUrl);
+  } catch {
+    return false;
+  }
+}
+
+async function uniqueExactBodyMediaMenuItem(page: Page): Promise<Locator | null> {
+  const deadline = Date.now() + 4_000;
+  for (;;) {
+    try {
+      const menus = page.locator(X_COMPOSER_SELECTORS.articleBodyMediaMenu);
+      const visibleMenus: Locator[] = [];
+      const menuCount = await menus.count();
+      if (menuCount > 16) return null;
+      for (let index = 0; index < menuCount; index += 1) {
+        const menu = menus.nth(index);
+        if (await menu.isVisible()) visibleMenus.push(menu);
+      }
+      if (visibleMenus.length > 1) return null;
+      if (visibleMenus.length === 1) {
+        const items = visibleMenus[0].locator(X_COMPOSER_SELECTORS.articleBodyMediaMenuItem);
+        const count = await items.count();
+        if (count !== ARTICLE_BODY_MEDIA_MENU_NAMES.length) return null;
+        const names: string[] = [];
+        let media: Locator | null = null;
+        for (let index = 0; index < count; index += 1) {
+          const item = items.nth(index);
+          if (!await item.isVisible() || !await item.isEnabled()) return null;
+          const name = await item.evaluate((element) =>
+            (element.getAttribute("aria-label") ?? element.textContent ?? "")
+              .replace(/\s+/gu, " ")
+              .trim());
+          names.push(name);
+          if (name === "Media") {
+            if (media !== null) return null;
+            media = item;
+          }
+        }
+        if (
+          names.some((name, index) => name !== ARTICLE_BODY_MEDIA_MENU_NAMES[index]) ||
+          media === null
+        ) return null;
+        return media;
+      }
+    } catch {
+      return null;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    try {
+      await page.waitForTimeout(Math.min(125, remaining));
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function sameDomNode(
+  page: Page,
+  candidate: ElementHandle<HTMLInputElement>,
+  baseline: readonly ElementHandle<HTMLInputElement>[],
+): Promise<boolean | null> {
+  try {
+    return await page.evaluate(
+      ({ node, existing }) => existing.some((entry) => entry === node),
+      { node: candidate, existing: baseline },
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve exactly one dynamically created body-media input. The returned handle
+ * is attributable to one exact Add Media -> Media interaction and is never
+ * re-resolved by a generic selector before delivery.
+ */
+export async function resolveCalibratedArticleBodyMediaTarget(
+  page: Page,
+  body: Locator,
+  editUrl: string,
+): Promise<Readonly<XArticleBodyMediaTarget> | null> {
+  if (!isExactArticleEditRoute(page, editUrl)) return null;
+  let baseline: ElementHandle<HTMLInputElement>[];
+  try {
+    baseline = await page.$$("input[type=file]") as ElementHandle<HTMLInputElement>[];
+    if (baseline.length === 0 || baseline.length > 50_001) return null;
+    let coverCount = 0;
+    for (const input of baseline) {
+      const kind = await input.evaluate((candidate) => {
+        const box = candidate.getBoundingClientRect();
+        if (
+          candidate.type !== "file" ||
+          candidate.getAttribute("data-testid") !== "fileInput" ||
+          candidate.getAttribute("capture") !== null ||
+          box.width <= 0 || box.height <= 0
+        ) return "invalid";
+        if (
+          candidate.accept === "image/jpeg,image/png,image/webp" &&
+          !candidate.multiple
+        ) return "cover";
+        if (
+          candidate.accept ===
+            "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime" &&
+          candidate.multiple
+        ) return "body";
+        return "invalid";
+      });
+      if (kind === "cover") coverCount += 1;
+      else if (kind !== "body") return null;
+    }
+    if (coverCount !== 1) return null;
+  } catch {
+    return null;
+  }
+  if (!await placeCalibratedArticleBodyCaretAtEnd(page, body, editUrl)) return null;
+
+  const addMedia = await uniqueVisibleArticleLocator(
+    page,
+    X_COMPOSER_SELECTORS.articleBodyAddMediaButton,
+    4_000,
+    true,
+  );
+  if (!addMedia || !isExactArticleEditRoute(page, editUrl)) return null;
+  try {
+    await addMedia.click();
+  } catch {
+    return null;
+  }
+  const media = await uniqueExactBodyMediaMenuItem(page);
+  if (!media || !isExactArticleEditRoute(page, editUrl)) return null;
+  try {
+    await media.click();
+  } catch {
+    return null;
+  }
+
+  const deadline = Date.now() + 4_000;
+  for (;;) {
+    try {
+      const all = await page.$$("input[type=file]") as ElementHandle<HTMLInputElement>[];
+      const exact = await page.$$(
+        X_COMPOSER_SELECTORS.articleBodyMediaFileInput,
+      ) as ElementHandle<HTMLInputElement>[];
+      if (all.length === 0 || all.length > baseline.length + 1 || exact.length > baseline.length) {
+        return null;
+      }
+      const newAll: ElementHandle<HTMLInputElement>[] = [];
+      for (const candidate of all) {
+        const existed = await sameDomNode(page, candidate, baseline);
+        if (existed === null) return null;
+        if (!existed) newAll.push(candidate);
+      }
+      if (newAll.length > 1) return null;
+      if (newAll.length === 1) {
+        const newExact: ElementHandle<HTMLInputElement>[] = [];
+        for (const candidate of exact) {
+          const existed = await sameDomNode(page, candidate, baseline);
+          if (existed === null) return null;
+          if (!existed) newExact.push(candidate);
+        }
+        // X may retain or remove a prior dynamic body input. Identity delta,
+        // rather than total cardinality, attributes this one new node while
+        // rejecting a replaced cover or any second/ambiguous addition.
+        if (newExact.length !== 1 || await sameDomNode(page, newExact[0], newAll) !== true) {
+          return null;
+        }
+        const input = newExact[0];
+        const calibrated = await input.evaluate((candidate) => {
+          const box = candidate.getBoundingClientRect();
+          return candidate.isConnected &&
+            candidate.type === "file" &&
+            candidate.getAttribute("data-testid") === "fileInput" &&
+            candidate.accept ===
+              "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime" &&
+            candidate.multiple &&
+            candidate.getAttribute("capture") === null &&
+            box.width > 0 && box.height > 0;
+        });
+        if (
+          !calibrated ||
+          !isExactArticleEditRoute(page, editUrl) ||
+          !await placeCalibratedArticleBodyCaretAtEnd(page, body, editUrl)
+        ) return null;
+        const target = Object.freeze({ input, editUrl });
+        ARTICLE_BODY_MEDIA_TARGETS.add(target);
+        return target;
+      }
+    } catch {
+      return null;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return null;
+    try {
+      await page.waitForTimeout(Math.min(125, remaining));
+    } catch {
+      return null;
+    }
+  }
+}
+
+export type XArticleBodyImageSetPhase =
+  | "target_unavailable"
+  | "set_delivery_unknown"
+  | "set_returned";
+
+export interface ArticleBodyImageStageDependencies {
+  appendSegment(
+    ctx: BrowserContext,
+    page: Page,
+    body: Locator,
+    editUrl: string,
+    segment: Readonly<XArticleStageTextSegment>,
+  ): Promise<boolean>;
+  resolveTarget(
+    page: Page,
+    body: Locator,
+    editUrl: string,
+  ): Promise<Readonly<XArticleBodyMediaTarget> | null>;
+  setTarget(
+    page: Page,
+    body: Locator,
+    target: Readonly<XArticleBodyMediaTarget>,
+    occurrence: Readonly<XArticleBodyImagePreload>,
+  ): Promise<XArticleBodyImageSetPhase>;
+  observe(
+    page: Page,
+    editUrl: string,
+    expectedSegments: readonly XArticleStageTextSegment[],
+    expectedImages: readonly Readonly<XArticleBodyImagePreload>[],
+  ): Promise<XArticleBodyImageObservationResult>;
+}
+
+export interface XArticleBodyImageStageResult {
+  readonly handoffs: readonly Readonly<XArticleBodyImageHandoff>[];
+  /** Complete ordered sequence captured before the later canonical reopen. */
+  readonly beforeReload: readonly Readonly<XArticleBodyImageVisualObservation>[] | null;
+}
+
+function bodyImageHandoff(
+  occurrence: Readonly<XArticleBodyImagePreload>,
+  fields: Pick<
+    XArticleBodyImageHandoff,
+    "set" | "setPhase" | "observed" | "verified" | "sourceIdentitySha256"
+  >,
+): Readonly<XArticleBodyImageHandoff> {
+  return Object.freeze({
+    occurrenceIndex: occurrence.occurrenceIndex,
+    blockIndex: occurrence.blockIndex,
+    contentType: occurrence.bytes.contentType,
+    width: occurrence.bytes.width,
+    height: occurrence.bytes.height,
+    sourceSha256: occurrence.bytes.sourceSha256,
+    requested: true,
+    resolved: true,
+    uploaded: null,
+    ...fields,
+  });
+}
+
+function initialBodyImageHandoffs(
+  images: Readonly<XArticleBodyImagePreloadSet>,
+): Array<Readonly<XArticleBodyImageHandoff>> {
+  return images.occurrences.map((occurrence) => bodyImageHandoff(occurrence, {
+    set: false,
+    setPhase: "not_attempted",
+    observed: false,
+    verified: null,
+    sourceIdentitySha256: null,
+  }));
+}
+
+function bodyImageStageNotAttempted(
+  images: Readonly<XArticleBodyImagePreloadSet>,
+): Readonly<XArticleBodyImageStageResult> {
+  return Object.freeze({
+    handoffs: Object.freeze(initialBodyImageHandoffs(images)),
+    beforeReload: null,
+  });
+}
+
+function bodyImageStageTargetUnavailable(
+  images: Readonly<XArticleBodyImagePreloadSet>,
+): Readonly<XArticleBodyImageStageResult> {
+  const handoffs = initialBodyImageHandoffs(images);
+  const first = images.occurrences[0];
+  if (first !== undefined) {
+    handoffs[0] = bodyImageHandoff(first, {
+      set: false,
+      setPhase: "target_unavailable",
+      observed: false,
+      verified: null,
+      sourceIdentitySha256: null,
+    });
+  }
+  return Object.freeze({ handoffs: Object.freeze(handoffs), beforeReload: null });
+}
+
+function emptyArticleTextSegment(index: number): Readonly<XArticleStageTextSegment> {
+  return Object.freeze({
+    index,
+    html: "",
+    plain: "",
+    sourceSha256: createHash("sha256").update("0:0:", "utf8").digest("hex"),
+  });
+}
+
+function validArticleTextSegment(segment: Readonly<XArticleStageTextSegment>): boolean {
+  return Number.isSafeInteger(segment.index) && segment.index >= 0 &&
+    typeof segment.html === "string" && typeof segment.plain === "string" &&
+    /^[a-f0-9]{64}$/u.test(segment.sourceSha256) &&
+    createHash("sha256")
+      .update(`${segment.html.length}:${segment.html}${segment.plain.length}:${segment.plain}`, "utf8")
+      .digest("hex") === segment.sourceSha256;
+}
+
+/**
+ * Paste one frozen rich-text segment at the exact body end. Empty segments are
+ * a verified caret-only no-op. This is exported so the live persistence harness
+ * exercises the same production seam as the Create flow.
+ */
+export async function appendCalibratedArticleBodySegment(
+  ctx: BrowserContext,
+  page: Page,
+  body: Locator,
+  editUrl: string,
+  segment: Readonly<XArticleStageTextSegment>,
+): Promise<boolean> {
+  if (!validArticleTextSegment(segment) || !isExactArticleEditRoute(page, editUrl)) return false;
+  if (!await placeCalibratedArticleBodyCaretAtEnd(page, body, editUrl)) return false;
+  if (segment.html.length === 0 && segment.plain.length === 0) return true;
+  try {
+    await ctx
+      .grantPermissions(["clipboard-read", "clipboard-write"], { origin: "https://x.com" })
+      .catch(() => {});
+    await page.evaluate(
+      async ({ html, plain }) => {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([html], { type: "text/html" }),
+            "text/plain": new Blob([plain], { type: "text/plain" }),
+          }),
+        ]);
+      },
+      { html: segment.html, plain: segment.plain },
+    );
+    if (!await placeCalibratedArticleBodyCaretAtEnd(page, body, editUrl)) return false;
+    await page.keyboard.press(`${modifier()}+KeyV`);
+    await page.waitForTimeout(1_000);
+    return isExactArticleEditRoute(page, editUrl);
+  } catch {
+    return false;
+  }
+}
+
+async function calibratedBodyMediaInputStillExact(
+  target: Readonly<XArticleBodyMediaTarget>,
+): Promise<boolean> {
+  try {
+    return await target.input.evaluate((candidate) => {
+      const box = candidate.getBoundingClientRect();
+      return candidate.isConnected &&
+        candidate.type === "file" &&
+        candidate.getAttribute("data-testid") === "fileInput" &&
+        candidate.accept ===
+          "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime" &&
+        candidate.multiple &&
+        candidate.getAttribute("capture") === null &&
+        box.width > 0 && box.height > 0;
+    });
+  } catch {
+    return false;
+  }
+}
+
+/** Revalidate and consume one attributed handle immediately before one set. */
+export async function setCalibratedArticleBodyMediaTarget(
+  page: Page,
+  body: Locator,
+  target: Readonly<XArticleBodyMediaTarget>,
+  occurrence: Readonly<XArticleBodyImagePreload>,
+): Promise<XArticleBodyImageSetPhase> {
+  const payload = xArticleBodyImageFilePayload(occurrence);
+  if (
+    payload === null ||
+    !ARTICLE_BODY_MEDIA_TARGETS.has(target) ||
+    CONSUMED_ARTICLE_BODY_MEDIA_TARGETS.has(target) ||
+    validatedArticleEditUrl(target.editUrl) !== target.editUrl ||
+    !isExactArticleEditRoute(page, target.editUrl) ||
+    !await calibratedBodyMediaInputStillExact(target) ||
+    !await placeCalibratedArticleBodyCaretAtEnd(page, body, target.editUrl) ||
+    !await calibratedBodyMediaInputStillExact(target) ||
+    !isExactArticleEditRoute(page, target.editUrl)
+  ) return "target_unavailable";
+
+  // Consume before awaiting the delivery boundary. A rejected promise may have
+  // dispatched the exact bytes, so neither this target nor any replacement is
+  // ever attempted again by the caller.
+  CONSUMED_ARTICLE_BODY_MEDIA_TARGETS.add(target);
+  try {
+    await target.input.setInputFiles(payload);
+    return "set_returned";
+  } catch {
+    return "set_delivery_unknown";
+  }
+}
+
+const productionArticleBodyImageStageDependencies: ArticleBodyImageStageDependencies = {
+  appendSegment: appendCalibratedArticleBodySegment,
+  resolveTarget: resolveCalibratedArticleBodyMediaTarget,
+  setTarget: setCalibratedArticleBodyMediaTarget,
+  observe: waitForCalibratedArticleBodyImages,
+};
+
+/**
+ * Stage ordered occurrences between N+1 frozen text segments. Every expected
+ * platform ambiguity becomes a closed partial result; no delivery is retried.
+ */
+export async function stageArticleBodyImages(
+  ctx: BrowserContext,
+  page: Page,
+  body: Locator,
+  editUrl: string,
+  segments: readonly Readonly<XArticleStageTextSegment>[],
+  imagesInput: Readonly<XArticleBodyImagePreloadSet>,
+  deps: ArticleBodyImageStageDependencies = productionArticleBodyImageStageDependencies,
+): Promise<Readonly<XArticleBodyImageStageResult>> {
+  const images = snapshotXArticleBodyImagePreloadSet(imagesInput);
+  if (
+    images === null ||
+    validatedArticleEditUrl(editUrl) !== editUrl ||
+    images.occurrences.length === 0 ||
+    segments.length !== images.occurrences.length + 1 ||
+    segments.some((segment, index) => segment.index !== index || !validArticleTextSegment(segment))
+  ) throw new Error("Invalid preloaded X Article body-image staging tuple.");
+
+  const handoffs = initialBodyImageHandoffs(images);
+  let observedPrefix: readonly Readonly<XArticleBodyImageVisualObservation>[] = Object.freeze([]);
+  const result = (
+    beforeReload: readonly Readonly<XArticleBodyImageVisualObservation>[] | null = null,
+  ): Readonly<XArticleBodyImageStageResult> => Object.freeze({
+    handoffs: Object.freeze([...handoffs]),
+    beforeReload: beforeReload === null ? null : Object.freeze([...beforeReload]),
+  });
+
+  for (let index = 0; index < images.occurrences.length; index += 1) {
+    const occurrence = images.occurrences[index];
+    let appended = false;
+    try {
+      appended = await deps.appendSegment(ctx, page, body, editUrl, segments[index]);
+    } catch {
+      appended = false;
+    }
+    if (!appended) {
+      handoffs[index] = bodyImageHandoff(occurrence, {
+        set: false,
+        setPhase: "target_unavailable",
+        observed: false,
+        verified: null,
+        sourceIdentitySha256: null,
+      });
+      return result();
+    }
+
+    let target: Readonly<XArticleBodyMediaTarget> | null = null;
+    try {
+      target = await deps.resolveTarget(page, body, editUrl);
+    } catch {
+      target = null;
+    }
+    if (target === null) {
+      handoffs[index] = bodyImageHandoff(occurrence, {
+        set: false,
+        setPhase: "target_unavailable",
+        observed: false,
+        verified: null,
+        sourceIdentitySha256: null,
+      });
+      return result();
+    }
+
+    let setPhase: XArticleBodyImageSetPhase;
+    try {
+      setPhase = await deps.setTarget(page, body, target, occurrence);
+    } catch {
+      setPhase = "set_delivery_unknown";
+    }
+    if (setPhase !== "set_returned") {
+      handoffs[index] = bodyImageHandoff(occurrence, {
+        set: setPhase === "set_delivery_unknown" ? null : false,
+        setPhase,
+        observed: false,
+        verified: null,
+        sourceIdentitySha256: null,
+      });
+      return result();
+    }
+
+    handoffs[index] = bodyImageHandoff(occurrence, {
+      set: true,
+      setPhase: "set_returned",
+      observed: false,
+      verified: null,
+      sourceIdentitySha256: null,
+    });
+    const prefixSegments = Object.freeze([
+      ...segments.slice(0, index + 1),
+      emptyArticleTextSegment(index + 1),
+    ]);
+    const prefixImages = Object.freeze(images.occurrences.slice(0, index + 1));
+    let observation: XArticleBodyImageObservationResult;
+    try {
+      observation = await deps.observe(page, editUrl, prefixSegments, prefixImages);
+    } catch {
+      observation = Object.freeze({ status: "invalid" });
+    }
+    if (
+      observation.status !== "observed" ||
+      observation.images.length !== index + 1 ||
+      !sameArticleBodyImageObservations(
+        observedPrefix,
+        observation.images.slice(0, observedPrefix.length),
+      )
+    ) return result();
+
+    const current = observation.images[index];
+    handoffs[index] = bodyImageHandoff(occurrence, {
+      set: true,
+      setPhase: "set_returned",
+      observed: true,
+      verified: null,
+      sourceIdentitySha256: current.sourceIdentitySha256,
+    });
+    observedPrefix = Object.freeze([...observation.images]);
+  }
+
+  let finalSegmentAppended = false;
+  try {
+    finalSegmentAppended = await deps.appendSegment(
+      ctx,
+      page,
+      body,
+      editUrl,
+      segments[segments.length - 1],
+    );
+  } catch {
+    finalSegmentAppended = false;
+  }
+  if (!finalSegmentAppended) return result();
+
+  let complete: XArticleBodyImageObservationResult;
+  try {
+    complete = await deps.observe(page, editUrl, segments, images.occurrences);
+  } catch {
+    complete = Object.freeze({ status: "invalid" });
+  }
+  if (
+    complete.status !== "observed" ||
+    !sameArticleBodyImageObservations(observedPrefix, complete.images)
+  ) return result();
+  return result(complete.images);
+}
+
 export interface ArticleDraftStageDependencies {
   openHub(page: Page): Promise<void>;
   locateCreate(page: Page): Promise<Locator | null>;
@@ -633,6 +1612,8 @@ export interface ArticleDraftStageDependencies {
     page: Page,
     cover: Readonly<XArticleCoverPreload>,
   ): Promise<XArticleCoverHandoff>;
+  /** Optional only for injected no-image tests; production always supplies it. */
+  bodyImages?: ArticleBodyImageStageDependencies;
   settle(page: Page): Promise<void>;
   /** Independent full-content and two-sided persisted-cover facts at `editUrl`. */
   verify(
@@ -642,7 +1623,16 @@ export interface ArticleDraftStageDependencies {
     expectedBody: string,
     expectedCoverWidth: number,
     expectedCoverHeight: number,
-  ): Promise<Readonly<{ content: boolean; cover: boolean }>>;
+    bodyImageProof?: Readonly<{
+      segments: readonly Readonly<XArticleStageTextSegment>[];
+      images: Readonly<XArticleBodyImagePreloadSet>;
+      beforeReload: readonly Readonly<XArticleBodyImageVisualObservation>[] | null;
+    }>,
+  ): Promise<Readonly<{
+    content: boolean;
+    cover: boolean;
+    bodyImages?: readonly boolean[];
+  }>>;
 }
 
 export async function stageArticleDraft(
@@ -651,16 +1641,29 @@ export async function stageArticleDraft(
   content: GeneratedContent,
   cover: Readonly<XArticleCoverPreload>,
   deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
+  bodyImagesInput: Readonly<XArticleBodyImagePreloadSet> = emptyXArticleBodyImagePreloadSet(),
 ): Promise<StageDraftResult> {
   let format: GeneratedContent["format"];
   try {
     format = snapshotXContentFormat(content);
     const snapshot = snapshotXArticleStageInput(content, format);
     const copiedCover = snapshotXArticleCoverPreload(cover);
-    if (copiedCover === null) {
+    const copiedBodyImages = snapshotXArticleBodyImagePreloadSet(bodyImagesInput);
+    if (
+      copiedCover === null ||
+      copiedBodyImages === null ||
+      !xArticleBodyImagePreloadsMatchBlocks(copiedBodyImages, snapshot.content.article!.blocks)
+    ) {
       throw new XDraftStageError("save_not_attempted", "article_create_autosave");
     }
-    return await stageArticleSnapshot(ctx, page, snapshot, copiedCover, deps);
+    return await stageArticleSnapshot(
+      ctx,
+      page,
+      snapshot,
+      copiedCover,
+      copiedBodyImages,
+      deps,
+    );
   } catch (error) {
     throw xDraftStageError(error, "save_not_attempted", "article_create_autosave");
   }
@@ -672,6 +1675,7 @@ async function stageArticleSnapshot(
   page: Page,
   snapshot: XArticleStageSnapshot,
   coverInput: Readonly<XArticleCoverPreload>,
+  bodyImagesInput: Readonly<XArticleBodyImagePreloadSet>,
   deps: ArticleDraftStageDependencies = productionArticleDraftStageDependencies,
 ): Promise<StageDraftResult> {
   const title = snapshot.title;
@@ -680,6 +1684,8 @@ async function stageArticleSnapshot(
   const receiptCodeBlockCount = snapshot.receiptCodeBlockCount;
   const codeAdvisories = snapshot.codeAdvisories;
   const codeLinkAdvisories = snapshot.codeLinkAdvisories;
+  const hasBodyImages = bodyImagesInput.occurrences.length > 0;
+  const bodyMode = hasBodyImages ? "segmented_rich_html" as const : "rich_html" as const;
   let createBtn: Locator | undefined;
 
   const saved = await runXDraftSaveFlow("article_create_autosave", {
@@ -705,28 +1711,59 @@ async function stageArticleSnapshot(
 
       await deps.writeTitle(page, titleBox, title);
 
-      const bodyBox = await deps.locateBody(page);
-      if (!bodyBox) throw new Error("Article body input unavailable after Create.");
+      let stagedBody = bodyImageStageNotAttempted(bodyImagesInput);
+      let bodyBox: Locator | null;
+      let stagedCover: XArticleCoverHandoff;
 
-      await deps.writeBody(ctx, page, bodyBox, html, plainFallback);
+      if (hasBodyImages) {
+        // The cover handoff has no `not_attempted` state. Complete that separate
+        // one-shot chain before any body-media delivery so every early body stop
+        // retains truthful #117 cover provenance.
+        stagedCover = await deps.stageCover(page, coverInput);
+      } else {
+        // Preserve the reviewed image-free sequence and failure classification.
+        bodyBox = await deps.locateBody(page);
+        if (!bodyBox) throw new Error("Article body input unavailable after Create.");
+        await deps.writeBody(ctx, page, bodyBox, html, plainFallback);
+        stagedCover = await deps.stageCover(page, coverInput);
+      }
 
-      // Hand the exact prevalidated payload to X. No path read or discovery is
-      // allowed after the browser boundary.
-      const stagedCover = await deps.stageCover(page, coverInput);
       const coverEditUrl = ARTICLE_COVER_EDIT_URLS.get(stagedCover);
       const partialEditUrl = coverEditUrl === undefined
         ? provisionalEditUrl
         : provisionalEditUrl === null || provisionalEditUrl === coverEditUrl
           ? coverEditUrl
           : null;
-      const partialValue = {
+      let partialValue = {
         nativeReference: partialEditUrl,
-        body: "rich_html" as const,
+        body: bodyMode,
         codeBlockCount: receiptCodeBlockCount,
         codeAdvisories,
         codeLinkAdvisories,
         cover: stagedCover,
+        bodyImages: stagedBody.handoffs,
       };
+
+      if (hasBodyImages) {
+        if (stagedCover.set !== true || partialEditUrl === null) {
+          return { verified: false, value: partialValue };
+        }
+        bodyBox = await deps.locateBody(page);
+        if (!bodyBox) {
+          stagedBody = bodyImageStageTargetUnavailable(bodyImagesInput);
+        } else {
+          stagedBody = await stageArticleBodyImages(
+            ctx,
+            page,
+            bodyBox,
+            partialEditUrl,
+            snapshot.segments,
+            bodyImagesInput,
+            deps.bodyImages ?? productionArticleBodyImageStageDependencies,
+          );
+        }
+        partialValue = { ...partialValue, bodyImages: stagedBody.handoffs };
+      }
 
       // Let autosave settle, then independently reload the captured edit URL and
       // match the intended title/body. Merely remaining on /edit/<id> is not
@@ -745,7 +1782,11 @@ async function stageArticleSnapshot(
           (coverEditUrl === undefined || coverEditUrl === settledEditUrl)
         ? settledEditUrl
         : null;
-      let reopen: Readonly<{ content: boolean; cover: boolean }> | null = null;
+      let reopen: Readonly<{
+        content: boolean;
+        cover: boolean;
+        bodyImages?: readonly boolean[];
+      }> | null = null;
       if (editUrl !== null) {
         try {
           reopen = await deps.verify(
@@ -755,6 +1796,13 @@ async function stageArticleSnapshot(
             plainFallback,
             coverInput.width,
             coverInput.height,
+            hasBodyImages
+              ? Object.freeze({
+                  segments: snapshot.segments,
+                  images: bodyImagesInput,
+                  beforeReload: stagedBody.beforeReload,
+                })
+              : undefined,
           );
         } catch {
           // Reopen verification is read-only. Its rejection leaves the exact
@@ -789,16 +1837,29 @@ async function stageArticleSnapshot(
         observed: finalObserved,
         verified: coverVerified,
       });
-      const verified = reopen !== null && reopen.content && cover.verified === true;
+      const bodyImages = Object.freeze(stagedBody.handoffs.map((image, index) =>
+        Object.freeze({
+          ...image,
+          verified: reopen === null
+            ? null
+            : image.set === true &&
+                image.observed === true &&
+                reopen.bodyImages?.[index] === true,
+        }) as Readonly<XArticleBodyImageHandoff>));
+      const verified = reopen !== null &&
+        reopen.content &&
+        cover.verified === true &&
+        bodyImages.every((image) => image.verified === true);
       return {
         verified,
         value: {
           nativeReference: editUrl,
-          body: "rich_html" as const,
+          body: bodyMode,
           codeBlockCount: receiptCodeBlockCount,
           codeAdvisories,
           codeLinkAdvisories,
           cover,
+          bodyImages,
         },
       };
     },
@@ -810,6 +1871,7 @@ async function stageArticleSnapshot(
     codeAdvisories: saved.value.codeAdvisories,
     codeLinkAdvisories: saved.value.codeLinkAdvisories,
     cover: saved.value.cover,
+    bodyImages: saved.value.bodyImages,
   });
   if (!articleHandoff) {
     // This is after Create returned; a malformed internal handoff cannot safely
@@ -1362,6 +2424,7 @@ export async function observeCalibratedArticleCover(
   editUrl: string,
   expectedWidth: number,
   expectedHeight: number,
+  expectedBodyMediaCount: number | null = 0,
 ): Promise<XArticleCoverObservationResult> {
   if (
     !isExactArticleEditRoute(page, editUrl) ||
@@ -1437,7 +2500,14 @@ export async function observeCalibratedArticleCover(
       },
     );
     if (!isExactArticleEditRoute(page, editUrl)) return Object.freeze({ status: "invalid" });
-    if (!raw.validEditor || raw.bodyMediaCount !== 0 || raw.candidates.length > 1) {
+    if (
+      (expectedBodyMediaCount !== null &&
+        (!Number.isSafeInteger(expectedBodyMediaCount) ||
+          expectedBodyMediaCount < 0 ||
+          raw.bodyMediaCount !== expectedBodyMediaCount)) ||
+      !raw.validEditor ||
+      raw.candidates.length > 1
+    ) {
       return Object.freeze({ status: "invalid" });
     }
     if (raw.candidates.length === 0) return Object.freeze({ status: "none" });
@@ -1462,6 +2532,7 @@ type ArticleCoverObservationPort = (
   editUrl: string,
   expectedWidth: number,
   expectedHeight: number,
+  expectedBodyMediaCount?: number | null,
 ) => Promise<XArticleCoverObservationResult>;
 
 /** At most 33 read-only samples over 8 seconds; never mutates or retries delivery. */
@@ -1471,6 +2542,7 @@ export async function waitForCalibratedArticleCoverObservation(
   expectedWidth: number,
   expectedHeight: number,
   observe: ArticleCoverObservationPort = observeCalibratedArticleCover,
+  expectedBodyMediaCount: number | null = 0,
 ): Promise<XArticleCoverObservationResult> {
   let last: XArticleCoverObservationResult = Object.freeze({ status: "invalid" });
   for (let attempt = 0; attempt < ARTICLE_COVER_OBSERVATION_POLL_ATTEMPTS; attempt += 1) {
@@ -1478,7 +2550,13 @@ export async function waitForCalibratedArticleCoverObservation(
       return Object.freeze({ status: "invalid" });
     }
     try {
-      const candidate = await observe(page, editUrl, expectedWidth, expectedHeight);
+      const candidate = await observe(
+        page,
+        editUrl,
+        expectedWidth,
+        expectedHeight,
+        expectedBodyMediaCount,
+      );
       if (
         candidate.status === "observed" &&
         candidate.observation.naturalWidth === expectedWidth &&
@@ -1598,6 +2676,7 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
     await page.waitForTimeout(1_000);
   },
   stageCover: stageArticleCover,
+  bodyImages: productionArticleBodyImageStageDependencies,
   async settle(page) {
     await page.waitForTimeout(2_500);
   },
@@ -1608,21 +2687,56 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
     expectedBody,
     expectedCoverWidth,
     expectedCoverHeight,
+    bodyImageProof,
   ) {
+    const expectedBodyImages = bodyImageProof?.images.occurrences ?? Object.freeze([]);
+    const bodyImageCount = expectedBodyImages.length;
     const beforeReloadCover = await waitForCalibratedArticleCoverObservation(
       page,
       editUrl,
       expectedCoverWidth,
       expectedCoverHeight,
+      observeCalibratedArticleCover,
+      bodyImageProof === undefined ? 0 : null,
     );
+    let beforeReloadBody: XArticleBodyImageObservationResult = Object.freeze({
+      status: "invalid",
+    });
+    if (bodyImageProof?.beforeReload !== null && bodyImageProof !== undefined) {
+      beforeReloadBody = await waitForCalibratedArticleBodyImages(
+        page,
+        editUrl,
+        bodyImageProof.segments,
+        expectedBodyImages,
+      );
+    }
+    const sameBeforeBody = bodyImageProof !== undefined &&
+      bodyImageProof.beforeReload !== null &&
+      beforeReloadBody.status === "observed" &&
+      sameArticleBodyImageObservations(
+        bodyImageProof.beforeReload,
+        beforeReloadBody.images,
+      );
     const content = await verifyArticleDraftSaved(
       page,
       editUrl,
       expectedTitle,
       expectedBody,
+      bodyImageProof === undefined
+        ? undefined
+        : Object.freeze({
+            segments: bodyImageProof.segments,
+            images: expectedBodyImages,
+          }),
     );
     if (!isExactArticleEditRoute(page, editUrl)) {
-      return Object.freeze({ content: false, cover: false });
+      return Object.freeze({
+        content: false,
+        cover: false,
+        ...(bodyImageProof === undefined
+          ? {}
+          : { bodyImages: Object.freeze(Array.from({ length: bodyImageCount }, () => false)) }),
+      });
     }
     // Preserve cover persistence independently when the canonical editor
     // remains exact but full title/body comparison is negative. Overall Article
@@ -1632,7 +2746,22 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
       editUrl,
       expectedCoverWidth,
       expectedCoverHeight,
+      observeCalibratedArticleCover,
+      bodyImageProof === undefined ? 0 : null,
     );
+    const afterReloadBody = sameBeforeBody && bodyImageProof !== undefined
+      ? await waitForCalibratedArticleBodyImages(
+          page,
+          editUrl,
+          bodyImageProof.segments,
+          expectedBodyImages,
+        )
+      : Object.freeze({ status: "invalid" as const });
+    const bodySequenceVerified = sameBeforeBody &&
+      beforeReloadBody.status === "observed" &&
+      afterReloadBody.status === "observed" &&
+      sameArticleBodyImageObservations(beforeReloadBody.images, afterReloadBody.images) &&
+      isExactArticleEditRoute(page, editUrl);
     return Object.freeze({
       content,
       cover: beforeReloadCover.status === "observed" &&
@@ -1642,6 +2771,13 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
           afterReloadCover.observation,
         ) &&
         isExactArticleEditRoute(page, editUrl),
+      ...(bodyImageProof === undefined
+        ? {}
+        : {
+            bodyImages: Object.freeze(
+              Array.from({ length: bodyImageCount }, () => bodySequenceVerified),
+            ),
+          }),
     });
   },
 };
@@ -1741,6 +2877,10 @@ export async function verifyArticleDraftSaved(
   editUrl: string,
   expectedTitle: string,
   expectedBody: string,
+  bodyImageExpectation?: Readonly<{
+    segments: readonly Readonly<XArticleStageTextSegment>[];
+    images: readonly Readonly<XArticleBodyImagePreload>[];
+  }>,
 ): Promise<boolean> {
   await page.goto(editUrl, { waitUntil: "domcontentloaded" });
   await page.waitForTimeout(1_500);
@@ -1770,12 +2910,31 @@ export async function verifyArticleDraftSaved(
   if (!titleObservation.routeExact) return false;
   const actualTitle = normalizeForMatch(titleObservation.text);
 
-  const bodyObservation = await bodyTextAtExactArticleRoute(page, body, editUrl);
-  if (!bodyObservation.routeExact) return false;
-  const actualBody = normalizeForMatch(bodyObservation.text);
+  let bodyMatches: boolean;
+  if (bodyImageExpectation === undefined) {
+    const bodyObservation = await bodyTextAtExactArticleRoute(page, body, editUrl);
+    if (!bodyObservation.routeExact) return false;
+    bodyMatches = normalizeForMatch(bodyObservation.text) === expectedBodyText;
+  } else {
+    try {
+      if (
+        normalizeForMatch(bodyImageExpectation.segments.map((segment) => segment.plain).join("\n")) !==
+          expectedBodyText
+      ) return false;
+      const bodyObservation = await observeCalibratedArticleBodyImages(
+        page,
+        editUrl,
+        bodyImageExpectation.segments,
+        bodyImageExpectation.images,
+      );
+      bodyMatches = bodyObservation.status === "observed";
+    } catch {
+      return false;
+    }
+  }
   if (!isExactArticleEditRoute(page, editUrl)) return false;
   return actualTitle === expectedTitleText &&
-    actualBody === expectedBodyText;
+    bodyMatches;
 }
 
 function modifier(): "Meta" | "Control" {

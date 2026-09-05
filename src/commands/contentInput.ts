@@ -1,5 +1,5 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { isMap, parse as parseYaml, parseDocument as parseYamlDocument } from "yaml";
 import { marked } from "marked";
 import { LocalValidationError } from "../capabilities/validation.js";
@@ -244,7 +244,19 @@ function readFileInput(fromPath: string): string {
   }
 }
 
-export function resolveContentInputDetails(opts: ContentInputOptions): ResolvedContentInput {
+export function resolveContentInputDetails(
+  opts: ContentInputOptions,
+  workingDirectory: string = process.cwd(),
+): ResolvedContentInput {
+  if (!isAbsolute(workingDirectory)) {
+    throw new LocalValidationError("The content-source working directory must be absolute.", {
+      code: "content_source_base_invalid",
+      field: "source",
+      actual: "invalid_base",
+      expected: "an absolute invocation working-directory snapshot",
+      unit: null,
+    });
+  }
   const hasFrom = opts.from !== undefined;
   const hasText = opts.text !== undefined;
 
@@ -320,7 +332,7 @@ export function resolveContentInputDetails(opts: ContentInputOptions): ResolvedC
     return { markdown: md, kind: "stdin" };
   }
 
-  const fromPath = resolve(opts.from!);
+  const fromPath = resolve(workingDirectory, opts.from!);
   if (!existsSync(fromPath)) {
     throw new LocalValidationError(`Base markdown not found: ${fromPath}`, {
       code: "content_source_not_found",
