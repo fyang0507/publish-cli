@@ -14,9 +14,15 @@ import {
 import { probeWechatAuth, type WeChatAuthDependencies } from "./wechat.js";
 import {
   AUTH_PLATFORMS,
+  AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+  type AuthNextStep,
   type AuthPlatform,
   type AuthReadiness,
 } from "./types.js";
+
+const XHS_INFO_WORKFLOW_REF = "publish xhs info --static";
+const ONEPOINT3ACRES_INFO_WORKFLOW_REF =
+  "publish 1point3acres info --static";
 
 export interface AuthProbeDependencies {
   browserBackend?: BrowserProbeBackend;
@@ -50,7 +56,23 @@ function externallyOwnedDescriptor(
     requiresHuman: !isXhs,
     nextStep: {
       executor: isXhs ? "agent_browser" : "human",
+      recoveryContext: isXhs
+        ? {
+            schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+            venue: "agent_owned_browser",
+            owner: "agent_browser",
+            launch: "entry_url",
+          }
+        : {
+            schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+            venue: "human_owned_handoff",
+            owner: "human",
+            launch: "entry_url",
+          },
       entryUrl: isXhs ? XHS_ENTRY_URL : ONEPOINT3ACRES_ENTRY_URL,
+      workflowRef: isXhs
+        ? XHS_INFO_WORKFLOW_REF
+        : ONEPOINT3ACRES_INFO_WORKFLOW_REF,
       instruction: isXhs
         ? "Open the creator portal with the browser agent, let the human scan the QR code if required, positively verify the authenticated creator UI, and continue in that same browser context."
         : "Have the human open and log in to 1point3acres, preserving that browser context. After login, a browser/computer-use agent may follow publish 1point3acres info there only when automation is available and the user has explicitly authorized it; otherwise the human follows the same guidance to fill, save, reopen, and verify. The human retains every publish decision.",
@@ -158,9 +180,59 @@ export function createAuthProbeRegistry(deps: AuthProbeDependencies = {}): AuthP
   return { ...registry, ...deps.probeOverrides };
 }
 
-function failureNextStep(platform: AuthPlatform, status: "network_error" | "probe_inconclusive") {
-  const browserOwned = platform === "xhs";
-  const humanHandoff = platform === "1point3acres";
+interface FailureRecovery {
+  nextStep: AuthNextStep;
+  requiresHuman: boolean;
+}
+
+function failureNextStep(
+  platform: AuthPlatform,
+  status: "network_error" | "probe_inconclusive",
+): FailureRecovery {
+  if (platform === "xhs") {
+    return {
+      requiresHuman: false,
+      nextStep: {
+        executor: "agent_browser",
+        recoveryContext: {
+          schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+          venue: "agent_owned_browser",
+          owner: "agent_browser",
+          launch: "entry_url",
+        },
+        entryUrl: XHS_ENTRY_URL,
+        workflowRef: XHS_INFO_WORKFLOW_REF,
+        instruction:
+          status === "network_error"
+            ? "Restore browser-agent network access, then open the Xiaohongshu creator portal and follow the static channel info in that same agent-owned browser context."
+            : "Open the Xiaohongshu creator portal in the agent-owned browser, positively verify its authenticated creator UI, and follow the static channel info in that same context without inferring readiness from local state.",
+        continueInSameContext: true,
+      },
+    };
+  }
+
+  if (platform === "1point3acres") {
+    return {
+      requiresHuman: true,
+      nextStep: {
+        executor: "human",
+        recoveryContext: {
+          schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+          venue: "human_owned_handoff",
+          owner: "human",
+          launch: "entry_url",
+        },
+        entryUrl: ONEPOINT3ACRES_ENTRY_URL,
+        workflowRef: ONEPOINT3ACRES_INFO_WORKFLOW_REF,
+        instruction:
+          status === "network_error"
+            ? "Have the human restore access to 1point3acres and open the known entry page in the human-owned browser, then follow the static channel info while preserving that context."
+            : "Have the human open and log in to 1point3acres in the human-owned browser, then follow the static channel info while preserving that context; do not infer readiness from another browser.",
+        continueInSameContext: true,
+      },
+    };
+  }
+
   const workflowRef =
     platform === "x"
       ? "publish x --help"
@@ -168,19 +240,49 @@ function failureNextStep(platform: AuthPlatform, status: "network_error" | "prob
         ? "publish linkedin draft --help"
         : platform === "reddit"
           ? "publish reddit draft --help"
-          : platform === "wechat"
-            ? "publish wechat check --help"
-            : undefined;
+          : "publish wechat check --help";
+  if (status === "network_error" || platform === "wechat") {
+    return {
+      requiresHuman: false,
+      nextStep: {
+        executor: "agent",
+        recoveryContext: {
+          schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+          venue: "local_runtime",
+          owner: "agent",
+          launch: "workflow_ref",
+        },
+        workflowRef,
+        instruction:
+          status === "network_error"
+            ? `Restore network access for ${platform}, then rerun publish auth check --platform ${platform}.`
+            : "Inspect the sanitized WeChat probe and egress configuration, then rerun publish auth check --platform wechat; do not infer readiness without authenticated API success.",
+        continueInSameContext: false,
+      },
+    };
+  }
+
+  const entryUrl =
+    platform === "x"
+      ? X_SELECTORS.homeUrl
+      : platform === "linkedin"
+        ? LI_LOGIN_SELECTORS.homeUrl
+        : REDDIT_LOGIN_SELECTORS.homeUrl;
   return {
-    executor: browserOwned ? ("agent_browser" as const) : humanHandoff ? ("human" as const) : ("agent" as const),
-    ...(workflowRef ? { workflowRef } : {}),
-    instruction:
-      status === "network_error"
-        ? `Restore network access for ${platform}, then rerun publish auth check --platform ${platform}.`
-        : humanHandoff
-          ? "Have the human log in to 1point3acres, preserving that browser context. After login, a browser/computer-use agent may follow publish 1point3acres info there only when automation is available and the user has explicitly authorized it; otherwise the human follows the same fill, save, reopen, and verification guidance."
-        : `Inspect the ${platform} authentication workflow without exposing credentials, then rerun publish auth check --platform ${platform}; do not infer readiness from local state alone.`,
-    continueInSameContext: browserOwned || humanHandoff,
+    requiresHuman: false,
+    nextStep: {
+      executor: "agent",
+      recoveryContext: {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: "cli_owned_persistent_profile",
+        owner: "publish_cli",
+        launch: "intended_cli_action_with_inspect",
+      },
+      entryUrl,
+      workflowRef,
+      instruction: `Launch the intended authenticated ${platform} CLI action with --inspect so recovery occurs in its CLI-owned persistent profile; do not open the entry URL in an unrelated browser or infer readiness from local state alone.`,
+      continueInSameContext: true,
+    },
   };
 }
 
@@ -190,8 +292,9 @@ export function unexpectedProbeReadiness(
   error: unknown,
   nowMs = Date.now(),
 ): AuthReadiness {
-  const network = error instanceof Error && /connect|network|socket|timeout|dns|proxy|tunnel/i.test(error.message);
+  const network = isNetworkLike(error);
   const status = network ? "network_error" : "probe_inconclusive";
+  const recovery = failureNextStep(platform, status);
   return {
     platform,
     ready: false,
@@ -206,9 +309,19 @@ export function unexpectedProbeReadiness(
         : "Authentication probe failed without a classifiable sanitized result.",
     },
     healed: [],
-    requiresHuman: false,
-    nextStep: failureNextStep(platform, status),
+    requiresHuman: recovery.requiresHuman,
+    nextStep: recovery.nextStep,
   };
+}
+
+function isNetworkLike(error: unknown): boolean {
+  try {
+    const message = error instanceof Error ? error.message : undefined;
+    return typeof message === "string" &&
+      /connect|network|socket|timeout|dns|proxy|tunnel/i.test(message);
+  } catch {
+    return false;
+  }
 }
 
 async function runProbeSafely(

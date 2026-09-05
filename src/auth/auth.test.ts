@@ -26,15 +26,40 @@ import {
   type PassiveBrowserProbeConfig,
 } from "./browser.js";
 import type { BrowserContext, Page } from "playwright";
-import { createAuthProbeRegistry, probeAuthPlatforms } from "./registry.js";
-import type { BrowserLocalEvidence } from "./types.js";
+import {
+  createAuthProbeRegistry,
+  probeAuthPlatforms,
+  unexpectedProbeReadiness,
+} from "./registry.js";
+import {
+  AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+  type BrowserLocalEvidence,
+} from "./types.js";
 import { probeWechatAuth } from "./wechat.js";
 import type { CheckResult, WeChatClient } from "../wechat/client.js";
-import { executeAuthCheck } from "../commands/auth-check.js";
+import { executeAuthCheck, renderAuthReport } from "../commands/auth-check.js";
+import {
+  ONEPOINT3ACRES_ENTRY_URL,
+  XHS_ENTRY_URL,
+} from "../capabilities/workflows.js";
 
 const CHECKED_AT = "2026-08-30T20:55:00.000Z";
 const NOW = Date.parse(CHECKED_AT);
 const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
+
+const CLI_OWNED_PROFILE_CONTEXT = {
+  schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+  venue: "cli_owned_persistent_profile",
+  owner: "publish_cli",
+  launch: "intended_cli_action_with_inspect",
+} as const;
+
+const LOCAL_RUNTIME_CONTEXT = {
+  schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+  venue: "local_runtime",
+  owner: "agent",
+  launch: "workflow_ref",
+} as const;
 
 function browserConfig(platform: "x" | "linkedin" | "reddit"): PassiveBrowserProbeConfig {
   return {
@@ -148,6 +173,25 @@ test("challenge wins when authenticated and challenge signals overlap", async ()
   );
   assert.equal(readiness.status, "human_challenge_required");
 });
+
+for (const platform of ["x", "linkedin", "reddit"] as const) {
+  test(`${platform}: human challenge keeps the agent as launcher of the exact CLI-owned profile`, () => {
+    const config = browserConfig(platform);
+    const result = evaluateBrowserReadiness(
+      config,
+      LONG_IDLE,
+      { kind: "challenge" },
+      CHECKED_AT,
+    );
+    assert.equal(result.status, "human_challenge_required");
+    assert.equal(result.nextStep?.executor, "agent");
+    assert.equal(result.requiresHuman, true);
+    assert.deepEqual(result.nextStep?.recoveryContext, CLI_OWNED_PROFILE_CONTEXT);
+    assert.equal(result.nextStep?.entryUrl, config.entryUrl);
+    assert.equal(result.nextStep?.workflowRef, config.workflowRef);
+    assert.equal(result.nextStep?.continueInSameContext, true);
+  });
+}
 
 test("browser signal polling uses one total budget rather than multiplying by selectors", async () => {
   const page = new DelayedSignalPage({});
@@ -296,8 +340,9 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
   });
 
   test(`${platform}: fresh-machine zero state points to the CLI-owned inspect flow`, () => {
+    const config = browserConfig(platform);
     const result = evaluateBrowserReadiness(
-      browserConfig(platform),
+      config,
       ZERO,
       { kind: "logged_out" },
       CHECKED_AT,
@@ -306,6 +351,9 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     assert.equal(result.status, "login_required");
     assert.equal(result.nextStep?.executor, "agent");
     assert.equal(result.requiresHuman, platform === "reddit");
+    assert.deepEqual(result.nextStep?.recoveryContext, CLI_OWNED_PROFILE_CONTEXT);
+    assert.equal(result.nextStep?.entryUrl, config.entryUrl);
+    assert.equal(result.nextStep?.workflowRef, config.workflowRef);
     assert.equal(result.nextStep?.continueInSameContext, true);
   });
 
@@ -345,6 +393,10 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     );
     assert.equal(result.status, "network_error");
     assert.equal(result.evidence.liveProbe, "network_error");
+    assert.equal(result.nextStep?.executor, "agent");
+    assert.deepEqual(result.nextStep?.recoveryContext, LOCAL_RUNTIME_CONTEXT);
+    assert.equal(result.nextStep?.entryUrl, undefined);
+    assert.equal(result.nextStep?.continueInSameContext, false);
   });
 
   test(`${platform}: missing selectors remain probe_inconclusive`, () => {
@@ -356,21 +408,37 @@ for (const platform of ["x", "linkedin", "reddit"] as const) {
     );
     assert.equal(result.status, "probe_inconclusive");
     assert.notEqual(result.status, "login_required");
+    assert.equal(result.nextStep?.executor, "agent");
+    assert.deepEqual(result.nextStep?.recoveryContext, CLI_OWNED_PROFILE_CONTEXT);
+    assert.equal(result.nextStep?.entryUrl, `https://${platform}.example.test/`);
+    assert.equal(result.nextStep?.continueInSameContext, true);
   });
 }
 
-test("browser zero state distinguishes required credentials from login", () => {
-  const result = evaluateBrowserReadiness(
-    { ...browserConfig("x"), credentialsConfigured: false },
-    ZERO,
-    { kind: "logged_out" },
-    CHECKED_AT,
-  );
-  assert.equal(result.status, "credentials_missing");
-  assert.equal(result.evidence.credentialsConfigured, false);
-  assert.equal(result.nextStep?.executor, "human");
-  assert.match(result.nextStep?.instruction ?? "", /Configure credentials/);
-});
+for (const platform of ["x", "linkedin", "reddit"] as const) {
+  test(`${platform}: missing required credentials preserve human participation in an agent-launched CLI profile`, () => {
+    const config = {
+      ...browserConfig(platform),
+      credentialsConfigured: false,
+      manualLoginSupported: false,
+    };
+    const result = evaluateBrowserReadiness(
+      config,
+      ZERO,
+      { kind: "logged_out" },
+      CHECKED_AT,
+    );
+    assert.equal(result.status, "credentials_missing");
+    assert.equal(result.evidence.credentialsConfigured, false);
+    assert.equal(result.nextStep?.executor, "agent");
+    assert.equal(result.requiresHuman, true);
+    assert.deepEqual(result.nextStep?.recoveryContext, CLI_OWNED_PROFILE_CONTEXT);
+    assert.equal(result.nextStep?.entryUrl, config.entryUrl);
+    assert.equal(result.nextStep?.workflowRef, config.workflowRef);
+    assert.equal(result.nextStep?.continueInSameContext, true);
+    assert.match(result.nextStep?.instruction ?? "", /Configure credentials/);
+  });
+}
 
 test("Reddit inspect flow can recover through manual credential entry", () => {
   const result = evaluateBrowserReadiness(
@@ -469,6 +537,12 @@ test("wechat: fresh-machine missing credentials returns executable setup nextSte
   assert.match(result.nextStep?.instruction ?? "", /publish wechat check/);
   assert.equal(result.nextStep?.executor, "human");
   assert.equal(result.nextStep?.entryUrl, "https://developers.weixin.qq.com/platform/");
+  assert.deepEqual(result.nextStep?.recoveryContext, {
+    schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+    venue: "human_owned_handoff",
+    owner: "human",
+    launch: "entry_url",
+  });
 });
 
 test("wechat: expired token is renewed automatically and reported in healed", async () => {
@@ -489,7 +563,7 @@ test("wechat: expired token is renewed automatically and reported in healed", as
 });
 
 test("wechat: rejected credentials, IP rejection, network, and inconclusive remain distinct", async () => {
-  const cases: Array<[CheckResult, string]> = [
+  const cases: Array<[CheckResult, string, "human_owned_handoff" | "local_runtime"]> = [
     [
       {
         ok: false,
@@ -499,6 +573,7 @@ test("wechat: rejected credentials, IP rejection, network, and inconclusive rema
         egressDescription: "fixture",
       },
       "credentials_rejected",
+      "human_owned_handoff",
     ],
     [
       {
@@ -510,6 +585,7 @@ test("wechat: rejected credentials, IP rejection, network, and inconclusive rema
         egressDescription: "fixture",
       },
       "ip_not_allowlisted",
+      "human_owned_handoff",
     ],
     [
       {
@@ -519,6 +595,7 @@ test("wechat: rejected credentials, IP rejection, network, and inconclusive rema
         egressDescription: "fixture",
       },
       "network_error",
+      "local_runtime",
     ],
     [
       {
@@ -528,9 +605,10 @@ test("wechat: rejected credentials, IP rejection, network, and inconclusive rema
         egressDescription: "fixture",
       },
       "probe_inconclusive",
+      "local_runtime",
     ],
   ];
-  for (const [fixture, expected] of cases) {
+  for (const [fixture, expected, expectedVenue] of cases) {
     const result = await probeWechatAuth({
       credentialsConfigured: () => true,
       inspectTokenCache: () => ({ present: false, expired: false }),
@@ -539,6 +617,15 @@ test("wechat: rejected credentials, IP rejection, network, and inconclusive rema
     });
     assert.equal(result.status, expected);
     assert.ok(result.nextStep);
+    assert.equal(
+      result.nextStep.recoveryContext.schemaVersion,
+      AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+    );
+    assert.equal(result.nextStep.recoveryContext.venue, expectedVenue);
+    assert.equal(
+      result.requiresHuman,
+      expectedVenue === "human_owned_handoff",
+    );
   }
 });
 
@@ -553,6 +640,27 @@ test("wechat: egress initialization network errors remain network_error", async 
   });
   assert.equal(result.status, "network_error");
   assert.equal(result.evidence.liveProbe, "network_error");
+  assert.deepEqual(result.nextStep?.recoveryContext, LOCAL_RUNTIME_CONTEXT);
+});
+
+test("wechat: hostile egress errors remain sanitized probe_inconclusive receipts", async () => {
+  const hostile = new Error();
+  Object.defineProperty(hostile, "message", {
+    get() {
+      throw new Error("MESSAGE_GETTER_SECRET");
+    },
+  });
+  const result = await probeWechatAuth({
+    credentialsConfigured: () => true,
+    inspectTokenCache: () => ({ present: false, expired: false }),
+    createClient: async () => {
+      throw hostile;
+    },
+    now: () => NOW,
+  });
+  assert.equal(result.status, "probe_inconclusive");
+  assert.deepEqual(result.nextStep?.recoveryContext, LOCAL_RUNTIME_CONTEXT);
+  assert.doesNotMatch(JSON.stringify(result), /MESSAGE_GETTER_SECRET/);
 });
 
 test("wechat: thrown check failures are sanitized and close failures cannot escape", async () => {
@@ -573,6 +681,7 @@ test("wechat: thrown check failures are sanitized and close failures cannot esca
   });
   assert.equal(closeCalled, true);
   assert.equal(result.status, "network_error");
+  assert.deepEqual(result.nextStep?.recoveryContext, LOCAL_RUNTIME_CONTEXT);
   assert.doesNotMatch(JSON.stringify(result), /DO_NOT_LEAK|app_secret|leaked-token/);
 });
 
@@ -608,6 +717,22 @@ test("registry exposes one shared probe seam for auth check and future info comm
   assert.equal(acres.nextStep?.continueInSameContext, true);
   assert.equal(xhs.nextStep?.executor, "agent_browser");
   assert.equal(acres.nextStep?.executor, "human");
+  assert.deepEqual(xhs.nextStep?.recoveryContext, {
+    schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+    venue: "agent_owned_browser",
+    owner: "agent_browser",
+    launch: "entry_url",
+  });
+  assert.deepEqual(acres.nextStep?.recoveryContext, {
+    schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+    venue: "human_owned_handoff",
+    owner: "human",
+    launch: "entry_url",
+  });
+  assert.equal(xhs.nextStep?.entryUrl, XHS_ENTRY_URL);
+  assert.equal(acres.nextStep?.entryUrl, ONEPOINT3ACRES_ENTRY_URL);
+  assert.equal(xhs.nextStep?.workflowRef, "publish xhs info --static");
+  assert.equal(acres.nextStep?.workflowRef, "publish 1point3acres info --static");
   assert.equal(xhs.requiresHuman, false);
   assert.equal(acres.requiresHuman, true);
   assert.equal(acres.verificationMode, "human_handoff");
@@ -616,6 +741,99 @@ test("registry exposes one shared probe seam for auth check and future info comm
   assert.match(acres.evidence.note ?? "", /otherwise the human follows the info guidance/i);
   assert.match(acres.nextStep?.instruction ?? "", /automation is available and the user has explicitly authorized it/i);
   assert.match(acres.nextStep?.instruction ?? "", /otherwise the human follows the same guidance/i);
+});
+
+test("unexpected probe failures preserve venue ownership, recovery references, and sanitized status", () => {
+  const externalCases = [
+    {
+      platform: "xhs" as const,
+      executor: "agent_browser",
+      requiresHuman: false,
+      venue: "agent_owned_browser",
+      owner: "agent_browser",
+      entryUrl: XHS_ENTRY_URL,
+      workflowRef: "publish xhs info --static",
+    },
+    {
+      platform: "1point3acres" as const,
+      executor: "human",
+      requiresHuman: true,
+      venue: "human_owned_handoff",
+      owner: "human",
+      entryUrl: ONEPOINT3ACRES_ENTRY_URL,
+      workflowRef: "publish 1point3acres info --static",
+    },
+  ] as const;
+  for (const fixture of externalCases) {
+    for (const [error, expectedStatus] of [
+      [new Error("socket timeout SECRET_DO_NOT_LEAK"), "network_error"],
+      [new Error("unclassified SECRET_DO_NOT_LEAK"), "probe_inconclusive"],
+    ] as const) {
+      const result = unexpectedProbeReadiness(fixture.platform, error, NOW);
+      assert.equal(result.status, expectedStatus);
+      assert.equal(
+        result.evidence.liveProbe,
+        expectedStatus === "network_error" ? "network_error" : "inconclusive",
+      );
+      assert.equal(result.nextStep?.executor, fixture.executor);
+      assert.equal(result.requiresHuman, fixture.requiresHuman);
+      assert.deepEqual(result.nextStep?.recoveryContext, {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: fixture.venue,
+        owner: fixture.owner,
+        launch: "entry_url",
+      });
+      assert.equal(result.nextStep?.entryUrl, fixture.entryUrl);
+      assert.equal(result.nextStep?.workflowRef, fixture.workflowRef);
+      assert.equal(result.nextStep?.continueInSameContext, true);
+      assert.doesNotMatch(JSON.stringify(result), /SECRET_DO_NOT_LEAK|socket timeout|unclassified/);
+    }
+  }
+
+  const browserCases = [
+    ["x", "https://x.com/home", "publish x --help"],
+    ["linkedin", "https://www.linkedin.com/feed/", "publish linkedin draft --help"],
+    ["reddit", "https://www.reddit.com/", "publish reddit draft --help"],
+  ] as const;
+  for (const [platform, entryUrl, workflowRef] of browserCases) {
+    const network = unexpectedProbeReadiness(
+      platform,
+      new Error("network proxy secret=DO_NOT_LEAK"),
+      NOW,
+    );
+    assert.equal(network.status, "network_error");
+    assert.deepEqual(network.nextStep?.recoveryContext, LOCAL_RUNTIME_CONTEXT);
+    assert.equal(network.nextStep?.entryUrl, undefined);
+    assert.equal(network.nextStep?.workflowRef, workflowRef);
+    assert.equal(network.nextStep?.continueInSameContext, false);
+
+    const inconclusive = unexpectedProbeReadiness(
+      platform,
+      new Error("unrecognized private=DO_NOT_LEAK"),
+      NOW,
+    );
+    assert.equal(inconclusive.status, "probe_inconclusive");
+    assert.deepEqual(inconclusive.nextStep?.recoveryContext, CLI_OWNED_PROFILE_CONTEXT);
+    assert.equal(inconclusive.nextStep?.entryUrl, entryUrl);
+    assert.equal(inconclusive.nextStep?.workflowRef, workflowRef);
+    assert.equal(inconclusive.nextStep?.continueInSameContext, true);
+    assert.match(inconclusive.nextStep?.instruction ?? "", /intended authenticated.*--inspect/i);
+    assert.doesNotMatch(JSON.stringify([network, inconclusive]), /DO_NOT_LEAK|secret=|private=/);
+  }
+});
+
+test("unexpected probe fallback cannot be escaped by a hostile error message", () => {
+  const hostile = new Error();
+  Object.defineProperty(hostile, "message", {
+    get() {
+      throw new Error("HOSTILE_MESSAGE_SECRET");
+    },
+  });
+  const result = unexpectedProbeReadiness("xhs", hostile, NOW);
+  assert.equal(result.status, "probe_inconclusive");
+  assert.equal(result.nextStep?.entryUrl, XHS_ENTRY_URL);
+  assert.equal(result.nextStep?.workflowRef, "publish xhs info --static");
+  assert.doesNotMatch(JSON.stringify(result), /HOSTILE_MESSAGE_SECRET/);
 });
 
 test("registry isolates a rejected platform and preserves multi-platform receipts", async () => {
@@ -694,6 +912,20 @@ test("auth command boundary returns stable partial-failure and success exit sema
   assert.doesNotMatch(JSON.stringify(totalFailure), /raw secret/);
 });
 
+test("human auth report renders executor, human need, and authoritative recovery context separately", () => {
+  const readiness = unexpectedProbeReadiness(
+    "1point3acres",
+    new Error("opaque failure SECRET_DO_NOT_LEAK"),
+    NOW,
+  );
+  const report = renderAuthReport([readiness]);
+  assert.match(report, /next owner: human \(human participation required\)/);
+  assert.match(report, /recovery context: human_owned_handoff \(owner=human, launch=entry_url\)/);
+  assert.match(report, new RegExp(`entry: ${ONEPOINT3ACRES_ENTRY_URL.replaceAll(".", "\\.")}`));
+  assert.match(report, /help: publish 1point3acres info --static/);
+  assert.doesNotMatch(report, /SECRET_DO_NOT_LEAK|opaque failure/);
+});
+
 test("auth CLI accepts a deliberate comma-separated platform list in first-seen order", () => {
   const run = spawnSync(
     process.execPath,
@@ -716,6 +948,8 @@ test("auth CLI help lists platform modes and removed --all fails actionably with
   assert.match(help.stdout, /Human-login\s+1point3acres/);
   assert.match(help.stdout, /nextStep\.executor owns and initiates the immediate step/);
   assert.match(help.stdout, /requiresHuman=true only when.*immediate step.*human participation/);
+  assert.match(help.stdout, /nextStep\.recoveryContext is a versioned venue\/owner\/launch boundary/);
+  assert.match(help.stdout, /entry URL never authorizes switching away from the named context/);
   assert.doesNotMatch(help.stdout, /--all/);
 
   const removed = spawnSync(process.execPath, [CLI_PATH, "auth", "check", "--all"], {

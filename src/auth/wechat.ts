@@ -6,7 +6,11 @@ import {
   type TokenCacheEvidence,
   type WeChatClient,
 } from "../wechat/client.js";
-import type { AuthNextStep, AuthReadiness } from "./types.js";
+import {
+  AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+  type AuthNextStep,
+  type AuthReadiness,
+} from "./types.js";
 
 const WECHAT_SETUP_WORKFLOW_REF =
   "publish wechat check --help";
@@ -32,6 +36,12 @@ function nextStep(
   if (status === "credentials_missing" || status === "credentials_rejected") {
     return {
       executor: "human",
+      recoveryContext: {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: "human_owned_handoff",
+        owner: "human",
+        launch: "entry_url",
+      },
       entryUrl: "https://developers.weixin.qq.com/platform/",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
       instruction: "Have the human obtain valid WECHAT_APP_ID and WECHAT_APP_SECRET from the WeChat Developer Platform. Then the agent sets them in .env, configures exactly one fixed egress (WECHAT_SSH_TUNNEL=[user@]host[:port] or WECHAT_PROXY_URL=socks5://[user:pass@]host:port; http(s) is also accepted), and runs publish wechat check. If it returns 40164, add the exact reported egress IP to IP白名单 and rerun.",
@@ -42,6 +52,12 @@ function nextStep(
     const ip = result && !result.ok ? result.egressIp : undefined;
     return {
       executor: "human",
+      recoveryContext: {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: "human_owned_handoff",
+        owner: "human",
+        launch: "entry_url",
+      },
       entryUrl: "https://developers.weixin.qq.com/platform/",
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
       instruction: `Add the observed egress IP${ip ? ` ${ip}` : ""} to IP白名单 and approve with the admin WeChat QR scan; then rerun publish wechat check.`,
@@ -51,6 +67,12 @@ function nextStep(
   if (status === "network_error") {
     return {
       executor: "agent",
+      recoveryContext: {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: "local_runtime",
+        owner: "agent",
+        launch: "workflow_ref",
+      },
       workflowRef: WECHAT_SETUP_WORKFLOW_REF,
       instruction: "Restore WECHAT_PROXY_URL or WECHAT_SSH_TUNNEL connectivity to api.weixin.qq.com, then rerun publish wechat check.",
       continueInSameContext: false,
@@ -58,6 +80,12 @@ function nextStep(
   }
   return {
     executor: "agent",
+    recoveryContext: {
+      schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+      venue: "local_runtime",
+      owner: "agent",
+      launch: "workflow_ref",
+    },
     workflowRef: WECHAT_SETUP_WORKFLOW_REF,
     instruction: "Inspect the sanitized WeChat probe stage and egress configuration, then rerun publish wechat check; do not assume readiness without an authenticated API success.",
     continueInSameContext: false,
@@ -201,5 +229,11 @@ function sanitizeApiNote(result: Exclude<CheckResult, { ok: true }>): string {
 }
 
 function isNetworkLike(error: unknown): boolean {
-  return error instanceof Error && /connect|network|socket|timeout|dns|proxy|tunnel/i.test(error.message);
+  try {
+    const message = error instanceof Error ? error.message : undefined;
+    return typeof message === "string" &&
+      /connect|network|socket|timeout|dns|proxy|tunnel/i.test(message);
+  } catch {
+    return false;
+  }
 }

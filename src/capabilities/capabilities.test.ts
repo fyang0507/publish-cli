@@ -471,6 +471,13 @@ test("info keeps Markdown guidance separate from readiness, sanitizes failures, 
   if (failure.envelope.mode !== "readiness") assert.fail("expected readiness mode");
   assert.equal(failure.envelope.readiness.status, "probe_inconclusive");
   assert.doesNotMatch(JSON.stringify(failure.envelope), /SECRET_VALUE|raw token/);
+  const failureRendered = renderChannelInfo(failure.envelope);
+  assert.match(
+    failureRendered,
+    /Recovery context: cli_owned_persistent_profile \(owner=publish_cli; launch=intended_cli_action_with_inspect\)/,
+  );
+  assert.match(failureRendered, /intended authenticated linkedin CLI action with --inspect/);
+  assert.doesNotMatch(failureRendered, /SECRET_VALUE|raw token/);
 });
 
 test("human info is readiness-first and renders the three Markdown sections", () => {
@@ -494,7 +501,7 @@ test("human info is readiness-first and renders the three Markdown sections", ()
   assert.match(rendered, /freepublish\/\*/);
 });
 
-test("external readiness descriptors remain actionable without a typed static workflow", async () => {
+test("external readiness descriptors render their owned context and static workflow", async () => {
   const registry = createAuthProbeRegistry({ now: () => Date.parse(CHECKED_AT) });
   const xhsReadiness = await registry.xhs();
   const xhsRendered = renderChannelInfo({
@@ -508,9 +515,13 @@ test("external readiness descriptors remain actionable without a typed static wo
   assert.match(xhsRendered, /external preflight required \(agent_check_required\)/);
   assert.match(xhsRendered, /Next owner: agent_browser/);
   assert.doesNotMatch(xhsRendered, /Next owner: agent_browser \(human participation required\)/);
+  assert.match(
+    xhsRendered,
+    /Recovery context: agent_owned_browser \(owner=agent_browser; launch=entry_url\)/,
+  );
   assert.match(xhsRendered, /Next: Open the creator portal with the browser agent/);
   assert.match(xhsRendered, /continue.*same browser context/is);
-  assert.doesNotMatch(xhsRendered, /Recovery help:/);
+  assert.match(xhsRendered, /Recovery help: publish xhs info --static/);
   assert.equal(xhsReadiness.requiresHuman, false);
 
   const acresReadiness = await registry["1point3acres"]();
@@ -526,10 +537,14 @@ test("external readiness descriptors remain actionable without a typed static wo
   assert.match(acresRendered, /human open and log in/i);
   assert.match(acresRendered, /automation is available and the user has explicitly authorized it/i);
   assert.match(acresRendered, /otherwise the human follows the same guidance/i);
+  assert.match(
+    acresRendered,
+    /Recovery context: human_owned_handoff \(owner=human; launch=entry_url\)/,
+  );
   assert.equal(acresReadiness.nextStep?.executor, "human");
   assert.equal(acresReadiness.nextStep?.continueInSameContext, true);
   assert.equal(acresReadiness.requiresHuman, true);
-  assert.doesNotMatch(acresRendered, /Recovery help:/);
+  assert.match(acresRendered, /Recovery help: publish 1point3acres info --static/);
 });
 
 test("X uses official twitter-text fixtures from issue #40", () => {
