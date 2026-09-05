@@ -124,6 +124,9 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
       out.push(
         `Next owner: ${nextStep.executor}${readiness.requiresHuman ? " (human participation required)" : ""}`,
       );
+      out.push(
+        `Recovery context: ${nextStep.recoveryContext.venue} (owner=${nextStep.recoveryContext.owner}; launch=${nextStep.recoveryContext.launch})`,
+      );
       out.push(`Next: ${nextStep.instruction}`);
       if (nextStep.entryUrl) out.push(`Recovery entry: ${nextStep.entryUrl}`);
       if (nextStep.workflowRef) out.push(`Recovery help: ${nextStep.workflowRef}`);

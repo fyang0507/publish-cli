@@ -32,11 +32,28 @@ a profile tree, or change the local evidence. Repeating a zero-state check is
 therefore idempotent.
 
 Every receipt has a binary `ready` field. `status` explains a false result and
-selects its recovery. In particular, `probe_inconclusive` means the CLI reached
-the site but could not positively identify authenticated, logged-out, or
-challenge state. It is non-ready and exits `1`; the agent must follow `nextStep`,
-open the entry URL with a headful browser agent, inspect the visible state, and
-continue the workflow in that same context only after authentication is proven.
+selects its recovery. `nextStep.executor` identifies who initiates the immediate
+step, while `requiresHuman` independently identifies whether that step cannot
+finish without human participation. Its separately versioned
+`nextStep.recoveryContext` (`publish.auth-recovery-context/v1`) is authoritative
+about where recovery occurs:
+
+- `cli_owned_persistent_profile`: the agent launches the intended channel action
+  with `--inspect`; any human login or challenge happens in that exact visible
+  CLI-owned profile. `entryUrl` describes the destination inside that context
+  and must not be opened in an unrelated browser.
+- `agent_owned_browser`: the browser agent opens `entryUrl` and preserves that
+  browser context.
+- `human_owned_handoff`: the human opens `entryUrl` and retains ownership of the
+  handoff context.
+- `local_runtime`: the agent follows `workflowRef`; there is no browser-context
+  continuity claim.
+
+In particular, `probe_inconclusive` means the CLI reached the site but could not
+positively identify authenticated, logged-out, or challenge state. It is
+non-ready and exits `1`; the agent must follow the named recovery context and
+prove authentication before continuing. `network_error` instead means the
+transport failed and remains a distinct local/network recovery.
 
 WeChat preserves the credential → token → IP-allowlist stages. A missing or
 expired token may be renewed through the normal App ID/Secret exchange; successful
@@ -52,8 +69,10 @@ publish auth check --platform wechat,xhs --json
 The platform list is always explicit and deliberate. There is no `--all`.
 
 - CLI-probed: `x`, `linkedin`, `reddit`, `wechat`.
-- Agent-owned: `xhs`, `1point3acres`; these return `agent_check_required` with a
-  browser recovery step because publish-cli does not own their browser context.
+- Agent-owned browser: `xhs` returns `agent_check_required` with the creator URL
+  and static info reference.
+- Human-owned handoff: `1point3acres` returns `human_login_required`; its known
+  entry URL and static info reference remain present even after probe failures.
 
 - Exit 0: every requested platform has `ready: true`.
 - Exit 1: one or more platforms have `ready: false`; follow `nextStep`.

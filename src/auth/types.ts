@@ -30,6 +30,35 @@ export type LiveProbeEvidence =
   | "inconclusive"
   | "not_run";
 
+export const AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION =
+  "publish.auth-recovery-context/v1" as const;
+
+export type AuthRecoveryContext =
+  | {
+      schemaVersion: typeof AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION;
+      venue: "cli_owned_persistent_profile";
+      owner: "publish_cli";
+      launch: "intended_cli_action_with_inspect";
+    }
+  | {
+      schemaVersion: typeof AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION;
+      venue: "agent_owned_browser";
+      owner: "agent_browser";
+      launch: "entry_url";
+    }
+  | {
+      schemaVersion: typeof AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION;
+      venue: "human_owned_handoff";
+      owner: "human";
+      launch: "entry_url";
+    }
+  | {
+      schemaVersion: typeof AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION;
+      venue: "local_runtime";
+      owner: "agent";
+      launch: "workflow_ref";
+    };
+
 /** Sanitized evidence only. Cookie/token values and page content never belong here. */
 export interface AuthEvidence {
   profilePresent?: boolean;
@@ -48,6 +77,8 @@ export interface AuthEvidence {
 export interface AuthNextStep {
   /** Role that owns and initiates the immediate next step. */
   executor: "agent" | "agent_browser" | "human";
+  /** Versioned venue ownership; `entryUrl` never overrides this launch boundary. */
+  recoveryContext: AuthRecoveryContext;
   entryUrl?: string;
   /** Optional separately discoverable help command. Omit when this info response is the complete workflow. */
   workflowRef?: string;

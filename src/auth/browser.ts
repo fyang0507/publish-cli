@@ -14,6 +14,7 @@ import type {
   BrowserLiveObservation,
   BrowserLocalEvidence,
 } from "./types.js";
+import { AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION } from "./types.js";
 
 interface CookieShape {
   name?: unknown;
@@ -202,7 +203,13 @@ function browserNextStep(
   kind: "credentials" | "login" | "challenge",
 ): AuthNextStep {
   return {
-    executor: kind === "credentials" || kind === "challenge" ? "human" : "agent",
+    executor: "agent",
+    recoveryContext: {
+      schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+      venue: "cli_owned_persistent_profile",
+      owner: "publish_cli",
+      launch: "intended_cli_action_with_inspect",
+    },
     entryUrl: config.entryUrl,
     workflowRef: config.workflowRef,
     instruction:
@@ -268,6 +275,12 @@ export function evaluateBrowserReadiness(
       requiresHuman: false,
       nextStep: {
         executor: "agent",
+        recoveryContext: {
+          schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+          venue: "local_runtime",
+          owner: "agent",
+          launch: "workflow_ref",
+        },
         workflowRef: config.workflowRef,
         instruction: `Restore network/browser access to ${config.entryUrl}, then rerun publish auth check --platform ${config.platform}.`,
         continueInSameContext: false,
@@ -281,6 +294,12 @@ export function evaluateBrowserReadiness(
     requiresHuman: false,
     nextStep: {
       executor: "agent",
+      recoveryContext: {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: "cli_owned_persistent_profile",
+        owner: "publish_cli",
+        launch: "intended_cli_action_with_inspect",
+      },
       entryUrl: config.entryUrl,
       workflowRef: config.workflowRef,
       instruction: `The passive ${config.platform} probe was inconclusive. ${config.loginInstruction}`,
