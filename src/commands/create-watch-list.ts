@@ -53,6 +53,15 @@ export function registerCreateWatchListCommand(x: Command): void {
     )
     .option("--inspect", "Headful browser if a (re-)login is needed, so a human can calibrate")
     .option("--json", "Emit machine JSON instead of the human-readable summary")
+    .addHelpText(
+      "after",
+      "\nList member-add safety (read before any mutation):\n" +
+        "  Run --dry-run first to inspect the exact proposed delta. A large initial build makes many first-time adds and can trigger X's account-wide member-add lock, which also blocks member adds in the native UI across every List.\n" +
+        "  Live observation 2026-07-01: a 72-member build at about 350 ms per add triggered the lock; recovery was around 24 hours. That duration and all current limits remain X/server-authoritative, not a retry timer.\n" +
+        "  On the lock or its not-allowed/403 signal, the command stops. Do not retry member adds until X permits them again.\n" +
+        "  Refreshing an existing --x-list adds only the missing delta and throttles additions to about 3 seconds each. It is safer than a large first build, not guaranteed against server limits.\n" +
+        "  This command can mutate List creation, membership, and privacy, but it never publishes content.\n",
+    )
     .action(async (opts: CreateWatchListOptions) => {
       await runCreateWatchList(opts);
     });
