@@ -60,10 +60,11 @@ The platform list is always explicit and deliberate. There is no `--all`.
 - Exit 2: invalid usage, including a malformed platform list, missing option
   value, unknown option/platform, removed `--all`, or a missing `--platform`.
 
-## Future `info` integration
+## Channel info integration
 
-`src/auth/registry.ts` exports `probeAuth()` and `probeAuthPlatforms()` as the
-single reusable seam. Issue #32 must call this seam and include the returned
-readiness in each `publish <channel> info` response. `info` itself should still
-exit successfully when auth is not ready. The capability registry/info commands
-are intentionally not implemented as part of issue #45.
+Default `publish <channel> info` uses `src/auth/registry.ts`'s `probeAuth()` seam
+and includes the returned readiness without turning a non-ready result into a
+command failure. `publish <channel> info --static` is a separate capability-only
+path: it loads only the selected packaged Markdown source, marks readiness as
+skipped and unavailable, and does not inspect profiles or tokens, launch a
+browser, use the network or API, renew credentials, or access the platform.

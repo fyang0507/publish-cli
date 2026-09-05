@@ -20,6 +20,19 @@ authentication, platform constraints, current readiness, recovery, executor
 ownership, and stop conditions. A non-ready result still returns the static
 contract and a structured readiness receipt.
 
+When browser, network, API, token, profile, and platform access are forbidden,
+request only the selected channel's packaged guidance:
+
+```bash
+publish <channel> info --static --json
+```
+
+The versioned response uses `mode: "static"`, marks readiness as unavailable
+and skipped, and records that every runtime-access attempt was false. Without
+`--static`, `info` retains its bounded readiness probe. Capability sources are
+loaded independently, so an invalid unrelated channel source cannot break the
+selected query.
+
 ```bash
 publish x info --json
 publish linkedin info --json
