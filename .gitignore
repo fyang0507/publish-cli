@@ -3,6 +3,7 @@ dist/
 .env
 *.db
 .DS_Store
+.playwright-cli/
 
 # Local runtime data (browser profile, cookie cache, sqlite) lives OFF-repo under
 # PUBLISH_DATA_DIR (~/.publish-cli by default). Ignore any local .runtime just in case.
