@@ -261,10 +261,16 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Reply-ledger claim\/finalization is deliberately skipped/);
   assert.match(x, /later real run first claims the normalized target and may refuse finalized history unless `--force`/);
   assert.match(x, /`--force` never bypasses an in-flight or retained reservation/);
-  assert.match(x, /share the same live SQLite file atomically reserve the normalized target before browser staging/);
-  assert.match(x, /Separate database files are not coordinated/);
-  assert.match(x, /`--force` may intentionally bypass finalized history, but it never bypasses an active, stale, or ambiguous reservation/);
-  assert.match(x, /24-hour-old claim is only eligible for explicit recovery; age never deletes it or starts staging/);
+  assert.match(x, /coordinate only on one machine-local X profile origin and the same live SQLite file/);
+  assert.match(x, /configured durable reply database.*binds to it atomically before browser loading/s);
+  assert.match(x, /copied database.*fails before browser work.*not cross-machine coordination/s);
+  assert.match(x, /UUID identifies the originating local profile, not a physical machine, and copied profiles are unsupported/);
+  assert.match(x, /unbound legacy database is bound prospectively.*legacy row remains origin-unknown/s);
+  assert.match(x, /`info`, action help, and `--dry-run` do not create or read this identity/);
+  assert.match(x, /Origin-unknown or origin-mismatched history is never force-bypassed/);
+  assert.match(x, /24-hour-old matching-origin claim is only eligible for explicit recovery/);
+  assert.match(x, /origin-unknown or origin-mismatched reservation cannot be recovered/);
+  assert.match(x, /Recovery receipts expose only the originating opaque UUID and `matched`, `unknown`, or `mismatch`/);
   assert.match(x, /ensure the prior process stopped and check X Unsent\/Drafts in the exact CLI-owned profile used by that run/);
   assert.match(x, /If a matching draft exists or the comparison is uncertain, leave the reservation in place/);
   assert.match(x, /`--recover-stale-reservation-after-confirming-no-draft` clears the stale claim and exits without staging/);
@@ -318,7 +324,7 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.doesNotMatch(x, /reply target preserved|target preserved|Already staged a reply to/i);
   assert.match(x, /Only positive content and exact-target facts together could finalize `staged` and exit 0/);
   assert.match(x, /Save-progress errors and failure receipts are bounded and do not expose raw selectors, page text, credentials, private paths/);
-  assert.match(x, /typed `save_not_attempted` error releases only that run's owner-matched reservation/);
+  assert.match(x, /typed `save_not_attempted` error releases only that run's owner- and origin-matched reservation/);
   assert.match(x, /`save_delivery_unknown`, an untyped error, or a malformed whole result retains the reservation/);
   assert.match(x, /target-unverified result, or a typed `save_delivered_unverified` error without row details, atomically finalizes durable `staged-unverified` history/);
   assert.match(x, /Only after confidently finding no matching draft.*separate explicit `--force`/s);
@@ -913,9 +919,13 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /Target ID\/URL validation is syntax-only; existence, visibility, and reply eligibility remain unverified until a real run reaches X/,
     /real run first claims the normalized target, then may refuse finalized history unless --force/,
     /--force never bypasses an in-flight or retained reservation/,
-    /atomically reserve the normalized target before browser staging when they share the same live SQLite file/,
-    /--force bypasses finalized history only; it never bypasses an active, stale, or ambiguous reservation/,
-    /24 hours is only eligible for explicit review-based recovery; age never clears it or starts staging/,
+    /Coordination is one-machine\/local-profile only: real runs must share the same live SQLite file and opaque X profile origin/,
+    /DB binds atomically before browser loading.*different profile or copied DB fails before X/s,
+    /First post-upgrade binding is prospective: legacy rows survive with origin unknown and cannot be attributed, force-bypassed, or recovered/,
+    /Help and --dry-run do not create or read the identity/,
+    /--force bypasses matching-origin finalized history only; it never bypasses a reservation or unknown\/mismatched origin/,
+    /matching-origin claim aged 24 hours is only eligible for explicit review-based recovery/,
+    /Recovery reports only the opaque origin id and matched\/unknown\/mismatch/,
     /--recover-stale-reservation-after-confirming-no-draft attests the prior process stopped, X Unsent\/Drafts was checked in the exact CLI-owned profile used by that run, and no matching reply draft was found/,
     /If a matching draft exists or the comparison is uncertain, leave the reservation in place/,
     /Recovery clears only the stale claim and exits/,
@@ -929,7 +939,7 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
     /Live calibration found no exact numeric target-id signal in the content-matched Unsent row or its reopened composer/,
     /Every current returned reply Save finalizes staged-unverified history and exits 1, even when the content row verifies/,
     /Only content plus an exact target id bound to the same matched draft could exit 0/,
-    /Typed proof that Save was not attempted releases only this run's owner-matched reservation/,
+    /Typed proof that Save was not attempted releases only this run's owner- and origin-matched reservation/,
     /delivery-unknown or malformed whole result retains it/,
     /typed Save-delivered-unverified error finalizes staged-unverified protection without inventing missing row or target facts/,
     /Only after confidently finding no matching draft may a separate --force run intentionally bypass staged-unverified finalized history/,

@@ -12,7 +12,14 @@ import {
   type ReplyReservation,
 } from "../db.js";
 import {
+  X_PROFILE_ORIGIN_SCHEMA_VERSION,
+  loadOrCreateXProfileOrigin,
+  snapshotReplyOriginBoundaryError,
+} from "../replyOrigin.js";
+import {
   executeReplyRealRun,
+  executeReplyReservationRecovery,
+  receiptForXReplyOutcome,
   type ReplyLedgerPort,
   type ReplyRealRunDependencies,
   type ReplyRealRunInput,
@@ -29,6 +36,8 @@ const CLI_PATH = fileURLToPath(new URL("../cli.js", import.meta.url));
 const RECOVERY_FLAG = "--recover-stale-reservation-after-confirming-no-draft";
 const TARGET_A = "1234567890123456789";
 const TARGET_B = "9876543210987654321";
+const ORIGIN_ID = "11111111-1111-4111-8111-111111111111";
+const OTHER_ORIGIN_ID = "22222222-2222-4222-8222-222222222222";
 const NOW = new Date("2026-09-03T12:00:00.000Z");
 
 const CONTENT: GeneratedContent = {
@@ -152,7 +161,7 @@ function dependencies(
 ): ReplyRealRunDependencies {
   return {
     async openLedger() {
-      return new ReplyLedger(dbFile);
+      return new ReplyLedger(dbFile, ORIGIN_ID);
     },
     async loadStageReplyDraft() {
       onLoad?.();
@@ -175,7 +184,8 @@ function reservationRow(dbFile: string, targetTweetId: string): ReplyReservation
     .prepare(
       `SELECT target_tweet_id AS targetTweetId,
               reservation_id AS reservationId,
-              reserved_at AS reservedAt
+              reserved_at AS reservedAt,
+              origin_id AS originId
          FROM reply_reservations WHERE target_tweet_id = ?`,
     )
     .get(targetTweetId) as ReplyReservation | undefined);
@@ -209,31 +219,167 @@ test("reservation schema is additive and preserves a legacy finalized ledger", (
       ).run(TARGET_A, NOW.toISOString(), "staged", null);
     });
 
-    const ledger = new ReplyLedger(dbFile);
-    assert.deepEqual(ledger.find(TARGET_A), {
-      targetTweetId: TARGET_A,
-      stagedAt: NOW.toISOString(),
-      status: "staged",
-      draftRef: null,
-    });
-    assert.equal(ledger.claimReservation(TARGET_A, { now: NOW }).kind, "already_staged");
+    const ledger = new ReplyLedger(dbFile, ORIGIN_ID);
+    for (const force of [false, true]) {
+      assert.throws(
+        () => ledger.claimReservation(TARGET_A, { now: NOW, force }),
+        (error: unknown) => {
+          assert.deepEqual(snapshotReplyOriginBoundaryError(error), {
+            originId: null,
+            match: "unknown",
+            scope: "finalized_entry",
+          });
+          return true;
+        },
+      );
+    }
     const separate = ledger.claimReservation(TARGET_B, {
       now: NOW,
       reservationId: "new-table-owner",
     });
     assert.equal(separate.kind, "acquired");
     if (separate.kind !== "acquired") throw new Error("new reservation table was unavailable");
+    assert.equal(separate.reservation.originId, ORIGIN_ID);
     assert.equal(ledger.releaseReservation(separate.reservation), true);
-    const forced = ledger.claimReservation(TARGET_A, {
-      force: true,
-      now: NOW,
-      reservationId: "legacy-force-owner",
-    });
-    assert.equal(forced.kind, "acquired");
-    if (forced.kind !== "acquired") throw new Error("forced legacy claim was not acquired");
-    assert.equal(ledger.releaseReservation(forced.reservation), true);
-    assert.equal(ledger.find(TARGET_A)?.status, "staged");
     ledger.close();
+    withRawDb(dbFile, (db) => {
+      assert.deepEqual(
+        db.prepare(
+          "SELECT target_tweet_id AS targetTweetId, status, origin_id AS originId FROM reply_ledger WHERE target_tweet_id = ?",
+        ).get(TARGET_A),
+        { targetTweetId: TARGET_A, status: "staged", originId: null },
+      );
+      assert.equal(
+        (db.prepare("SELECT origin_id AS originId FROM reply_profile_binding WHERE singleton = 1")
+          .get() as { originId: string }).originId,
+        ORIGIN_ID,
+      );
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("machine-local X profile origin is persistent and the database binds future rows to it", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-reply-origin-profile-"));
+  const profileDir = join(dir, "x-profile");
+  const originFile = join(profileDir, ".publish-origin.json");
+  const dbFile = join(dir, "publish.db");
+  try {
+    mkdirSync(profileDir, { recursive: true });
+    const first = loadOrCreateXProfileOrigin(originFile);
+    const second = loadOrCreateXProfileOrigin(originFile);
+    assert.deepEqual(second, first);
+    assert.equal(first.schemaVersion, X_PROFILE_ORIGIN_SCHEMA_VERSION);
+
+    const ledger = new ReplyLedger(dbFile, first.originId);
+    const claim = ledger.claimReservation(TARGET_A, { now: NOW, reservationId: "new-owner" });
+    assert.equal(claim.kind, "acquired");
+    if (claim.kind !== "acquired") throw new Error("new reservation was not acquired");
+    assert.equal(claim.reservation.originId, first.originId);
+    ledger.finalizeReservation(claim.reservation, { status: "staged-unverified" });
+    ledger.close();
+
+    withRawDb(dbFile, (db) => {
+      assert.equal(
+        (db.prepare("SELECT origin_id AS originId FROM reply_profile_binding WHERE singleton = 1")
+          .get() as { originId: string }).originId,
+        first.originId,
+      );
+      assert.equal(
+        (db.prepare("SELECT origin_id AS originId FROM reply_ledger WHERE target_tweet_id = ?")
+          .get(TARGET_A) as { originId: string }).originId,
+        first.originId,
+      );
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a copied database bound to another profile fails before browser loading with opaque evidence", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-reply-origin-mismatch-"));
+  const dbFile = join(dir, "publish.db");
+  try {
+    const seed = new ReplyLedger(dbFile, ORIGIN_ID);
+    seed.close();
+
+    let stageLoaderCalled = false;
+    const outcome = await executeReplyRealRun(input(TARGET_A, true), {
+      async openLedger() {
+        return new ReplyLedger(dbFile, OTHER_ORIGIN_ID);
+      },
+      async loadStageReplyDraft() {
+        stageLoaderCalled = true;
+        return async () => stageResult(TARGET_A);
+      },
+    });
+    assert.equal(outcome.kind, "reply_origin_mismatch");
+    assert.equal(stageLoaderCalled, false);
+    assert.deepEqual(outcome.origin, {
+      originId: ORIGIN_ID,
+      match: "mismatch",
+      scope: "database",
+    });
+    const receipt = receiptForXReplyOutcome(outcome, "reply");
+    assert.equal(receipt.platformTouched, false);
+    assert.ok(receipt.remoteResidue.some((entry) =>
+      entry.state === "reply_origin_mismatch" && entry.reference === ORIGIN_ID));
+    const rendered = JSON.stringify(receipt);
+    assert.doesNotMatch(rendered, new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.doesNotMatch(rendered, new RegExp(OTHER_ORIGIN_ID));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy unknown reservations survive migration and block force and recovery before X", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-reply-origin-legacy-reservation-"));
+  const dbFile = join(dir, "publish.db");
+  try {
+    withRawDb(dbFile, (db) => {
+      db.exec(`
+        CREATE TABLE reply_reservations (
+          target_tweet_id TEXT PRIMARY KEY,
+          reservation_id  TEXT NOT NULL UNIQUE,
+          reserved_at     TEXT NOT NULL
+        );
+      `);
+      db.prepare(
+        "INSERT INTO reply_reservations (target_tweet_id, reservation_id, reserved_at) VALUES (?, ?, ?)",
+      ).run(
+        TARGET_A,
+        "legacy-owner",
+        new Date(NOW.getTime() - REPLY_RESERVATION_STALE_AFTER_MS - 1).toISOString(),
+      );
+    });
+    new ReplyLedger(dbFile, ORIGIN_ID).close();
+
+    let stageLoaderCalled = false;
+    const deps: ReplyRealRunDependencies = {
+      async openLedger() { return new ReplyLedger(dbFile, ORIGIN_ID); },
+      async loadStageReplyDraft() {
+        stageLoaderCalled = true;
+        return async () => stageResult(TARGET_A);
+      },
+    };
+    const forced = await executeReplyRealRun(input(TARGET_A, true), deps);
+    assert.equal(forced.kind, "reply_origin_unknown");
+    assert.equal(stageLoaderCalled, false);
+    assert.deepEqual(forced.origin, {
+      originId: null,
+      match: "unknown",
+      scope: "reservation",
+    });
+
+    const recovered = await executeReplyReservationRecovery(TARGET_A, deps);
+    assert.equal(recovered.kind, "reply_origin_unknown");
+    assert.equal(reservationRow(dbFile, TARGET_A)?.reservationId, "legacy-owner");
+    const receipt = receiptForXReplyOutcome(recovered, "reply", [], "recovery");
+    assert.ok(receipt.remoteResidue.some((entry) =>
+      entry.state === "reply_origin_unknown" && entry.reference === null));
+    assert.match(JSON.stringify(receipt), /origin is unknown/i);
+    assert.doesNotMatch(JSON.stringify(receipt), new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -322,7 +468,7 @@ test("concurrent force and non-force runs cannot bypass a force owner's reservat
   const releaseForce = deferred<void>();
   let stageCalls = 0;
   try {
-    const seed = new ReplyLedger(dbFile);
+    const seed = new ReplyLedger(dbFile, ORIGIN_ID);
     const initial = seed.claimReservation(TARGET_A, {
       reservationId: "seed-owner",
       now: NOW,
@@ -407,7 +553,7 @@ test("finalize commit followed by a thrown port error stays truthfully uncertain
   try {
     const deps: ReplyRealRunDependencies = {
       async openLedger() {
-        const ledger = new ReplyLedger(dbFile);
+        const ledger = new ReplyLedger(dbFile, ORIGIN_ID);
         const port: ReplyLedgerPort = {
           claimReservation: ledger.claimReservation.bind(ledger),
           releaseReservation: ledger.releaseReservation.bind(ledger),
@@ -475,7 +621,7 @@ test("crash residue is never auto-cleared and recovery starts exactly at 24 hour
   const dir = mkdtempSync(join(tmpdir(), "publish-reply-reservation-stale-"));
   const dbFile = join(dir, "publish.db");
   try {
-    const crashed = new ReplyLedger(dbFile);
+    const crashed = new ReplyLedger(dbFile, ORIGIN_ID);
     const claim = crashed.claimReservation(TARGET_A, {
       reservationId: "crashed-owner",
       now: NOW,
@@ -484,7 +630,7 @@ test("crash residue is never auto-cleared and recovery starts exactly at 24 hour
     crashed.close();
 
     const beforeBoundary = new Date(NOW.getTime() + REPLY_RESERVATION_STALE_AFTER_MS - 1);
-    const observer = new ReplyLedger(dbFile);
+    const observer = new ReplyLedger(dbFile, ORIGIN_ID);
     const normal = observer.claimReservation(TARGET_A, { now: beforeBoundary });
     const forced = observer.claimReservation(TARGET_A, { force: true, now: beforeBoundary });
     assert.equal(normal.kind, "reservation_blocked");
@@ -517,7 +663,7 @@ test("recovered owner fencing prevents late finalize or release from touching a 
   const dir = mkdtempSync(join(tmpdir(), "publish-reply-reservation-fence-"));
   const dbFile = join(dir, "publish.db");
   try {
-    const ledger = new ReplyLedger(dbFile);
+    const ledger = new ReplyLedger(dbFile, ORIGIN_ID);
     const old = ledger.claimReservation(TARGET_A, {
       reservationId: "old-owner",
       now: NOW,
@@ -548,7 +694,7 @@ test("invalid and future reservation times stay ambiguous and ineligible for rec
     const dir = mkdtempSync(join(tmpdir(), "publish-reply-reservation-ambiguous-"));
     const dbFile = join(dir, "publish.db");
     try {
-      const ledger = new ReplyLedger(dbFile);
+      const ledger = new ReplyLedger(dbFile, ORIGIN_ID);
       const claim = ledger.claimReservation(TARGET_A, {
         reservationId: "ambiguous-owner",
         now: NOW,
@@ -580,12 +726,12 @@ test("two recovery attempts clear once and never start staging", () => {
   const dir = mkdtempSync(join(tmpdir(), "publish-reply-reservation-recover-race-"));
   const dbFile = join(dir, "publish.db");
   try {
-    const seed = new ReplyLedger(dbFile);
+    const seed = new ReplyLedger(dbFile, ORIGIN_ID);
     seed.claimReservation(TARGET_A, { reservationId: "stale-owner", now: NOW });
     seed.close();
     const boundary = new Date(NOW.getTime() + REPLY_RESERVATION_STALE_AFTER_MS);
-    const first = new ReplyLedger(dbFile);
-    const second = new ReplyLedger(dbFile);
+    const first = new ReplyLedger(dbFile, ORIGIN_ID);
+    const second = new ReplyLedger(dbFile, ORIGIN_ID);
     const outcomes = [
       first.recoverStaleReservation(TARGET_A, boundary),
       second.recoverStaleReservation(TARGET_A, boundary),
@@ -642,7 +788,14 @@ registerHooks({ resolve(specifier, context, nextResolve) {
   const combined = (result: ReturnType<typeof run>) => `${result.stdout}${result.stderr}`;
 
   try {
-    const seed = new ReplyLedger(dbFile);
+    const profileDir = join(dataDir, "x-profile");
+    mkdirSync(profileDir, { recursive: true });
+    writeFileSync(
+      join(profileDir, ".publish-origin.json"),
+      `${JSON.stringify({ schemaVersion: X_PROFILE_ORIGIN_SCHEMA_VERSION, originId: ORIGIN_ID })}\n`,
+      { mode: 0o600 },
+    );
+    const seed = new ReplyLedger(dbFile, ORIGIN_ID);
     seed.claimReservation(TARGET_A, {
       reservationId: "cli-stale-owner",
       now: new Date(Date.now() - REPLY_RESERVATION_STALE_AFTER_MS - 1_000),
@@ -671,6 +824,8 @@ registerHooks({ resolve(specifier, context, nextResolve) {
     assert.equal(recovered.status, 0, combined(recovered));
     assert.match(recovered.stdout, /terminal draft state: local_state_updated/);
     assert.match(recovered.stdout, /state=reservation_recovered/);
+    assert.match(recovered.stdout, /state=reply_origin_matched/);
+    assert.match(recovered.stdout, new RegExp(ORIGIN_ID));
     assert.match(recovered.stdout, /exact CLI-owned profile used by that run/);
     assert.match(recovered.stdout, /no matching reply draft/);
     assert.match(recovered.stdout, /no native staging was attempted/i);
@@ -700,6 +855,27 @@ registerHooks({ resolve(specifier, context, nextResolve) {
     );
     assert.equal(existsSync(absentRepo), false);
     assert.equal(existsSync(absentData), false);
+
+    for (const args of [["x", "reply", "--help"], ["x", "info", "--static", "--json"]]) {
+      const readonlyRepo = join(dir, `readonly-repo-${args[1]}`);
+      const readonlyData = join(dir, `readonly-data-${args[1]}`);
+      const readonly = spawnSync(process.execPath, ["--import", loaderPath, CLI_PATH, ...args], {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PUBLISH_DATA_REPO: readonlyRepo,
+          PUBLISH_DATA_DIR: readonlyData,
+          PUBLISH_TEST_BLOCK_REPLY_DB: "1",
+        },
+      });
+      assert.equal(readonly.status, 0, `${readonly.stdout}${readonly.stderr}`);
+      assert.doesNotMatch(
+        `${readonly.stdout}${readonly.stderr}`,
+        /X_STAGING_IMPORT_BLOCKED|REPLY_DB_IMPORT_BLOCKED/,
+      );
+      assert.equal(existsSync(readonlyRepo), false);
+      assert.equal(existsSync(readonlyData), false);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

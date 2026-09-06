@@ -1,19 +1,23 @@
 import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { dataPaths } from "./config.js";
+import {
+  ReplyOriginBoundaryError,
+  isXProfileOriginId,
+  loadOrCreateXProfileOrigin,
+} from "./replyOrigin.js";
 
 /**
  * Local SQLite store for the X watch loop. Its single job today is dedupe:
  * remember which posts we've already surfaced so repeated polls only emit new
  * items.
  *
- * The db file lives under the runtime data dir (off Google Drive), NOT in the
- * repo — see config.dataPaths().dbFile.
+ * The db file lives at the configured durable path — see config.dataPaths().dbFile.
  */
 export class SeenStore {
   private db: Database.Database;
 
-  /** @param path db file path; defaults to <dataDir>/publish.db. */
+  /** @param path db file path; defaults to the configured durable database. */
   constructor(path?: string) {
     const file = path ?? dataPaths().dbFile;
     this.db = new Database(file);
@@ -64,6 +68,7 @@ export interface ReplyLedgerEntry {
   stagedAt: string;
   status: string;
   draftRef: string | null;
+  originId: string;
 }
 
 export const REPLY_RESERVATION_STALE_AFTER_MS = 24 * 60 * 60 * 1_000;
@@ -72,6 +77,7 @@ export interface ReplyReservation {
   targetTweetId: string;
   reservationId: string;
   reservedAt: string;
+  originId: string;
 }
 
 export type ReplyReservationState = "active" | "stale" | "ambiguous";
@@ -111,50 +117,122 @@ function reservationState(reservedAt: string, now: Date): ReplyReservationState 
  * Replying is a WRITE, so it gets its own idempotency guarantee. Real reply
  * runners sharing this same live SQLite file atomically reserve a target before
  * browser work; a completed native stage is finalized only afterward. This
- * does not claim coordination across separate database files or prove which
- * machine-local browser profile originated an interrupted attempt.
+ * coordinates only one bound machine-local X profile origin; separate database
+ * files, copied profiles, and separate machines are not coordinated.
  *
  * Lives in the SAME configured durable SQLite file as SeenStore but in a
  * SEPARATE table — read-dedup and write-dedup are deliberately decoupled.
  */
 export class ReplyLedger {
   private db: Database.Database;
+  private readonly originId: string;
 
-  /** @param path db file path; defaults to the configured durable file used by SeenStore. */
-  constructor(path?: string) {
-    const file = path ?? dataPaths().dbFile;
+  /**
+   * @param path db file path; defaults to the configured durable file used by SeenStore.
+   * @param originId injected only by deterministic tests; production resolves the
+   * private identity stored inside the configured X profile.
+   */
+  constructor(path?: string, originId?: string) {
+    const paths = originId === undefined || path === undefined ? dataPaths() : undefined;
+    const file = path ?? paths!.dbFile;
+    const resolvedOriginId = originId ?? loadOrCreateXProfileOrigin(paths!.xProfileOriginFile).originId;
+    if (!isXProfileOriginId(resolvedOriginId)) {
+      throw new Error("The local X profile origin identity is invalid.");
+    }
+    this.originId = resolvedOriginId;
     this.db = new Database(file);
     this.db.pragma("busy_timeout = 5000");
     this.db.pragma("journal_mode = WAL");
-    this.ensureSchema();
+    try {
+      this.ensureSchema();
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   private ensureSchema(): void {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS reply_ledger (
-        target_tweet_id TEXT PRIMARY KEY,
-        staged_at       TEXT NOT NULL,
-        status          TEXT NOT NULL DEFAULT 'staged',
-        draft_ref       TEXT
-      );
+    const initialize = this.db.transaction(() => {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS reply_ledger (
+          target_tweet_id TEXT PRIMARY KEY,
+          staged_at       TEXT NOT NULL,
+          status          TEXT NOT NULL DEFAULT 'staged',
+          draft_ref       TEXT,
+          origin_id       TEXT
+        );
 
-      CREATE TABLE IF NOT EXISTS reply_reservations (
-        target_tweet_id TEXT PRIMARY KEY,
-        reservation_id  TEXT NOT NULL UNIQUE,
-        reserved_at     TEXT NOT NULL
-      );
-    `);
+        CREATE TABLE IF NOT EXISTS reply_reservations (
+          target_tweet_id TEXT PRIMARY KEY,
+          reservation_id  TEXT NOT NULL UNIQUE,
+          reserved_at     TEXT NOT NULL,
+          origin_id       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS reply_profile_binding (
+          singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+          origin_id       TEXT NOT NULL,
+          bound_at        TEXT NOT NULL
+        );
+      `);
+
+      const ledgerColumns = this.db.prepare("PRAGMA table_info(reply_ledger)").all() as Array<{ name: string }>;
+      if (!ledgerColumns.some((column) => column.name === "origin_id")) {
+        this.db.exec("ALTER TABLE reply_ledger ADD COLUMN origin_id TEXT");
+      }
+      const reservationColumns = this.db.prepare("PRAGMA table_info(reply_reservations)").all() as Array<{ name: string }>;
+      if (!reservationColumns.some((column) => column.name === "origin_id")) {
+        this.db.exec("ALTER TABLE reply_reservations ADD COLUMN origin_id TEXT");
+      }
+
+      const binding = this.db
+        .prepare("SELECT origin_id AS originId FROM reply_profile_binding WHERE singleton = 1")
+        .get() as { originId: unknown } | undefined;
+      if (!binding) {
+        this.db
+          .prepare("INSERT INTO reply_profile_binding (singleton, origin_id, bound_at) VALUES (1, ?, ?)")
+          .run(this.originId, new Date().toISOString());
+        return;
+      }
+      if (!isXProfileOriginId(binding.originId)) {
+        throw new ReplyOriginBoundaryError({ originId: null, match: "unknown", scope: "database" });
+      }
+      if (binding.originId !== this.originId) {
+        throw new ReplyOriginBoundaryError({
+          originId: binding.originId,
+          match: "mismatch",
+          scope: "database",
+        });
+      }
+    });
+    initialize.immediate();
+  }
+
+  private assertOwnedOrigin(
+    value: unknown,
+    scope: "reservation" | "finalized_entry",
+  ): string {
+    if (!isXProfileOriginId(value)) {
+      throw new ReplyOriginBoundaryError({ originId: null, match: "unknown", scope });
+    }
+    if (value !== this.originId) {
+      throw new ReplyOriginBoundaryError({ originId: value, match: "mismatch", scope });
+    }
+    return value;
   }
 
   private findReservation(targetTweetId: string): ReplyReservation | undefined {
-    return this.db
+    const row = this.db
       .prepare(
         `SELECT target_tweet_id AS targetTweetId,
                 reservation_id AS reservationId,
-                reserved_at AS reservedAt
+                reserved_at AS reservedAt,
+                origin_id AS originId
            FROM reply_reservations WHERE target_tweet_id = ?`,
       )
-      .get(targetTweetId) as ReplyReservation | undefined;
+      .get(targetTweetId) as (Omit<ReplyReservation, "originId"> & { originId: unknown }) | undefined;
+    if (!row) return undefined;
+    return { ...row, originId: this.assertOwnedOrigin(row.originId, "reservation") };
   }
 
   /** The recorded ledger entry for a target tweet id, or undefined if none. */
@@ -162,11 +240,12 @@ export class ReplyLedger {
     const row = this.db
       .prepare(
         `SELECT target_tweet_id AS targetTweetId, staged_at AS stagedAt,
-                status, draft_ref AS draftRef
+                status, draft_ref AS draftRef, origin_id AS originId
            FROM reply_ledger WHERE target_tweet_id = ?`,
       )
-      .get(targetTweetId) as ReplyLedgerEntry | undefined;
-    return row;
+      .get(targetTweetId) as (Omit<ReplyLedgerEntry, "originId"> & { originId: unknown }) | undefined;
+    if (!row) return undefined;
+    return { ...row, originId: this.assertOwnedOrigin(row.originId, "finalized_entry") };
   }
 
   /** True if a reply to this target tweet id has already been staged. */
@@ -202,13 +281,19 @@ export class ReplyLedger {
         targetTweetId,
         reservationId: opts.reservationId ?? randomUUID(),
         reservedAt: now.toISOString(),
+        originId: this.originId,
       };
       this.db
         .prepare(
-          `INSERT INTO reply_reservations (target_tweet_id, reservation_id, reserved_at)
-           VALUES (?, ?, ?)`,
+          `INSERT INTO reply_reservations (target_tweet_id, reservation_id, reserved_at, origin_id)
+           VALUES (?, ?, ?, ?)`,
         )
-        .run(reservation.targetTweetId, reservation.reservationId, reservation.reservedAt);
+        .run(
+          reservation.targetTweetId,
+          reservation.reservationId,
+          reservation.reservedAt,
+          reservation.originId,
+        );
       return { kind: "acquired", reservation };
     });
     return reserve.immediate();
@@ -216,12 +301,13 @@ export class ReplyLedger {
 
   /** Release only the reservation owned by this staging process. */
   releaseReservation(reservation: ReplyReservation): boolean {
+    this.assertOwnedOrigin(reservation.originId, "reservation");
     const result = this.db
       .prepare(
         `DELETE FROM reply_reservations
-          WHERE target_tweet_id = ? AND reservation_id = ?`,
+          WHERE target_tweet_id = ? AND reservation_id = ? AND origin_id = ?`,
       )
-      .run(reservation.targetTweetId, reservation.reservationId);
+      .run(reservation.targetTweetId, reservation.reservationId, this.originId);
     return result.changes === 1;
   }
 
@@ -236,34 +322,38 @@ export class ReplyLedger {
     const finalize = this.db.transaction(() => {
       const owned = this.db
         .prepare(
-          `SELECT 1 FROM reply_reservations
+          `SELECT origin_id AS originId FROM reply_reservations
             WHERE target_tweet_id = ? AND reservation_id = ?`,
         )
-        .get(reservation.targetTweetId, reservation.reservationId);
+        .get(reservation.targetTweetId, reservation.reservationId) as { originId: unknown } | undefined;
       if (!owned) throw new Error("Reply reservation ownership could not be confirmed.");
+      this.assertOwnedOrigin(reservation.originId, "reservation");
+      this.assertOwnedOrigin(owned.originId, "reservation");
 
       this.db
         .prepare(
-          `INSERT INTO reply_ledger (target_tweet_id, staged_at, status, draft_ref)
-           VALUES (?, ?, ?, ?)
+          `INSERT INTO reply_ledger (target_tweet_id, staged_at, status, draft_ref, origin_id)
+           VALUES (?, ?, ?, ?, ?)
            ON CONFLICT(target_tweet_id) DO UPDATE SET
              staged_at = excluded.staged_at,
              status = excluded.status,
-             draft_ref = excluded.draft_ref`,
+             draft_ref = excluded.draft_ref,
+             origin_id = excluded.origin_id`,
         )
         .run(
           reservation.targetTweetId,
           new Date().toISOString(),
           opts.status ?? "staged",
           opts.draftRef ?? null,
+          this.originId,
         );
 
       const released = this.db
         .prepare(
           `DELETE FROM reply_reservations
-            WHERE target_tweet_id = ? AND reservation_id = ?`,
+            WHERE target_tweet_id = ? AND reservation_id = ? AND origin_id = ?`,
         )
-        .run(reservation.targetTweetId, reservation.reservationId);
+        .run(reservation.targetTweetId, reservation.reservationId, this.originId);
       if (released.changes !== 1) {
         throw new Error("Reply reservation release could not be confirmed.");
       }
@@ -293,9 +383,10 @@ export class ReplyLedger {
             WHERE target_tweet_id = ?
               AND reservation_id = ?
               AND reserved_at = ?
+              AND origin_id = ?
               AND reserved_at <= ?`,
         )
-        .run(targetTweetId, reservation.reservationId, reservation.reservedAt, cutoff);
+        .run(targetTweetId, reservation.reservationId, reservation.reservedAt, this.originId, cutoff);
       if (deleted.changes !== 1) {
         throw new Error("Stale reply reservation recovery could not be confirmed.");
       }

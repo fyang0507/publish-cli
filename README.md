@@ -172,13 +172,21 @@ and action help before execution.
 
 Machine-local authentication artifacts live under `PUBLISH_DATA_DIR` and must
 stay outside the repository and cloud-synced paths. Durable dedupe state lives
-at `<data_repo>/.publish-cli/publish.db` when a data workspace resolves.
+at `<data_repo>/.publish-cli/publish.db` when a data workspace resolves, and
+falls back to `<PUBLISH_DATA_DIR>/publish.db` otherwise.
 
 The X seen-store and reply ledger are separate. Real reply runners sharing the
-same live SQLite file reserve a target before browser staging, then finalize
-history only after staging returns. `--force` can bypass finalized reply history
-for an intentional re-stage, but it never bypasses another process's in-flight
-claim or any retained claim.
+same live SQLite file and machine-local X profile origin reserve a target before
+browser staging, then finalize history only after staging returns. The profile
+stores a private random opaque identity; the reply database binds to it
+atomically and new reply rows retain it. This is one-machine/local-profile
+coordination, not a shared service: copying or synchronizing the database does
+not coordinate another profile or machine and a bound-origin mismatch stops
+before browser work. On first post-upgrade use, binding applies prospectively;
+legacy rows remain origin-unknown and cannot be attributed, force-bypassed, or
+recovered automatically. `--force` can bypass matching finalized history for an
+intentional re-stage, but it never bypasses an in-flight, retained,
+origin-unknown, or origin-mismatched claim.
 
 The publish agent skill is intentionally a small, self-contained router. It
 contains no copied channel manual or dependency on this source checkout; native

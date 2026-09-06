@@ -2,6 +2,9 @@
 #
 # publish-cli writes its durable dedupe DB to `<data_repo_path>/.publish-cli/` and
 # copies the shipped skills into `<data_repo_path>/.agents/skills/`.
+# X reply coordination remains local to one X profile: this DB is automatically
+# bound to the profile's private opaque identity under PUBLISH_DATA_DIR. Copying
+# or synchronizing the DB does not coordinate another profile or machine.
 # Relative paths resolve from this config file, so a sibling workspace can use
 # ../your-agent-workspace.
 #
