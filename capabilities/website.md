@@ -7,7 +7,7 @@ displayName: Personal website
 
 ## CLI boundary
 
-Website content is delegated to a headless subagent rooted in the target website repository/worktree, using its repository-local `add-website-content` skill. The CLI provides discovery only. The deliverable is a verified review branch/commit or draft PR; merge and deployment remain outside publish.
+The CLI provides discovery only. To create new content in the personal website, spin off a new headless subagent rooted in the target website (fyang0507.github.io) repository/worktree, using its repository-local `add-website-content` skill. The deliverable is a verified review branch/commit or draft PR; merge and deployment remain outside publish.
 
 ## Authentication
 
