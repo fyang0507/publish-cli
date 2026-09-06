@@ -6,7 +6,7 @@ import { parse as parseYaml } from "yaml";
 
 /**
  * Data-repo resolution — where publish-cli's DURABLE state lives (the SQLite
- * dedupe store, and the target for installed copies of the agent skills). This
+ * dedupe store, and the target for installed symlinks to the agent skills). This
  * is the agent's WORKSPACE, not a machine-local scratch dir. Mirrors
  * outreach-cli's dataRepo.ts.
  *

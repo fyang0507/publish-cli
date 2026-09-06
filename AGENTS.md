@@ -23,7 +23,8 @@ calling workflow, not this repository.
 - Action-level `--help` owns command flags.
 - `skills/publish/SKILL.md` is a thin, standalone router. Do not duplicate
   channel facts there or link it to repository files. The post-build installer
-  copies skills into `.agents/skills`; never restore checkout symlinks.
+  links shipped skill directories into `.agents/skills` with relative checkout
+  symlinks; edit the source skills here, not workspace copies.
 - `README.md` owns user setup and examples. `docs/PRODUCT_SPEC.md` owns the
   product vision and roadmap.
 

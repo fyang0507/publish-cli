@@ -1,16 +1,19 @@
 /**
  * Post-build hook:
  *   1. Keep dist/cli.js executable on filesystems that lose the mode bit.
- *   2. Best-effort copy shipped agent skills under <data_repo>/.agents/skills/.
+ *   2. Best-effort link shipped agent skills under <data_repo>/.agents/skills/.
  *
- * Skills are copied, not symlinked, so an installed skill remains usable when
- * the publish-cli package or source checkout is moved or removed.
+ * Relative symlinks keep the checkout authoritative and survive moving sibling
+ * repositories together. Existing installations are replaced directly.
  */
 
-import { chmodSync, cpSync, mkdirSync, rmSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { chmodSync, lstatSync, mkdirSync, readlinkSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 
-chmodSync("dist/cli.js", 0o755);
+import { fileURLToPath } from "node:url";
+
+const repoRoot = realpathSync(fileURLToPath(new URL("../", import.meta.url)));
+chmodSync(join(repoRoot, "dist/cli.js"), 0o755);
 
 try {
   let skillsTargetDir = process.env.PUBLISH_SKILLS_DIR?.trim();
@@ -22,13 +25,27 @@ try {
 
   const skills = ["article-references", "publish"];
   mkdirSync(skillsTargetDir, { recursive: true });
+  // Resolve symlinked parents before calculating relative link targets.
+  skillsTargetDir = realpathSync(skillsTargetDir);
 
   for (const skill of skills) {
     const dest = resolve(skillsTargetDir, skill);
-    const source = resolve("skills", skill);
+    const source = join(repoRoot, "skills", skill);
+    if (dest === source) throw new Error(`Skill destination is its source: ${dest}`);
+    if (!lstatSync(join(source, "SKILL.md")).isFile()) {
+      throw new Error(`Missing skill entrypoint: ${source}`);
+    }
+    const linkTarget = relative(dirname(dest), source);
+    let existing;
+    try {
+      existing = lstatSync(dest);
+    } catch (err) {
+      if (err.code !== "ENOENT") throw err;
+    }
+    if (existing?.isSymbolicLink() && readlinkSync(dest) === linkTarget) continue;
     rmSync(dest, { recursive: true, force: true });
-    cpSync(source, dest, { recursive: true });
-    console.log(`Agent skill installed -> ${dest}`);
+    symlinkSync(linkTarget, dest, "dir");
+    console.log(`Agent skill symlink installed -> ${dest} -> ${linkTarget}`);
   }
 } catch (err) {
   console.log(

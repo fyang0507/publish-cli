@@ -81,10 +81,7 @@ bundled fallback once:
 npx playwright install chromium
 ```
 
-The build keeps the CLI executable and, when a data workspace resolves, copies
-the shipped skills into `<data_repo>/.agents/skills/`. These are standalone
-copies rather than checkout symlinks. Set `PUBLISH_SKILLS_DIR` to choose an
-explicit skill destination.
+The build keeps the CLI executable and, when a data workspace resolves, installs relative symlinks for `publish` and `article-references` into `<data_repo>/.agents/skills/`. Edit the canonical files under `skills/` in this repository; workspace links reflect edits immediately. Set `PUBLISH_SKILLS_DIR` to choose an explicit skill destination. Keep the checkout available, and rerun the build if the repositories move relative to one another. Existing skill installations are overwritten with the source symlinks.
 
 ## Configuration
 
