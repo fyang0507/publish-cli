@@ -59,6 +59,15 @@ the authoritative command and flag lists.
 Node.js 22.19.0 or newer is required (the package metadata declares
 `>=22.19.0`).
 
+Dependency decision: this project intentionally retains `twitter-text@3.1.0`
+for X's weighted-length semantics. It transitively installs deprecated
+`core-js@2.6.12`, so `npm install` emits a known deprecation warning; this
+decision accepts that warning rather than claiming it has been removed. Do not
+override it to core-js 3 because the published `twitter-text` output imports
+core-js 2 module paths. Reevaluate this decision when a vulnerability is
+confirmed to apply to this CLI, a maintained compatible upstream release is
+available, or an actual incompatibility with a supported runtime is reproduced.
+
 ```bash
 npm install
 npm run build
