@@ -416,21 +416,46 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(wechat, /Every generated dynamic HTML attribute is escaped.*exact parser\/path identity/s);
 
   const xhs = `${CHANNEL_INFO_SOURCES.xhs.cliBoundary}\n${CHANNEL_INFO_SOURCES.xhs.authentication}\n${CHANNEL_INFO_SOURCES.xhs.platformGuidance}`;
-  assert.match(xhs, /CLI offers no functionality to access or write Xiaohongshu/);
-  assert.match(xhs, /agent is expected to use its own/);
-  assert.match(xhs, /documented external workflow/);
+  assert.match(xhs, /Publish-cli has no Xiaohongshu read or write transport/);
+  assert.match(xhs, /self-contained procedure for an agent using its own persistent headful browser/);
+  assert.match(xhs, /Direct image-text, video, and podcast staging remain unspecified/);
   assert.match(xhs, /creator\.xiaohongshu\.com/);
-  assert.match(xhs, /\.md|Markdown/);
-  assert.match(xhs, /64/);
-  assert.match(xhs, /10,?000/);
-  assert.match(xhs, /1,?000/);
-  assert.match(xhs, /browser-local/i);
-  assert.match(xhs, /Long-article drafts are browser-local.*maximum of 100/s);
-  assert.match(xhs, /observed behavior, not a universal limit/);
+  assert.match(xhs, /same browser profile through save and verification/);
+  assert.match(xhs, /live spike completed on 2026-08-30/);
+  assert.match(xhs, /maximum of 100 long-article drafts is not a universal limit/);
+  assert.match(xhs, /`\.md`, `\.docx`, or `\.txt` plus a separate title/);
   assert.match(xhs, /copy the first Markdown H1/);
-  assert.match(xhs, /Default to a plain long article/);
-  assert.match(xhs, /Only when image cards are requested/);
-  assert.match(xhs, /Only when topics are requested/);
+  assert.match(xhs, /Never invent or silently truncate a title/);
+  assert.match(xhs, /title counter of 64 and a body counter of 10,000, with unknown measurement units/);
+  assert.match(xhs, /H1\/H2, lists, and blockquotes survived.*H3 became a paragraph.*bold\/italic text survived without styling/s);
+  assert.match(xhs, /when neither generated cards nor structured topics are requested, keep the plain long-article representation/);
+  assert.match(xhs, /Structured topics were available only in the final image-text composer reached through `一键排版` → `下一步`/);
+  assert.match(xhs, /path converts the article into generated image cards and can change its template, cover, summary, title, and caption semantics/);
+  assert.match(xhs, /STOP before selecting `一键排版`/);
+  assert.match(
+    xhs,
+    /Structured topics require converting the long article into generated image cards and the image-text composer\. Do you accept that representation change\?/,
+  );
+  assert.match(xhs, /Do not treat silence as acceptance.*never substitute plain pasted hashtags/s);
+  assert.match(xhs, /accepted long-article representation is the exact visible title plus the reviewed body text, block order, and supported structure/);
+  assert.match(xhs, /prior spike did not isolate the exact `保存成功` string as a plain-route-only signal.*presence or absence alone is not success/s);
+  assert.match(xhs, /Generated-card\/topic route, only after explicit representation acceptance/);
+  assert.match(xhs, /platform modified and truncated the title.*require acceptance/s);
+  assert.match(xhs, /final image-text title limit and measurement remain unverified/);
+  assert.match(xhs, /caption is separate from the generated cards and showed a counter of 1,000 with unknown measurement/);
+  assert.match(xhs, /select only an exact platform match.*distinct topic entity rather than literal `#text`/s);
+  assert.match(xhs, /maximum topic count is unknown/);
+  assert.match(xhs, /did not isolate a stable exact terminal draft-save control for the final image-text composer/);
+  assert.match(xhs, /current contract therefore authorizes no terminal save interaction in that composer/);
+  assert.match(xhs, /do not guess, reuse the long-editor `暂存离开` action after conversion, or treat autosave\/`保存成功` alone as a card\/topic draft/);
+  assert.match(xhs, /STOP and request current terminal draft-save calibration; do not claim that a card\/topic draft was saved/);
+  assert.match(xhs, /same persistent browser and a canonical `草稿箱` reopen.*toast, autosave label, URL change, reload survival, or return to a landing page alone is insufficient/s);
+  assert.match(xhs, /plain draft.*exact accepted title, full body text, block order, and supported structure/s);
+  assert.match(xhs, /generated-card\/topic draft.*accepted card count\/order\/content, template\/cover state, exact accepted visible title, caption, and every selected topic entity/s);
+  assert.match(xhs, /Browser-local means the draft is not a portable cloud guarantee/);
+  assert.match(xhs, /Never click, set, or use `发布`.*private\/仅自己可见 publication.*scheduled publication/s);
+  assert.doesNotMatch(xhs, /Default to a plain long article.*Only when topics are requested/s);
+  assert.doesNotMatch(xhs, /docs\/XHS_(?:DESIGN|HANDOFF)\.md/);
 
   const acres = `${CHANNEL_INFO_SOURCES["1point3acres"].cliBoundary}\n${CHANNEL_INFO_SOURCES["1point3acres"].authentication}\n${CHANNEL_INFO_SOURCES["1point3acres"].platformGuidance}`;
   assert.match(acres, /CLI offers no functionality to access or write 1point3acres/);
@@ -963,7 +988,29 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
 
   const xhs = spawnSync(process.execPath, [CLI_PATH, "xhs", "info", "--json"], { encoding: "utf8" });
   assert.equal(xhs.status, 0, xhs.stderr);
-  const receipt = JSON.parse(xhs.stdout) as { info: { platformGuidance: string }; readiness: { ready: boolean } };
-  assert.match(receipt.info.platformGuidance, /Markdown|\.md/);
+  const receipt = JSON.parse(xhs.stdout) as {
+    schemaVersion: string;
+    channel: string;
+    info: { cliBoundary: string; authentication: string; platformGuidance: string };
+    readiness: { ready: boolean };
+  };
+  assert.equal(receipt.schemaVersion, CHANNEL_INFO_SCHEMA_VERSION);
+  assert.equal(receipt.channel, "xhs");
+  assert.match(receipt.info.cliBoundary, /no Xiaohongshu read or write transport/);
+  assert.match(receipt.info.authentication, /one persistent agent-owned browser/);
+  assert.match(receipt.info.platformGuidance, /when neither generated cards nor structured topics are requested, keep the plain long-article representation/);
+  assert.match(receipt.info.platformGuidance, /STOP before selecting `一键排版`/);
+  assert.match(
+    receipt.info.platformGuidance,
+    /Structured topics require converting the long article into generated image cards and the image-text composer\. Do you accept that representation change\?/,
+  );
+  assert.match(receipt.info.platformGuidance, /never substitute plain pasted hashtags for structured topics/);
+  assert.match(receipt.info.platformGuidance, /did not isolate a stable exact terminal draft-save control for the final image-text composer/);
+  assert.match(receipt.info.platformGuidance, /current contract therefore authorizes no terminal save interaction in that composer/);
+  assert.match(receipt.info.platformGuidance, /STOP and request current terminal draft-save calibration; do not claim that a card\/topic draft was saved/);
+  assert.match(receipt.info.platformGuidance, /same persistent browser and a canonical `草稿箱` reopen/);
+  assert.match(receipt.info.platformGuidance, /toast, autosave label, URL change, reload survival, or return to a landing page alone is insufficient/);
+  assert.match(receipt.info.platformGuidance, /Never click, set, or use `发布`.*private\/仅自己可见 publication.*scheduled publication/s);
+  assert.doesNotMatch(JSON.stringify(receipt.info), /XHS_DESIGN|XHS_HANDOFF|docs\//);
   assert.equal(receipt.readiness.ready, false);
 });
