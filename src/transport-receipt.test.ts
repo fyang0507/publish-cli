@@ -422,7 +422,7 @@ test("verified X Article JSON receipts retain every Apply phase and independent 
     assert.ok(provenance, applyPhase);
     assert.doesNotMatch(provenance, /PRIVATE|selector|cookie|token/u, applyPhase);
     const independentProof = receipt.gotchas.find((gotcha) =>
-      /Independent two-sided canonical persistence proved the exact cover and full title\/body without claiming Apply returned/.test(gotcha)
+      /Independent two-sided canonical persistence proved the same hosted cover and full title\/body without claiming Apply returned/.test(gotcha)
     );
     assert.equal(independentProof !== undefined, applyPhase !== "returned", applyPhase);
   }
