@@ -2117,6 +2117,7 @@ export function isCalibratedXArticleCoverTarget(
 
 export interface XArticleCoverVisualObservation {
   readonly sourceIdentitySha256: string;
+  /** Cover position relative to the unique title; dimensions are rendered size. */
   readonly box: Readonly<{
     x: number;
     y: number;
@@ -2438,6 +2439,8 @@ interface RawArticleCoverObservation {
   readonly src: string;
   readonly x: number;
   readonly y: number;
+  readonly titleX: number;
+  readonly titleY: number;
   readonly width: number;
   readonly height: number;
   readonly naturalWidth: number;
@@ -2451,6 +2454,8 @@ function snapshotArticleCoverObservation(
 ): Readonly<XArticleCoverVisualObservation> | null {
   try {
     const parsed = new URL(raw.src);
+    const titleRelativeX = raw.x - raw.titleX;
+    const titleRelativeY = raw.y - raw.titleY;
     if (
       parsed.protocol !== "https:" ||
       parsed.hostname !== "pbs.twimg.com" ||
@@ -2459,7 +2464,10 @@ function snapshotArticleCoverObservation(
       parsed.port !== "" ||
       !parsed.pathname.startsWith("/media/") ||
       parsed.pathname.length <= "/media/".length ||
-      ![raw.x, raw.y, raw.width, raw.height].every(Number.isFinite) ||
+      ![
+        raw.x, raw.y, raw.titleX, raw.titleY, raw.width, raw.height,
+        titleRelativeX, titleRelativeY,
+      ].every(Number.isFinite) ||
       raw.width < 300 ||
       raw.height <= 0 ||
       raw.width / raw.height < 2 ||
@@ -2475,8 +2483,8 @@ function snapshotArticleCoverObservation(
     return Object.freeze({
       sourceIdentitySha256: createHash("sha256").update(identity).digest("hex"),
       box: Object.freeze({
-        x: raw.x,
-        y: raw.y,
+        x: titleRelativeX,
+        y: titleRelativeY,
         width: raw.width,
         height: raw.height,
       }),
@@ -2553,6 +2561,8 @@ export async function observeCalibratedArticleCover(
             src: node.src,
             x: box.x,
             y: box.y,
+            titleX: titleBox.x,
+            titleY: titleBox.y,
             width: box.width,
             height: box.height,
             naturalWidth: node.naturalWidth,

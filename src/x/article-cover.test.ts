@@ -443,6 +443,8 @@ test("reopen cover observation tolerates body media without treating it as the c
     src: "https://pbs.twimg.com/media/cover-fixture?format=png",
     x: 10,
     y: 20,
+    titleX: 40,
+    titleY: 250,
     width: 500,
     height: 200,
     naturalWidth: 5,
@@ -828,6 +830,8 @@ const RESCALED_NATIVE_COVER = Object.freeze({
   src: "https://pbs.twimg.com/media/rescaled-cover-fixture?format=png&name=small",
   x: 100,
   y: 120,
+  titleX: 146,
+  titleY: 400,
   width: 1_000,
   height: 400,
   naturalWidth: 1_200,
@@ -838,6 +842,8 @@ interface NativeCoverFixture {
   src: string;
   x: number;
   y: number;
+  titleX: number;
+  titleY: number;
   width: number;
   height: number;
   naturalWidth: number;
@@ -1010,7 +1016,9 @@ test("rescaled cover persistence still rejects changed hosted identity, actual d
   const changes: Array<readonly [string, Partial<NativeCoverFixture>]> = [
     ["hosted identity", { src: "https://pbs.twimg.com/media/different-cover-fixture" }],
     ["natural size with the same aspect ratio", { naturalWidth: 1_500, naturalHeight: 600 }],
-    ["rendered position", { x: RESCALED_NATIVE_COVER.x + 1 }],
+    ["cover-only rendered position", { x: RESCALED_NATIVE_COVER.x + 1 }],
+    ["title-only horizontal position", { titleX: RESCALED_NATIVE_COVER.titleX + 1 }],
+    ["title-only vertical position", { titleY: RESCALED_NATIVE_COVER.titleY + 1 }],
     ["rendered size", { width: 750, height: 300 }],
   ];
   for (const [name, change] of changes) {
@@ -1032,4 +1040,58 @@ test("rescaled cover persistence still rejects changed hosted identity, actual d
     { content: false, cover: true },
     "a stable resized cover cannot conceal a body mismatch",
   );
+});
+
+test("production cover persistence compares title-relative position across shared editor translation", async () => {
+  const before = {
+    ...RESCALED_NATIVE_COVER,
+    x: 574.5,
+    y: 40,
+    titleX: 620.5,
+    titleY: 320,
+    width: 695,
+    height: 278,
+  };
+  for (const [dx, dy] of [[0, 56], [24, 0], [24, 56]]) {
+    const after = {
+      ...before,
+      x: before.x + dx,
+      y: before.y + dy,
+      titleX: before.titleX + dx,
+      titleY: before.titleY + dy,
+    };
+    const fixture = persistedCoverPage(before, after);
+    const observed = await observeCalibratedArticleCover(fixture.page, EDIT_URL, 1_985, 794);
+    assert.equal(observed.status, "observed");
+    if (observed.status === "observed") {
+      assert.deepEqual(observed.observation.box, { x: -46, y: -280, width: 695, height: 278 });
+    }
+    assert.deepEqual(
+      await verifyArticleDraftPersistence(
+        fixture.page, EDIT_URL, "Complete article", "Complete article body.", 1_985, 794,
+      ),
+      { content: true, cover: true },
+      `shared editor translation ${dx},${dy}`,
+    );
+    assert.deepEqual(fixture.counts(), { reopenCalls: 1, coverReads: 3 });
+  }
+});
+
+test("title-relative cover coordinates reject missing, nonfinite or overflowing geometry", async () => {
+  const invalid: Array<readonly [string, Partial<NativeCoverFixture>]> = [
+    ["missing title x", { titleX: undefined as never }],
+    ["missing title y", { titleY: undefined as never }],
+    ["NaN title x", { titleX: Number.NaN }],
+    ["infinite title y", { titleY: Number.POSITIVE_INFINITY }],
+    ["overflowing relative x", { x: Number.MAX_VALUE, titleX: -Number.MAX_VALUE }],
+    ["overflowing relative y", { y: Number.MAX_VALUE, titleY: -Number.MAX_VALUE }],
+  ];
+  for (const [name, changes] of invalid) {
+    const { page } = persistedCoverPage({ ...RESCALED_NATIVE_COVER, ...changes });
+    assert.deepEqual(
+      await observeCalibratedArticleCover(page, EDIT_URL, 1_985, 794),
+      { status: "invalid" },
+      name,
+    );
+  }
 });
