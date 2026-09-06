@@ -78,7 +78,10 @@ Normal API token renewal is allowed but must be reported in the receipt.
 - Caller-supplied Markdown is canonical. `--from -` reads stdin; generated files
   are inspection artifacts, while the native saved draft is the deliverable.
 - X read dedupe and reply idempotency are separate risk controls. Record a reply
-  only after successful staging; bypass requires explicit `--force`.
+  only after successful staging; bypass requires explicit `--force`. Reply
+  coordination is limited to processes using the same live SQLite file and the
+  same machine-local X profile origin; copied or synchronized databases are not
+  cross-machine coordination.
 
 ## State and repository posture
 
@@ -87,6 +90,13 @@ Persistent profiles, cookie caches, and WeChat tokens live under
 Durable sqlite state lives in `<data_repo>/.publish-cli/`; resolve the data repo
 through `PUBLISH_DATA_REPO`, `publish.config.dev.yaml`, or a
 `.agents/workspace.yaml` walk-up. Never hardcode a personal path.
+
+The X profile contains one private opaque origin identity under
+`PUBLISH_DATA_DIR`. The reply database binds to that origin on first use; new
+reservations and finalized rows retain it. A different profile must fail before
+browser work. Migrated legacy rows keep unknown origin and cannot be bypassed
+with `--force` or stale-reservation recovery. Never expose host names, private
+paths, credentials, cookies, or profile contents as provenance.
 
 Keep this public capability layer generic: say "the operator," avoid personal
 identity or workspace policy, and keep secrets out of fixtures and output.

@@ -27,6 +27,7 @@ import {
 
 const TARGET_ID = "1234567890123456789";
 const OTHER_TARGET_ID = "9876543210987654321";
+const ORIGIN_ID = "11111111-1111-4111-8111-111111111111";
 const TARGET_URL = `https://x.com/operator/status/${TARGET_ID}`;
 const RAW_CANARY =
   "selector=[data-secret] PRIVATE_PATH_CANARY/operator/secret cookie=session-secret page=Private composer text";
@@ -63,12 +64,14 @@ const PRIOR: ReplyLedgerEntry = {
   stagedAt: "2026-09-03T00:00:00.000Z",
   status: "staged",
   draftRef: null,
+  originId: ORIGIN_ID,
 };
 
 const RESERVATION: ReplyReservation = {
   targetTweetId: TARGET_ID,
   reservationId: "offline-owner-token",
   reservedAt: "2026-09-03T01:00:00.000Z",
+  originId: ORIGIN_ID,
 };
 
 interface HarnessOptions {

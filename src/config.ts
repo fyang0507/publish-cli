@@ -123,7 +123,9 @@ export function getWechatAuthorFallback(): string {
  *     artifacts — the browser profile + cookie cache. Off any synced drive; the
  *     profile must never sit inside the repo.
  *   - dbFile: DURABLE dedupe state, placed in the DATA REPO (agent workspace, via
- *     dataRepo.ts) so it travels with the workspace; falls back to baseDir.
+ *     dataRepo.ts) when available; falls back to baseDir. X reply ownership is
+ *     still bound to the machine-local X profile identity, so copying this file
+ *     is not cross-profile or cross-machine coordination.
  *
  * baseDir resolution:
  *   1. PUBLISH_DATA_DIR env var, if set.
@@ -136,6 +138,8 @@ export interface DataPaths {
   baseDir: string;
   /** Persistent Playwright user-data-dir for the logged-in X profile. */
   xProfileDir: string;
+  /** Private opaque identity bound to that exact machine-local X profile. */
+  xProfileOriginFile: string;
   /** Harvested cookie cache (auth_token + ct0, ...) as JSON. */
   xCookieCache: string;
   /** Persistent Playwright user-data-dir for the logged-in LinkedIn profile. */
@@ -180,6 +184,7 @@ export function peekDataPaths(): DataPaths {
   return {
     baseDir,
     xProfileDir: join(baseDir, "x-profile"),
+    xProfileOriginFile: join(baseDir, "x-profile", ".publish-origin.json"),
     xCookieCache: join(baseDir, "x-cookies.json"),
     liProfileDir: join(baseDir, "li-profile"),
     liCookieCache: join(baseDir, "li-cookies.json"),
@@ -208,9 +213,10 @@ export function dataPaths(): DataPaths {
   mkdirSync(liProfileDir, { recursive: true });
   mkdirSync(redditProfileDir, { recursive: true });
 
-  // DURABLE state (the dedupe DB) lives in the DATA REPO (the agent workspace) so
-  // it travels with the workspace rather than the machine. Falls back to baseDir
-  // when no data repo is resolvable (ad-hoc use, no workspace/env/dev-config).
+  // DURABLE state (the dedupe DB) lives in the DATA REPO (the agent workspace)
+  // when available and falls back to baseDir for ad-hoc use. X reply rows remain
+  // bound to the machine-local X profile identity; copying this file never
+  // creates cross-profile or cross-machine coordination.
   const dbDir = dirname(resolved.dbFile);
   mkdirSync(dbDir, { recursive: true });
 

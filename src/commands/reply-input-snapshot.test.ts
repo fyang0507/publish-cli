@@ -38,6 +38,7 @@ import {
 
 const TARGET_A = "1234567890123456789";
 const TARGET_B = "9876543210987654321";
+const ORIGIN_ID = "11111111-1111-4111-8111-111111111111";
 const URL_A = `https://x.com/operator/status/${TARGET_A}`;
 const URL_B = `https://x.com/operator/status/${TARGET_B}`;
 const RAW_CANARY = "RAW_PRIVATE_CANARY\u001b[31m /private/operator/path cookie=session-secret";
@@ -348,6 +349,7 @@ test("actual generated code/link/fidelity output and preserved long whitespace r
               targetTweetId: TARGET_A,
               reservationId: "owner-oversized-advisory",
               reservedAt: "2026-09-03T12:00:00.000Z",
+              originId: ORIGIN_ID,
             },
           };
         },
@@ -744,6 +746,7 @@ test("open, claim, loader, stage-await, finalize, and close mutations cannot reb
       targetTweetId: TARGET_A,
       reservationId: `owner-${boundary}`,
       reservedAt: "2026-09-03T12:00:00.000Z",
+      originId: ORIGIN_ID,
     };
     const events: string[] = [];
     let mutated = false;
@@ -844,6 +847,7 @@ test("loader A-to-B substitution stages, validates, finalizes, and reports only 
     targetTweetId: TARGET_A,
     reservationId: "owner-a",
     reservedAt: "2026-09-03T12:00:00.000Z",
+    originId: ORIGIN_ID,
   };
   const ledger: ReplyLedgerPort = {
     claimReservation(target) {
@@ -901,6 +905,7 @@ test("coherent B evidence after loader mutation cannot finalize reservation A", 
     targetTweetId: TARGET_A,
     reservationId: "owner-a",
     reservedAt: "2026-09-03T12:00:00.000Z",
+    originId: ORIGIN_ID,
   };
   const ledger: ReplyLedgerPort = {
     claimReservation(target) {
@@ -964,6 +969,7 @@ test("reservation owner evidence is detached, target-bound, and closed before st
     targetTweetId: TARGET_A,
     reservationId: "owner-a",
     reservedAt: "2026-09-03T12:00:00.000Z",
+    originId: ORIGIN_ID,
   };
   const events: string[] = [];
   let finalizedReservation: ReplyReservation | undefined;
@@ -991,6 +997,7 @@ test("reservation owner evidence is detached, target-bound, and closed before st
     targetTweetId: TARGET_A,
     reservationId: "owner-a",
     reservedAt: "2026-09-03T12:00:00.000Z",
+    originId: ORIGIN_ID,
   });
   assert.equal(Object.isFrozen(finalizedReservation), true);
 
@@ -1064,6 +1071,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
       stagedAt: "2026-09-03T12:00:00.000Z",
       status: "staged",
       draftRef: null,
+      originId: ORIGIN_ID,
     },
   });
   assert.equal(duplicate.outcome.kind, "duplicate");
@@ -1077,6 +1085,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
         targetTweetId: TARGET_A,
         reservationId: `owner-${state}`,
         reservedAt: "2026-09-03T12:00:00.000Z",
+        originId: ORIGIN_ID,
       },
       state,
     });
@@ -1092,6 +1101,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
     stagedAt: "2026-09-03T12:00:00.000Z",
     status: "staged",
     draftRef: null,
+    originId: ORIGIN_ID,
   };
   Object.defineProperty(accessorEntry, "status", {
     configurable: true,
@@ -1108,6 +1118,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
     targetTweetId: TARGET_A,
     reservationId: "owner-revoked",
     reservedAt: "2026-09-03T12:00:00.000Z",
+    originId: ORIGIN_ID,
   }, {});
   revoked.revoke();
 
@@ -1119,6 +1130,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
         stagedAt: "2026-09-03T12:00:00.000Z",
         status: "staged",
         draftRef: null,
+        originId: ORIGIN_ID,
       },
     },
     {
@@ -1128,6 +1140,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
         stagedAt: RAW_CANARY,
         status: "staged",
         draftRef: null,
+        originId: ORIGIN_ID,
       },
     },
     {
@@ -1137,6 +1150,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
         stagedAt: "2026-09-03T12:00:00.000Z",
         status: RAW_CANARY,
         draftRef: null,
+        originId: ORIGIN_ID,
       },
     },
     { kind: "already_staged", entry: accessorEntry },
@@ -1146,6 +1160,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
         targetTweetId: TARGET_B,
         reservationId: "owner-b",
         reservedAt: "2026-09-03T12:00:00.000Z",
+        originId: ORIGIN_ID,
       },
       state: "active",
     },
@@ -1155,6 +1170,7 @@ test("duplicate and blocked claim receipts remain target-A-bound and hostile cla
         targetTweetId: TARGET_A,
         reservationId: "owner-proxy",
         reservedAt: "2026-09-03T12:00:00.000Z",
+        originId: ORIGIN_ID,
       },
       state: "active",
     }, proxyHandler),

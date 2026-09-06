@@ -18,6 +18,7 @@ import type {
   ReplyReservation,
   ReplyReservationClaim,
 } from "../db.js";
+import { isXProfileOriginId } from "../replyOrigin.js";
 
 // Preserve the #103 public API while sharing the browser/db-free generated
 // content boundary with ordinary non-Article drafts.
@@ -106,7 +107,7 @@ function snapshotReservationValue(
 ): Readonly<ReplyReservation> {
   return snapshotXPlainRecord(
     value,
-    ["targetTweetId", "reservationId", "reservedAt"],
+    ["targetTweetId", "reservationId", "reservedAt", "originId"],
     [],
     context,
     (reader) => {
@@ -125,8 +126,15 @@ function snapshotReservationValue(
         MAX_TARGET_CODE_UNITS,
         context,
       );
-      if (targetTweetId !== expectedTargetId) failXGeneratedContentSnapshot();
-      return Object.freeze({ targetTweetId, reservationId, reservedAt });
+      const originId = snapshotXRequiredNonEmptyString(
+        reader.read("originId"),
+        MAX_TARGET_CODE_UNITS,
+        context,
+      );
+      if (targetTweetId !== expectedTargetId || !isXProfileOriginId(originId)) {
+        failXGeneratedContentSnapshot();
+      }
+      return Object.freeze({ targetTweetId, reservationId, reservedAt, originId });
     },
   );
 }
@@ -138,7 +146,7 @@ function snapshotLedgerEntryValue(
 ): Readonly<ReplyLedgerEntry> {
   return snapshotXPlainRecord(
     value,
-    ["targetTweetId", "stagedAt", "status", "draftRef"],
+    ["targetTweetId", "stagedAt", "status", "draftRef", "originId"],
     [],
     context,
     (reader) => {
@@ -161,16 +169,22 @@ function snapshotLedgerEntryValue(
       const draftRef = rawDraftRef === null
         ? null
         : snapshotXBoundedString(rawDraftRef, MAX_TARGET_CODE_UNITS, context);
+      const originId = snapshotXRequiredNonEmptyString(
+        reader.read("originId"),
+        MAX_TARGET_CODE_UNITS,
+        context,
+      );
       const stagedAtTime = Date.parse(stagedAt);
       if (
         targetTweetId !== expectedTargetId ||
         (status !== "staged" && status !== "staged-unverified") ||
         !Number.isFinite(stagedAtTime) ||
-        new Date(stagedAtTime).toISOString() !== stagedAt
+        new Date(stagedAtTime).toISOString() !== stagedAt ||
+        !isXProfileOriginId(originId)
       ) {
         failXGeneratedContentSnapshot();
       }
-      return Object.freeze({ targetTweetId, stagedAt, status, draftRef });
+      return Object.freeze({ targetTweetId, stagedAt, status, draftRef, originId });
     },
   );
 }

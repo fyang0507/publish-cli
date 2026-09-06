@@ -116,11 +116,13 @@ The **single source of truth for content is the local markdown filesystem**, not
 
 ### 4.1 Runtime data lives off Google Drive
 
-The canonical content folder lives in a local, caller-supplied data repo (**not** on a cloud-synced path). publish-cli's **runtime state** — the persistent Playwright profile, the exported cookie cache, and the better-sqlite3 dedupe DB — also lives off any cloud-synced path, under a configurable **`PUBLISH_DATA_DIR`** (default a local app-data path). Reasons:
+The canonical content folder lives in a local, caller-supplied data repo (**not** on a cloud-synced path). Persistent Playwright profiles and cookie/token caches live under configurable **`PUBLISH_DATA_DIR`** (default a local app-data path). The durable better-sqlite3 file lives at `<data_repo>/.publish-cli/publish.db` when a data repo resolves and falls back to `<PUBLISH_DATA_DIR>/publish.db`; both locations must remain local rather than cloud-synchronized. Reasons:
 
-- The persistent browser profile and SQLite file are mutated continuously and tolerate no cloud-sync races, file-lock contention, or partial uploads.
+- Persistent browser profiles and the SQLite file are mutated continuously and tolerate no cloud-sync races, file-lock contention, or partial uploads.
 - Cookies and a logged-in profile are **secrets**; they must not be replicated into any cloud-synced location.
 - This keeps the "scratchpad" (local) cleanly separated from any archival surface (a cloud-synced drive is an archive only, never touched by this tool).
+
+X reply idempotency is intentionally one-machine/local-profile coordination. One private random opaque identity lives inside the machine-local X profile; the reply database binds to it atomically, and each new reservation/finalized row carries it. Processes coordinate only when they use that same live SQLite file and profile origin. A copied database or copied profile is unsupported and provides no physical-machine identity guarantee. The first post-upgrade profile binds an unbound legacy database prospectively; preserved legacy reply rows remain origin-unknown and cannot be attributed, bypassed with `--force`, or cleared by stale-reservation recovery.
 
 ---
 
@@ -232,7 +234,7 @@ lists:
 - Fetch **recent posts** from each watch List and each search query.
 
 **Dedupe**
-- Store seen posts in a **`better-sqlite3`** store (**`src/db.ts`**) keyed by tweet id (with origin, author, timestamp, captured text). The DB file lives under **`PUBLISH_DATA_DIR`** (off Google Drive).
+- Store seen posts in a **`better-sqlite3`** store (**`src/db.ts`**) keyed by tweet id (with origin, author, timestamp, captured text). The DB uses the configured durable path above; X reply ownership remains separately bound to the machine-local X profile.
 - Repeated polls **only surface new items**; previously-seen posts are filtered out.
 
 **Triage**
