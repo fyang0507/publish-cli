@@ -126,6 +126,8 @@ publish reddit draft --subreddit agents --title "Title" --from post.md
 publish wechat draft --from article.md --cover cover.png
 ```
 
+X Articles require an explicit JPEG, PNG, or WebP cover at an exact 5:2 ratio. The CLI uploads its validated bytes unchanged. X may resize the hosted cover; verification requires one cover with the same hosted identity, actual dimensions, and position before and after reopening the native draft. Source dimensions remain input evidence.
+
 X Article body images use ordinary Markdown image paragraphs in the canonical
 source, for example `![](images/diagram.png)` or the empty-alt reference form
 `![][diagram]`. Each image must be the only content in its top-level paragraph,

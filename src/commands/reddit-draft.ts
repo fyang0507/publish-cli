@@ -16,7 +16,7 @@ import {
   LocalValidationError,
   type LocalValidationProblem,
 } from "../capabilities/validation.js";
-import type { StageDraftResult } from "../reddit/draftPoster.js";
+import type { RedditSaveDiagnostic, StageDraftResult } from "../reddit/draftPoster.js";
 import {
   TerminalOutputBudget,
   TerminalProjectionError,
@@ -30,7 +30,9 @@ import {
   snapshotBoolean,
   snapshotBoundedString,
   snapshotClosedRecord,
+  snapshotDenseArray,
   terminalProjectionFailureMessage,
+  type ClosedSnapshotContext,
 } from "../terminalOutput.js";
 import {
   createDryRunReceipt,
@@ -86,6 +88,30 @@ export interface RedditStageCommandOutcome {
   platformTouched: true;
   blocked: boolean;
   flair: string | null;
+  saveDiagnostic?: RedditSaveDiagnostic;
+}
+
+function snapshotRedditSaveDiagnostic(value: unknown, context: ClosedSnapshotContext): RedditSaveDiagnostic {
+  return snapshotClosedRecord(value, ["reason", "validationProbe", "validation"], [], context, (diagnostic) => {
+    const reason = diagnostic.read("reason");
+    if (reason !== "save_control_missing" && reason !== "save_control_disabled" && reason !== "save_control_probe_inconclusive") {
+      throw new TerminalProjectionError();
+    }
+    const validationProbe = diagnostic.read("validationProbe");
+    if (validationProbe !== "complete" && validationProbe !== "inconclusive") throw new TerminalProjectionError();
+    const fields = new Set<string>();
+    const validation = snapshotDenseArray(diagnostic.read("validation"), 4, context, (entry) =>
+      snapshotClosedRecord(entry, ["field", "code"], [], context, (item) => {
+        const field = item.read("field");
+        if (field !== "title" && field !== "body" && field !== "flair" && field !== "subreddit") throw new TerminalProjectionError();
+        if (fields.has(field)) throw new TerminalProjectionError();
+        fields.add(field);
+        const code = item.read("code");
+        if (code !== "field_invalid" && code !== "validation_guidance_present") throw new TerminalProjectionError();
+        return Object.freeze({ field, code });
+      }));
+    return Object.freeze({ reason, validationProbe, validation });
+  });
 }
 
 /** Keep save-confirmation truth and exit semantics independent of browser code. */
@@ -97,7 +123,7 @@ export function classifyRedditStageResult(
   const result = snapshotClosedRecord(
     value,
     ["kind", "saveStatus", "saved", "verified", "subreddit", "note"],
-    ["flair", "blocked"],
+    ["flair", "blocked", "saveDiagnostic"],
     context,
     (reader) => {
       if (reader.read("kind") !== "self") throw new TerminalProjectionError();
@@ -118,6 +144,9 @@ export function classifyRedditStageResult(
       const blocked = reader.has("blocked") && reader.read("blocked") !== undefined
         ? snapshotBoundedString(reader.read("blocked"), 25_000_000, context)
         : undefined;
+      const saveDiagnostic = reader.has("saveDiagnostic")
+        ? snapshotRedditSaveDiagnostic(reader.read("saveDiagnostic"), context)
+        : undefined;
       return Object.freeze({
         kind: "self" as const,
         saveStatus,
@@ -126,6 +155,7 @@ export function classifyRedditStageResult(
         subreddit,
         ...(reader.has("flair") ? { flair } : {}),
         ...(reader.has("blocked") ? { blocked } : {}),
+        ...(saveDiagnostic ? { saveDiagnostic } : {}),
         note,
       });
     },
@@ -135,7 +165,8 @@ export function classifyRedditStageResult(
     ((result.saveStatus === "delivery_unknown" || result.saveStatus === "unconfirmed") &&
       (!result.saved || result.verified)) ||
     (result.saveStatus === "toast_confirmed" && (!result.saved || !result.verified)) ||
-    (result.blocked !== undefined && result.saveStatus !== "not_attempted")
+    (result.blocked !== undefined && result.saveStatus !== "not_attempted") ||
+    (result.saveDiagnostic !== undefined && (result.saveStatus !== "not_attempted" || result.blocked !== undefined))
   ) {
     throw new TerminalProjectionError();
   }
@@ -162,6 +193,7 @@ export function classifyRedditStageResult(
       platformTouched: true,
       blocked: false,
       flair: result.flair ?? null,
+      ...(result.saveDiagnostic ? { saveDiagnostic: result.saveDiagnostic } : {}),
     };
   }
   if (result.saveStatus === "delivery_unknown" || result.saveStatus === "unconfirmed" || !result.verified) {
@@ -198,9 +230,40 @@ export function receiptForRedditStageOutcome(
   outcome: RedditStageCommandOutcome,
   warnings: readonly string[] = [],
 ): Readonly<TransportReceipt> {
+  // Re-snapshot the final outcome so later mutation/accessors cannot introduce
+  // native text or claim no click after a delivery-unknown attempt.
+  const context = createClosedSnapshotContext();
+  outcome = snapshotClosedRecord(outcome,
+    ["exitCode", "stream", "message", "saveStatus", "platformTouched", "blocked", "flair"],
+    ["saveDiagnostic"], context, (reader) => {
+      const exitCode = reader.read("exitCode");
+      const stream = reader.read("stream");
+      const saveStatus = reader.read("saveStatus");
+      if ((exitCode !== 0 && exitCode !== 1) || (stream !== "stdout" && stream !== "stderr") ||
+        (saveStatus !== "not_attempted" && saveStatus !== "delivery_unknown" && saveStatus !== "unconfirmed" && saveStatus !== "toast_confirmed") ||
+        reader.read("platformTouched") !== true) throw new TerminalProjectionError();
+      const blocked = snapshotBoolean(reader.read("blocked"));
+      const saveDiagnostic = reader.has("saveDiagnostic")
+        ? snapshotRedditSaveDiagnostic(reader.read("saveDiagnostic"), context) : undefined;
+      if (saveDiagnostic && (saveStatus !== "not_attempted" || blocked || exitCode !== 1)) throw new TerminalProjectionError();
+      const flair = reader.read("flair");
+      return Object.freeze({
+        exitCode, stream, saveStatus, platformTouched: true as const, blocked,
+        message: snapshotBoundedString(reader.read("message"), 25_000_000, context),
+        flair: flair === null ? null : snapshotBoundedString(flair, 25_000_000, context),
+        ...(saveDiagnostic ? { saveDiagnostic } : {}),
+      });
+    });
   const verified = outcome.saveStatus === "toast_confirmed" && outcome.exitCode === 0;
+  const diagnostic = outcome.saveDiagnostic;
+  const readinessNote = diagnostic?.reason === "save_control_disabled"
+    ? "Reddit disabled Save Draft after the composer was populated; no save click was attempted."
+    : diagnostic?.reason === "save_control_probe_inconclusive"
+      ? "Save Draft actionability could not be established; no save click was attempted."
+      : "The explicit Save Draft control was unavailable; no save click was attempted.";
   // A non-blocked not_attempted result is returned only after the composer was
-  // populated and the explicit Save Draft affordance could not be resolved.
+  // populated and the explicit Save Draft affordance was unavailable, disabled,
+  // or could not be positively checked for actionability.
   // Preserve the existing duplicate-risk boundary: absence of a click is not
   // proof that Reddit retained no draft/composer state.
   const preparedComposerUncertain = outcome.saveStatus === "not_attempted" && !outcome.blocked;
@@ -222,6 +285,13 @@ export function receiptForRedditStageOutcome(
               problems: [],
               notes: [
                 "The authenticated subreddit preflight passed, but the native save was not positively confirmed.",
+                ...(diagnostic ? [
+                  readinessNote,
+                  ...diagnostic.validation.map(({ field, code }) =>
+                    `Native ${field} validation: ${code === "field_invalid" ? "field marked invalid" : "guidance is visible"}. Review the native field guidance and community content rules.`),
+                  ...(diagnostic.validationProbe === "inconclusive"
+                    ? ["Native field validation inspection was incomplete; no absence of validation is claimed."] : []),
+                ] : []),
               ],
             },
     },
@@ -261,16 +331,17 @@ export function receiptForRedditStageOutcome(
     error: verified ? null : {
       source: "platform",
       stage: outcome.blocked ? "composer_eligibility" : "save_draft",
-      code: outcome.blocked ? "reddit_eligibility_blocked" : `reddit_${outcome.saveStatus}`,
+      code: outcome.blocked ? "reddit_eligibility_blocked" : `reddit_${diagnostic?.reason ?? outcome.saveStatus}`,
       httpStatus: null,
       sanitizedMessage: outcome.blocked
         ? "Reddit blocked this draft in the live composer."
-        : "Reddit did not provide positive save confirmation for this attempt.",
-      classification: outcome.saveStatus === "delivery_unknown" ? "unknown" : "known",
+        : diagnostic ? readinessNote : "Reddit did not provide positive save confirmation for this attempt.",
+      classification: outcome.saveStatus === "delivery_unknown" || diagnostic?.reason === "save_control_probe_inconclusive" ? "unknown" : "known",
       retryable: null,
-      inputRelated: outcome.blocked ? null : false,
+      inputRelated: outcome.blocked || diagnostic ? null : false,
       suggestedCorrection: draftPossible
-        ? "Inspect Reddit DRAFTS manually in the same CLI-owned profile before deciding whether a separate retry is safe."
+        ? (diagnostic ? "Review the native field validation guidance without bypassing community restrictions. " : "") +
+          "Inspect Reddit DRAFTS manually in the same CLI-owned profile before deciding whether a separate retry is safe."
         : outcome.blocked
           ? "Review the subreddit eligibility requirements before a separate attempt."
           : "Calibrate the Save Draft affordance before a separate attempt.",

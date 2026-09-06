@@ -39,7 +39,7 @@
  * borrow its persistent context.
  */
 
-import type { BrowserContext, Page, Locator } from "playwright";
+import { errors, type BrowserContext, type Page, type Locator } from "playwright";
 import { getBrowserContext, type EnsureSessionOptions } from "./session.js";
 import { tolerantLocator, optionalLocator, typeText } from "../x/draftPoster.js";
 import { snapshotRedditGeneratedSelfPost, type GeneratedSelfPost } from "./content.js";
@@ -298,8 +298,61 @@ export interface StageDraftResult {
    * toward Post.
    */
   blocked?: string;
+  /** A populated composer whose explicit Save control was not safely actionable. */
+  saveDiagnostic?: RedditSaveDiagnostic;
   /** Human-readable note about how the draft was saved / what to check. */
   note: string;
+}
+
+export interface RedditSaveDiagnostic {
+  readonly reason: "save_control_missing" | "save_control_disabled" | "save_control_probe_inconclusive";
+  readonly validationProbe: "complete" | "inconclusive";
+  readonly validation: readonly {
+    readonly field: "title" | "body" | "flair" | "subreddit";
+    readonly code: "field_invalid" | "validation_guidance_present";
+  }[];
+}
+
+/** Only field-specific validation state is read; never messages, editor values or page text. */
+export async function inspectRedditSaveValidation(
+  page: Page,
+): Promise<Pick<RedditSaveDiagnostic, "validationProbe" | "validation">> {
+  const validation: Array<RedditSaveDiagnostic["validation"][number]> = [];
+  let validationProbe: RedditSaveDiagnostic["validationProbe"] = "complete";
+  for (const [field, names] of [
+    ["title", ["title"]], ["body", ["body"]],
+    ["flair", ["flair", "flairId"]], ["subreddit", ["subreddit", "subredditName"]],
+  ] as const) {
+    try {
+      // CSS locators pierce open shadow roots. In the current composer the
+      // validation host's innerText is blank; its visible <p> holds the message.
+      const messages = page.locator(names.map((name) =>
+        `r-form-validation-message[field-name="${name}"] p`).join(", "));
+      const count = await messages.count();
+      let guidanceVisible = false;
+      for (let index = 0; index < Math.min(count, 4); index += 1) {
+        const candidate = messages.nth(index);
+        if (await candidate.isVisible()) { guidanceVisible = true; break; }
+      }
+      if (count > 4) validationProbe = "inconclusive";
+      const invalid = page.locator(names.map((name) =>
+        `[name="${name}"][aria-invalid="true"]`).join(", "));
+      const invalidCount = await invalid.count();
+      let fieldInvalid = false;
+      for (let index = 0; index < Math.min(invalidCount, 4); index += 1) {
+        if (await invalid.nth(index).isVisible()) { fieldInvalid = true; break; }
+      }
+      if (invalidCount > 4) validationProbe = "inconclusive";
+      if (fieldInvalid || guidanceVisible) validation.push(Object.freeze({
+        field, code: fieldInvalid ? "field_invalid" : "validation_guidance_present",
+      }));
+    } catch {
+      // Failure to read validation is not evidence that no validation exists.
+      // Never expose the error, which can contain browser/session details.
+      validationProbe = "inconclusive";
+    }
+  }
+  return Object.freeze({ validationProbe, validation: Object.freeze(validation) });
 }
 
 const OPEN_TIMEOUT = 15_000;
@@ -525,6 +578,36 @@ async function setToggleOn(page: Page, candidates: readonly string[]): Promise<b
 }
 
 /**
+ * Observe native control visibility without treating an unreadable page as an
+ * absent control. A timed-out visibility wait needs one successful immediate
+ * observation before the next selector; other browser failures propagate.
+ */
+async function observableRedditLocator(
+  page: Page,
+  candidates: readonly string[],
+  timeout = 3_000,
+): Promise<Locator | null> {
+  const deadline = Date.now() + timeout;
+  const perCandidate = Math.max(1, Math.floor(timeout / Math.max(1, candidates.length)));
+  for (const selector of candidates) {
+    const candidate = page.locator(selector.startsWith("//") ? `xpath=${selector}` : selector).first();
+    const remaining = deadline - Date.now();
+    if (remaining > 0) {
+      try {
+        await candidate.waitFor({ state: "visible", timeout: Math.min(perCandidate, remaining) });
+        return candidate;
+      } catch (error) {
+        if (!(error instanceof errors.TimeoutError)) throw error;
+      }
+    }
+    // This also checks candidates left after the shared wait budget expires.
+    // Closed-page/protocol failures here must not become "missing" either.
+    if (await candidate.isVisible()) return candidate;
+  }
+  return null;
+}
+
+/**
  * Save the current composer as a draft WITHOUT posting.
  *
  * SAFEGUARD (mirrors LinkedIn's saveAsDraftLinkedIn): if the "Save Draft"
@@ -534,7 +617,7 @@ async function setToggleOn(page: Page, candidates: readonly string[]): Promise<b
  */
 export async function saveDraftReddit(
   page: Page,
-  locate: typeof optionalLocator = optionalLocator,
+  locate: typeof optionalLocator = observableRedditLocator,
   probeToast: (
     page: Page,
     candidates: readonly string[],
@@ -544,18 +627,47 @@ export async function saveDraftReddit(
   confirmed: boolean;
   deliveryUnknown: boolean;
   toastBeforeClick: RedditToastPreclickState;
+  diagnostic?: RedditSaveDiagnostic;
 }> {
-  const save = await locate(page, REDDIT_COMPOSER_SELECTORS.saveDraftButton, 6_000);
-  if (!save) {
-    // The "Save Draft" affordance didn't appear — do NOT guess another button
-    // (a wrong click could post). Bail. NEVER fall through to Post.
-    return { clicked: false, confirmed: false, deliveryUnknown: false, toastBeforeClick: "not_checked" };
+  let save: Locator | null = null;
+  let reason: RedditSaveDiagnostic["reason"] | undefined;
+  try {
+    save = await locate(page, REDDIT_COMPOSER_SELECTORS.saveDraftButton, 3_000);
+    if (!save) reason = "save_control_missing";
+  } catch {
+    // No click has been attempted, but failed observation cannot prove absence.
+    reason = "save_control_probe_inconclusive";
+  }
+  if (save) {
+    try {
+      // Wait for normal asynchronous validation without dispatching a click.
+      // Trial requires Playwright's visibility/enabled/stability/event checks;
+      // positive live state is checked again before the one actual click.
+      await save.click({ trial: true, timeout: 3_000 });
+      if (!(await save.isVisible())) reason = "save_control_probe_inconclusive";
+      else if (!(await save.isEnabled())) reason = "save_control_disabled";
+    } catch {
+      reason = "save_control_probe_inconclusive";
+      try {
+        if (await save.isVisible() && !(await save.isEnabled())) reason = "save_control_disabled";
+      } catch {
+        // Keep uncertainty; neither a failed trial nor a failed observation
+        // means the native control is definitely disabled.
+      }
+    }
+  }
+  if (reason) {
+    const diagnostic = Object.freeze({ reason, ...await inspectRedditSaveValidation(page) });
+    return {
+      clicked: false, confirmed: false, deliveryUnknown: false,
+      toastBeforeClick: "not_checked", diagnostic,
+    };
   }
   // A toast already visible cannot prove causality for this click. Snapshot its
   // absence first; confirmation requires an absent-before / visible-after edge.
   const toastBeforeClick = await probeToast(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast);
   try {
-    await save.click();
+    await save!.click();
   } catch {
     // Playwright can reject after dispatch; the platform may have received the
     // save. Preserve that boundary instead of pretending Save was not attempted.
@@ -565,7 +677,13 @@ export async function saveDraftReddit(
   // visible-after transition is attributed to this attempt; the drafts modal can
   // show a stale list too (see saveConfirmToast). Missing/ambiguous evidence means
   // unconfirmed, never that we should retry or guess another button.
-  const toast = await locate(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast, 6_000);
+  let toast: Locator | null = null;
+  try {
+    toast = await locate(page, REDDIT_COMPOSER_SELECTORS.saveConfirmToast, 6_000);
+  } catch {
+    // The save was delivered. An unreadable confirmation surface keeps that
+    // progress and remains unconfirmed; never retry the save.
+  }
   return {
     clicked: true,
     confirmed: toastBeforeClick === "absent" && !!toast,
@@ -607,11 +725,19 @@ export function describeRedditSaveAttempt(
   confirmed: boolean,
   toastBeforeClick: RedditToastPreclickState = "not_checked",
   deliveryUnknown = false,
+  diagnostic?: RedditSaveDiagnostic,
 ): string {
   if (!clicked) {
+    const readiness = diagnostic?.reason === "save_control_disabled"
+      ? 'Reddit disabled "Save Draft" after the composer was populated.'
+      : diagnostic?.reason === "save_control_probe_inconclusive"
+        ? 'The CLI could not positively establish that "Save Draft" was visible and enabled.'
+        : 'Could not resolve the "Save Draft" affordance (NEEDS CALIBRATION).';
+    const validation = diagnostic?.validation.map(({ field, code }) =>
+      `Native ${field} validation: ${code === "field_invalid" ? "field marked invalid" : "guidance is visible"}.`).join(" ") ?? "";
     return (
-      `Could not resolve the "Save Draft" affordance (NEEDS CALIBRATION), so the CLI did not ` +
-      "click a save control. No native draft was confirmed; NEVER auto-posted. Compare Reddit " +
+      `${readiness} The CLI did not click a save control. ${validation} ` +
+      "No native draft was confirmed; NEVER auto-posted. Review the native field guidance and compare Reddit " +
       "DRAFTS manually in the same CLI-owned profile before deciding any next action. Do not " +
       "rerun automatically or blindly: Reddit has no draft idempotency ledger and another " +
       "attempt could duplicate an existing draft."
@@ -729,10 +855,11 @@ export async function stageDraft(
       confirmed: verified,
       deliveryUnknown,
       toastBeforeClick,
+      diagnostic: saveDiagnostic,
     } = await saveDraftReddit(page);
 
     const noteParts: string[] = [
-      describeRedditSaveAttempt(sub, saved, verified, toastBeforeClick, deliveryUnknown),
+      describeRedditSaveAttempt(sub, saved, verified, toastBeforeClick, deliveryUnknown, saveDiagnostic),
     ];
     if (!markdown) {
       noteParts.push(
@@ -764,6 +891,7 @@ export async function stageDraft(
       verified,
       subreddit: sub,
       flair: flairApplied,
+      ...(saveDiagnostic ? { saveDiagnostic } : {}),
       note: noteParts.join(" "),
     };
   } finally {

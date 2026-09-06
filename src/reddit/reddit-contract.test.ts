@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { Locator, Page } from "playwright";
+import { errors, type Locator, type Page } from "playwright";
 import { splitLeadingFrontmatter } from "../commands/contentInput.js";
 import {
   classifyRedditStageResult,
@@ -14,7 +14,9 @@ import {
 } from "./content.js";
 import {
   describeRedditSaveAttempt,
+  inspectRedditSaveValidation,
   saveDraftReddit,
+  type RedditSaveDiagnostic,
   type StageDraftResult,
 } from "./draftPoster.js";
 
@@ -423,7 +425,11 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
   let clickCount = 0;
   let locateCount = 0;
   let presenceChecks = 0;
-  const save = { click: async () => { clickCount += 1; } } as unknown as Locator;
+  const save = {
+    click: async (options?: { trial?: boolean }) => { if (!options?.trial) clickCount += 1; },
+    isVisible: async () => true,
+    isEnabled: async () => true,
+  } as unknown as Locator;
   const locate = async (
     _page: Page,
     _candidates: readonly string[],
@@ -571,13 +577,20 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
       return null;
     },
   );
-  assert.deepEqual(absent, { clicked: false, confirmed: false, deliveryUnknown: false, toastBeforeClick: "not_checked" });
+  assert.deepEqual(absent, {
+    clicked: false, confirmed: false, deliveryUnknown: false, toastBeforeClick: "not_checked",
+    diagnostic: { reason: "save_control_missing", validationProbe: "inconclusive", validation: [] },
+  });
   assert.equal(absentLocateCount, 1);
   assert.equal(clickCount, 7);
 
   const rejectedClick = await saveDraftReddit(
     {} as Page,
-    async () => ({ click: async () => { throw new Error("dispatched then detached"); } } as unknown as Locator),
+    async () => ({
+      click: async (options?: { trial?: boolean }) => { if (!options?.trial) throw new Error("dispatched then detached"); },
+      isVisible: async () => true,
+      isEnabled: async () => true,
+    } as unknown as Locator),
     async () => "absent",
   );
   assert.deepEqual(rejectedClick, {
@@ -588,6 +601,198 @@ test("Reddit save helper requires fresh toast evidence, clicks once, and never r
   });
   assert.match(describeRedditSaveAttempt("agents", true, false, "absent", true), /delivery is unknown/i);
   assert.match(describeRedditSaveAttempt("agents", true, false, "absent", true), /do not rerun/i);
+});
+
+function validationPage(selectors: string[] = []): Page {
+  return {
+    locator: (selector: string) => {
+      selectors.push(selector);
+      const visible = selector.includes('field-name="body"') ||
+        selector.includes('name="body"') || selector.includes('field-name="subredditName"');
+      return {
+        count: async () => visible ? 1 : 0,
+        nth: () => ({
+          isVisible: async () => true,
+          innerText: () => { throw new Error("Native validation text must not be read"); },
+        }),
+      };
+    },
+  } as unknown as Page;
+}
+
+test("Reddit default Save lookup distinguishes observed absence from an unreadable page", async () => {
+  for (const observation of ["absent", "closed_page", "protocol_failure", "timeout_then_unreadable"] as const) {
+    const waitBudgets: number[] = [];
+    let realSaveClicks = 0;
+    let toastProbes = 0;
+    const page = {
+      locator: () => {
+        if (observation === "protocol_failure") throw new Error("PRIVATE_PROTOCOL_DETAIL");
+        const candidate = {
+          waitFor: async (options: { timeout: number }) => {
+            waitBudgets.push(options.timeout);
+            if (observation === "closed_page") throw new Error("Target page has been closed: PRIVATE_PAGE_DETAIL");
+            throw new errors.TimeoutError("PRIVATE_VISIBILITY_TIMEOUT");
+          },
+          isVisible: async () => {
+            if (observation === "timeout_then_unreadable") throw new Error("PRIVATE_PROTOCOL_DETAIL");
+            return false;
+          },
+          click: async (options?: { trial?: boolean }) => { if (!options?.trial) realSaveClicks += 1; },
+        };
+        return {
+          first: () => candidate,
+          count: async () => {
+            if (observation !== "absent") throw new Error("PRIVATE_VALIDATION_DETAIL");
+            return 0;
+          },
+        };
+      },
+    } as unknown as Page;
+    const result = await saveDraftReddit(page, undefined, async () => { toastProbes += 1; return "absent"; });
+    const expectedReason = observation === "absent" ? "save_control_missing" : "save_control_probe_inconclusive";
+    assert.equal(result.diagnostic?.reason, expectedReason, observation);
+    assert.equal(result.clicked, false, observation);
+    assert.equal(result.deliveryUnknown, false, observation);
+    assert.equal(realSaveClicks, 0, observation);
+    assert.equal(toastProbes, 0, observation);
+    assert.ok(waitBudgets.every((timeout) => timeout > 0 && timeout <= 750));
+    assert.ok(waitBudgets.reduce((sum, timeout) => sum + timeout, 0) <= 3_000);
+    assert.equal(waitBudgets.length, observation === "absent" ? 4 : observation === "protocol_failure" ? 0 : 1);
+    const receipt = receiptForRedditStageOutcome(classifyRedditStageResult({
+      kind: "self", subreddit: "agents", saveStatus: "not_attempted", saved: false, verified: false,
+      note: "No Save dispatched.", saveDiagnostic: result.diagnostic,
+    }));
+    assert.equal(receipt.error?.code, `reddit_${expectedReason}`);
+    assert.equal(receipt.error?.classification, observation === "absent" ? "known" : "unknown");
+    assert.doesNotMatch(JSON.stringify({ result, receipt }), /PRIVATE_/);
+  }
+});
+
+test("Reddit rejected Save lookup remains inconclusive without probing or dispatching Save", async () => {
+  let lookups = 0;
+  let toastProbes = 0;
+  const result = await saveDraftReddit(validationPage(), async (_page, _selectors, timeout) => {
+    lookups += 1;
+    assert.equal(timeout, 3_000);
+    throw new Error("PRIVATE_LOOKUP_DETAIL");
+  }, async () => { toastProbes += 1; return "absent"; });
+  assert.equal(lookups, 1);
+  assert.equal(toastProbes, 0);
+  assert.equal(result.clicked, false);
+  assert.equal(result.confirmed, false);
+  assert.equal(result.deliveryUnknown, false);
+  assert.equal(result.diagnostic?.reason, "save_control_probe_inconclusive");
+  assert.doesNotMatch(JSON.stringify(result), /PRIVATE_LOOKUP_DETAIL/);
+});
+
+test("Reddit failed post-click toast lookup preserves the delivered, unconfirmed save", async () => {
+  let lookups = 0;
+  let realSaveClicks = 0;
+  const result = await saveDraftReddit({} as Page, async () => {
+    lookups += 1;
+    if (lookups > 1) throw new Error("PRIVATE_TOAST_PROTOCOL_DETAIL");
+    return {
+      click: async (options?: { trial?: boolean }) => { if (!options?.trial) realSaveClicks += 1; },
+      isVisible: async () => true,
+      isEnabled: async () => true,
+    } as unknown as Locator;
+  }, async () => "absent");
+  assert.equal(realSaveClicks, 1);
+  assert.equal(lookups, 2);
+  assert.deepEqual(result, { clicked: true, confirmed: false, deliveryUnknown: false, toastBeforeClick: "absent" });
+});
+
+test("Reddit disabled Save and failed readiness never dispatch a save or probe a confirmation toast", async () => {
+  for (const failure of ["disabled", "covered", "probe_exception"] as const) {
+    let trialCount = 0;
+    let clickCount = 0;
+    let locateCount = 0;
+    let toastProbeCount = 0;
+    const result = await saveDraftReddit(validationPage(), async () => {
+      locateCount += 1;
+      return {
+        click: async (options?: { trial?: boolean; timeout?: number }) => {
+          if (options?.trial) {
+            trialCount += 1;
+            assert.equal(options.timeout, 3_000);
+            throw new Error("PRIVATE_BROWSER_DETAIL");
+          }
+          clickCount += 1;
+        },
+        isVisible: async () => true,
+        isEnabled: async () => {
+          if (failure === "probe_exception") throw new Error("PRIVATE_BROWSER_DETAIL");
+          return failure !== "disabled";
+        },
+      } as unknown as Locator;
+    }, async () => { toastProbeCount += 1; return "absent"; });
+    assert.equal(trialCount, 1, failure);
+    assert.equal(clickCount, 0, failure);
+    assert.equal(locateCount, 1, failure);
+    assert.equal(toastProbeCount, 0, failure);
+    assert.deepEqual(result, {
+      clicked: false, confirmed: false, deliveryUnknown: false, toastBeforeClick: "not_checked",
+      diagnostic: {
+        reason: failure === "disabled" ? "save_control_disabled" : "save_control_probe_inconclusive",
+        validationProbe: "complete",
+        validation: [
+          { field: "body", code: "field_invalid" },
+          { field: "subreddit", code: "validation_guidance_present" },
+        ],
+      },
+    });
+    assert.doesNotMatch(JSON.stringify(result), /PRIVATE_BROWSER_DETAIL/);
+  }
+});
+
+test("Reddit trial waits for transient validation before the one real save click", async () => {
+  let enabled = false;
+  const events: string[] = [];
+  let locateCount = 0;
+  const result = await saveDraftReddit({} as Page, async () => {
+    locateCount += 1;
+    if (locateCount > 1) return {} as Locator;
+    return {
+      click: async (options?: { trial?: boolean }) => {
+        if (options?.trial) { events.push("trial"); enabled = true; }
+        else events.push("save");
+      },
+      isVisible: async () => true,
+      isEnabled: async () => enabled,
+    } as unknown as Locator;
+  }, async () => { events.push("toast_absence"); return "absent"; });
+  assert.deepEqual(events, ["trial", "toast_absence", "save"]);
+  assert.equal(result.confirmed, true);
+  assert.equal(result.diagnostic, undefined);
+});
+
+test("Reddit validation inspection is scoped, bounded, closed, and does not read native text", async () => {
+  const selectors: string[] = [];
+  const result = await inspectRedditSaveValidation(validationPage(selectors));
+  assert.deepEqual(result.validation, [
+    { field: "body", code: "field_invalid" },
+    { field: "subreddit", code: "validation_guidance_present" },
+  ]);
+  assert.ok(selectors.every((selector) =>
+    selector.includes('r-form-validation-message[field-name=') || selector.includes('[aria-invalid="true"]')));
+  assert.ok(selectors.some((selector) => selector.includes('r-form-validation-message[field-name="body"] p')));
+  assert.ok(Object.isFrozen(result.validation));
+  assert.ok(result.validation.every(Object.isFrozen));
+  let visibilityChecks = 0;
+  const tooMany = await inspectRedditSaveValidation({
+    locator: () => ({
+      count: async () => 100_000,
+      nth: () => ({ isVisible: async () => { visibilityChecks += 1; return false; } }),
+    }),
+  } as unknown as Page);
+  assert.equal(visibilityChecks, 32);
+  assert.equal(tooMany.validationProbe, "inconclusive");
+  assert.deepEqual(tooMany.validation, []);
+  const failed = await inspectRedditSaveValidation({
+    locator: () => { throw new Error("PRIVATE_PAGE_TEXT"); },
+  } as unknown as Page);
+  assert.deepEqual(failed, { validationProbe: "inconclusive", validation: [] });
 });
 
 test("Reddit command maps only a toast-confirmed save to success", () => {
@@ -673,4 +878,86 @@ test("Reddit receipt retains populated-composer uncertainty when Save Draft is u
   }));
   assert.equal(blocked.terminalState, "platform_rejected");
   assert.equal(blocked.remoteResidue.length, 0);
+});
+
+test("Reddit readiness receipt distinguishes field validation from pre-content eligibility and click uncertainty", () => {
+  const diagnostic: RedditSaveDiagnostic = {
+    reason: "save_control_disabled", validationProbe: "complete",
+    validation: [{ field: "body", code: "field_invalid" }],
+  };
+  const stage: StageDraftResult = {
+    kind: "self", saveStatus: "not_attempted", saved: false, verified: false,
+    subreddit: "agents", note: "No save click was attempted.", saveDiagnostic: diagnostic,
+  };
+  const outcome = classifyRedditStageResult(stage);
+  const receipt = receiptForRedditStageOutcome(outcome);
+  assert.equal(receipt.terminalState, "native_draft_possible");
+  assert.equal(receipt.error?.code, "reddit_save_control_disabled");
+  assert.equal(receipt.error?.classification, "known");
+  assert.equal(receipt.error?.stage, "save_draft");
+  assert.ok(receipt.remoteResidue.some((entry) => entry.state === "prepared_composer_save_not_attempted"));
+  assert.match(receipt.validation.live.notes.join(" "), /body validation: field marked invalid/);
+  assert.match(receipt.error!.suggestedCorrection!, /without bypassing community restrictions/);
+  assert.match(receipt.error!.suggestedCorrection!, /same CLI-owned profile/);
+  assert.ok(Object.isFrozen(outcome.saveDiagnostic));
+  assert.ok(Object.isFrozen(outcome.saveDiagnostic?.validation));
+  (diagnostic.validation[0] as { field: string }).field = "PRIVATE_SOURCE_TEXT";
+  assert.equal(outcome.saveDiagnostic!.validation[0].field, "body");
+  const inconclusive = receiptForRedditStageOutcome(classifyRedditStageResult({
+    ...stage,
+    saveDiagnostic: { reason: "save_control_probe_inconclusive", validationProbe: "inconclusive", validation: [] },
+  }));
+  assert.equal(inconclusive.error?.classification, "unknown");
+  assert.equal(inconclusive.error?.code, "reddit_save_control_probe_inconclusive");
+  assert.match(inconclusive.validation.live.notes.join(" "), /inspection was incomplete/);
+  assert.equal(inconclusive.terminalState, "native_draft_possible");
+});
+
+test("Reddit diagnostic snapshots reject raw text, accessors, malformed fields and contradictory save phases", () => {
+  let getterReads = 0;
+  const valid = {
+    reason: "save_control_disabled", validationProbe: "complete",
+    validation: [{ field: "body", code: "field_invalid" }],
+  };
+  const base: StageDraftResult = {
+    kind: "self", saveStatus: "not_attempted", saved: false, verified: false,
+    subreddit: "agents", note: "Prepared composer.",
+  };
+  for (const diagnostic of [
+    { ...valid, reason: "PRIVATE_SOURCE_TEXT" },
+    { ...valid, message: "PRIVATE_SOURCE_TEXT" },
+    { ...valid, validation: [{ field: "PRIVATE_SOURCE_TEXT", code: "field_invalid" }] },
+    { ...valid, validation: [{ field: "body", code: "PRIVATE_SOURCE_TEXT" }] },
+    { ...valid, validation: [{ field: "body", code: "field_invalid", message: "PRIVATE_SOURCE_TEXT" }] },
+    { ...valid, validation: [valid.validation[0], valid.validation[0]] },
+    { ...valid, validation: Array(5).fill(valid.validation[0]) },
+    { ...valid, get validation() { getterReads += 1; throw new Error("PRIVATE_SOURCE_TEXT"); } },
+    new Proxy(valid, {}),
+  ]) {
+    assert.throws(() => classifyRedditStageResult({ ...base, saveDiagnostic: diagnostic as RedditSaveDiagnostic }));
+  }
+  assert.equal(getterReads, 0);
+  const notAttemptedOutcome = classifyRedditStageResult(base);
+  assert.throws(() => receiptForRedditStageOutcome({
+    ...notAttemptedOutcome,
+    saveDiagnostic: { ...valid, reason: "PRIVATE_SOURCE_TEXT" } as unknown as RedditSaveDiagnostic,
+  }));
+  assert.throws(() => receiptForRedditStageOutcome({
+    ...notAttemptedOutcome,
+    get saveDiagnostic(): RedditSaveDiagnostic { getterReads += 1; throw new Error("PRIVATE_SOURCE_TEXT"); },
+  }));
+  assert.equal(getterReads, 0);
+  for (const saveStatus of ["delivery_unknown", "unconfirmed", "toast_confirmed"] as const) {
+    assert.throws(() => classifyRedditStageResult({
+      ...base, saveStatus, saved: true, verified: saveStatus === "toast_confirmed",
+      saveDiagnostic: valid as RedditSaveDiagnostic,
+    }));
+    const outcome = classifyRedditStageResult({
+      ...base, saveStatus, saved: true, verified: saveStatus === "toast_confirmed",
+    });
+    assert.throws(() => receiptForRedditStageOutcome({ ...outcome, saveDiagnostic: valid as RedditSaveDiagnostic }));
+  }
+  assert.throws(() => classifyRedditStageResult({
+    ...base, blocked: "restricted", saveDiagnostic: valid as RedditSaveDiagnostic,
+  }));
 });

@@ -21,6 +21,7 @@ import {
   observeCalibratedArticleCover,
   sameArticleCoverObservation,
   stageArticleCover,
+  verifyArticleDraftPersistence,
   waitForCalibratedArticleCoverObservation,
   type ArticleCoverStageDependencies,
   type XArticleCoverObservationResult,
@@ -694,7 +695,7 @@ test("missing, ambiguous, or dimension-mismatched crop evidence means no Apply c
   }
 });
 
-test("post-Apply evidence must be observed and match the preloaded natural dimensions", async () => {
+test("post-Apply evidence must be observed and preserve the exact cover aspect ratio", async () => {
   const dir = mkdtempSync(join(tmpdir(), "publish-x-cover-post-apply-"));
   try {
     const path = join(dir, "cover.png");
@@ -702,7 +703,7 @@ test("post-Apply evidence must be observed and match the preloaded natural dimen
     const cover = preloadXArticleCover(path);
     const cases: Array<readonly [string, XArticleCoverObservationResult]> = [
       [
-        "wrong natural dimensions",
+        "wrong natural aspect ratio",
         Object.freeze({
           status: "observed",
           observation: Object.freeze({
@@ -821,4 +822,214 @@ test("stale cover, body media ambiguity, or a pre-existing dialog blocks the set
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const RESCALED_NATIVE_COVER = Object.freeze({
+  src: "https://pbs.twimg.com/media/rescaled-cover-fixture?format=png&name=small",
+  x: 100,
+  y: 120,
+  width: 1_000,
+  height: 400,
+  naturalWidth: 1_200,
+  naturalHeight: 480,
+});
+
+interface NativeCoverFixture {
+  src: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  naturalWidth: number;
+  naturalHeight: number;
+}
+
+function persistedCoverPage(
+  before: NativeCoverFixture,
+  after: NativeCoverFixture = before,
+  body = "Complete article body.",
+) {
+  let reopenCalls = 0;
+  let coverReads = 0;
+  const page = {
+    url() { return EDIT_URL; },
+    async goto(url: string) {
+      assert.equal(url, EDIT_URL, "only the captured canonical draft may be reopened");
+      reopenCalls += 1;
+    },
+    async waitForTimeout() {},
+    locator(selector: string) {
+      if (selector === X_COMPOSER_SELECTORS.articleCoverPreview) {
+        return {
+          async evaluateAll() {
+            coverReads += 1;
+            return {
+              validEditor: true,
+              bodyMediaCount: 0,
+              candidates: [reopenCalls === 0 ? before : after],
+            };
+          },
+        };
+      }
+      assert.ok(
+        selector === X_COMPOSER_SELECTORS.articleTitleInput ||
+          selector === X_COMPOSER_SELECTORS.articleBodyInput,
+        "the persistence verifier is read-only",
+      );
+      const value = {
+        async isVisible() { return true; },
+        async isEnabled() { return true; },
+        async inputValue() { return "Complete article"; },
+        async innerText() { return body; },
+      };
+      return { async count() { return 1; }, nth() { return value; } };
+    },
+  } as unknown as Page;
+  return { page, counts: () => ({ reopenCalls, coverReads }) };
+}
+
+test("hosted cover observation accepts native rescaling but rejects malformed or non-5:2 dimensions", async () => {
+  const { page } = persistedCoverPage(RESCALED_NATIVE_COVER);
+  const valid = await observeCalibratedArticleCover(page, EDIT_URL, 1_985, 794);
+  assert.equal(valid.status, "observed");
+  if (valid.status === "observed") {
+    assert.equal(valid.observation.naturalWidth, 1_200);
+    assert.equal(valid.observation.naturalHeight, 480);
+    assert.equal(JSON.stringify(valid).includes(RESCALED_NATIVE_COVER.src), false);
+  }
+  for (const [width, height] of [
+    [1_200, 481], [0, 0], [-5, -2], [1_200.5, 480.2],
+    [Number.NaN, 480], [1_200, Number.POSITIVE_INFINITY],
+    [250_000_000, 100_000_000],
+  ]) {
+    const fixture = persistedCoverPage({
+      ...RESCALED_NATIVE_COVER, naturalWidth: width, naturalHeight: height,
+    });
+    assert.deepEqual(
+      await observeCalibratedArticleCover(fixture.page, EDIT_URL, 1_985, 794),
+      { status: "invalid" },
+      `native dimensions ${width}x${height}`,
+    );
+  }
+  for (const [width, height] of [[1_985, 793], [0, 0], [250_000_000, 100_000_000]]) {
+    assert.deepEqual(
+      await observeCalibratedArticleCover(page, EDIT_URL, width, height),
+      { status: "invalid" },
+      `invalid requested dimensions ${width}x${height}`,
+    );
+  }
+});
+
+test("rescaled covers still require one calibrated hosted candidate in the unique editor root", async () => {
+  const invalidProjections = [
+    { validEditor: false, bodyMediaCount: 0, candidates: [RESCALED_NATIVE_COVER] },
+    { validEditor: true, bodyMediaCount: 0, candidates: [RESCALED_NATIVE_COVER, RESCALED_NATIVE_COVER] },
+    { validEditor: true, bodyMediaCount: 1, candidates: [RESCALED_NATIVE_COVER] },
+    {
+      validEditor: true, bodyMediaCount: 0,
+      candidates: [{ ...RESCALED_NATIVE_COVER, src: "https://example.com/media/cover" }],
+    },
+  ];
+  for (const projection of invalidProjections) {
+    const page = {
+      url() { return EDIT_URL; },
+      locator() { return { async evaluateAll() { return projection; } }; },
+    } as unknown as Page;
+    assert.deepEqual(
+      await observeCalibratedArticleCover(page, EDIT_URL, 1_985, 794),
+      { status: "invalid" },
+    );
+  }
+});
+
+test("rescaled post-Apply cover retains requested dimensions, digest, bytes and one-shot delivery", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-x-cover-rescaled-"));
+  try {
+    const path = join(dir, "cover.png");
+    const bytes = pngContainerWithDimensions(1_985, 794);
+    writeFileSync(path, bytes);
+    const cover = preloadXArticleCover(path);
+    const resized = await observeCalibratedArticleCover(
+      persistedCoverPage(RESCALED_NATIVE_COVER).page, EDIT_URL, cover.width, cover.height,
+    );
+    assert.equal(resized.status, "observed");
+    let observeCalls = 0;
+    let setCalls = 0;
+    let applyCalls = 0;
+    const fixture = coverStageDeps({
+      async resolveTarget() {
+        return {
+          editUrl: EDIT_URL,
+          input: {
+            async setInputFiles(payload: { buffer: Buffer }) {
+              setCalls += 1;
+              assert.deepEqual(payload.buffer, bytes);
+            },
+          } as unknown as ElementHandle<HTMLInputElement>,
+        };
+      },
+      async locateApply(_page, _url, width, height) {
+        assert.equal(width, 1_985);
+        assert.equal(height, 794);
+        // The pre-Apply crop still must match the source bytes exactly.
+        assert.equal(isCalibratedXArticleCoverCrop(1, 1_985, 794, width, height), true);
+        assert.equal(isCalibratedXArticleCoverCrop(1, 1_200, 480, width, height), false);
+        return { async click() { applyCalls += 1; } } as unknown as ElementHandle<HTMLElement>;
+      },
+      async observeCover(_page, _url, width, height) {
+        assert.equal(width, 1_985);
+        assert.equal(height, 794);
+        return ++observeCalls === 1 ? { status: "none" } : resized;
+      },
+    });
+    const handoff = await stageArticleCover({} as Page, cover, fixture.deps);
+    assert.equal(handoff.observed, true);
+    assert.equal(handoff.verified, null, "post-Apply observation alone is not persistence");
+    assert.equal(handoff.width, 1_985);
+    assert.equal(handoff.height, 794);
+    assert.equal(handoff.sourceSha256, cover.sourceSha256);
+    assert.equal(handoff.setPhase, "set_returned");
+    assert.equal(handoff.applyPhase, "returned");
+    assert.equal(setCalls, 1);
+    assert.equal(applyCalls, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("production canonical persistence accepts stable 1985x794 to 1200x480 cover rescaling", async () => {
+  const fixture = persistedCoverPage(RESCALED_NATIVE_COVER);
+  const verified = await verifyArticleDraftPersistence(
+    fixture.page, EDIT_URL, "Complete article", "Complete article body.", 1_985, 794,
+  );
+  assert.deepEqual(verified, { content: true, cover: true });
+  assert.deepEqual(fixture.counts(), { reopenCalls: 1, coverReads: 2 });
+});
+
+test("rescaled cover persistence still rejects changed hosted identity, actual dimensions or box after reopen", async () => {
+  const changes: Array<readonly [string, Partial<NativeCoverFixture>]> = [
+    ["hosted identity", { src: "https://pbs.twimg.com/media/different-cover-fixture" }],
+    ["natural size with the same aspect ratio", { naturalWidth: 1_500, naturalHeight: 600 }],
+    ["rendered position", { x: RESCALED_NATIVE_COVER.x + 1 }],
+    ["rendered size", { width: 750, height: 300 }],
+  ];
+  for (const [name, change] of changes) {
+    const fixture = persistedCoverPage(RESCALED_NATIVE_COVER, { ...RESCALED_NATIVE_COVER, ...change });
+    assert.deepEqual(
+      await verifyArticleDraftPersistence(
+        fixture.page, EDIT_URL, "Complete article", "Complete article body.", 1_985, 794,
+      ),
+      { content: true, cover: false },
+      name,
+    );
+    assert.deepEqual(fixture.counts(), { reopenCalls: 1, coverReads: 2 });
+  }
+  const changedBody = persistedCoverPage(RESCALED_NATIVE_COVER, RESCALED_NATIVE_COVER, "Incomplete body.");
+  assert.deepEqual(
+    await verifyArticleDraftPersistence(
+      changedBody.page, EDIT_URL, "Complete article", "Complete article body.", 1_985, 794,
+    ),
+    { content: false, cover: true },
+    "a stable resized cover cannot conceal a body mismatch",
+  );
 });

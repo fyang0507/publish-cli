@@ -398,7 +398,7 @@ test("resolved unverified results never print poster notes; verified is the only
     assert.equal(unverified.exitCode, 1);
     assert.match(unverified.message, /persistence was not verified/i);
     if (format === "article") {
-      assert.match(unverified.message, /heroAction=exact preloaded cover observed after canonical draft reopen.*codeBlockCount=0/s);
+      assert.match(unverified.message, /heroAction=hosted cover persisted after canonical draft reopen.*codeBlockCount=0/s);
       assert.match(unverified.message, /Cover evidence: requested=yes; resolved=yes; set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/);
     }
     assert.doesNotMatch(unverified.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
@@ -437,7 +437,7 @@ test("resolved unverified results never print poster notes; verified is the only
       assert.doesNotMatch(verified.message, /Staged a NATIVE X draft/);
       assert.match(verified.message, /full-list completeness and causality: unproven/);
     } else {
-      assert.match(verified.message, /heroAction=exact preloaded cover observed after canonical draft reopen.*codeBlockCount=0/s);
+      assert.match(verified.message, /heroAction=hosted cover persisted after canonical draft reopen.*codeBlockCount=0/s);
       assert.match(verified.message, /Cover evidence: requested=yes; resolved=yes; set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/);
     }
     assert.doesNotMatch(verified.message, /data-secret|PRIVATE_PATH_CANARY|session-secret|Private composer/);
@@ -452,7 +452,7 @@ test("verified and returned-unverified Article receipts preserve only closed han
   }> = [
     {
       codeBlockCount: 1,
-      expected: [/heroAction=exact preloaded cover observed after canonical draft reopen/, /codeBlockCount=1/, /1 code block NOT auto-formatted/, /verified=yes/],
+      expected: [/heroAction=hosted cover persisted after canonical draft reopen/, /codeBlockCount=1/, /1 code block NOT auto-formatted/, /verified=yes/],
     },
     {
       codeBlockCount: 2,
@@ -488,7 +488,7 @@ test("verified and returned-unverified Article receipts preserve only closed han
     {
       codeBlockCount: 0,
       cover: verifiedCover(),
-      expected: [/heroAction=exact preloaded cover observed after canonical draft reopen/, /explicit image\/png; 5x2; exact 5:2/, /set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/],
+      expected: [/heroAction=hosted cover persisted after canonical draft reopen/, /explicit image\/png; 5x2; exact 5:2/, /set=yes; uploaded=unknown; observed=yes; verified=yes; apply=returned/],
     },
   ];
   for (const fixture of cases) {

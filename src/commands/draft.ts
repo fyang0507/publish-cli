@@ -67,6 +67,12 @@ import {
 } from "../transportReceipt.js";
 import { classifyXPreStageFailure } from "./xPreStageFailure.js";
 import {
+  renderXDraftDiagnostic,
+  snapshotXDraftDiagnosticForPhase,
+  xDraftDiagnosticCorrection,
+  type XDraftDiagnostic,
+} from "../x/stageDiagnostic.js";
+import {
   preloadXArticleCover,
   snapshotXArticleCoverPreload,
   type XArticleCoverPreload,
@@ -140,6 +146,7 @@ export interface XDraftRealRunOutcome {
   articleHandoff: XArticleDraftHandoff | null;
   platformTouched: boolean;
   nativeReference: string | null;
+  diagnostic?: Readonly<XDraftDiagnostic> | null;
 }
 
 function unclassifiedSnapshotFailure(
@@ -170,6 +177,7 @@ function beforeSaveFailure(
   format: GeneratedContent["format"],
   snapshotFailure?: XArticleStageSnapshotFailure,
   platformTouched = false,
+  diagnostic: Readonly<XDraftDiagnostic> | null = null,
 ): XDraftRealRunOutcome {
   const mechanism = format === "article" ? "Article Create/autosave" : "composer Save";
   return {
@@ -182,12 +190,15 @@ function beforeSaveFailure(
     articleHandoff: null,
     platformTouched,
     nativeReference: null,
+    diagnostic,
     message:
       `\n✗ X ${format} draft staging stopped before the native ${mechanism} action was invoked. NEVER posted.\n` +
       (snapshotFailure
         ? `  Local X staging input snapshot validation failed closed (reason=${snapshotFailure}).\n`
         : "") +
-      "  No saved-draft outcome is claimed. Verify the local runtime and browser flow before a separate retry.",
+      (diagnostic
+        ? `  ${renderXDraftDiagnostic(diagnostic)}\n  ${xDraftDiagnosticCorrection(diagnostic)}`
+        : "  No saved-draft outcome is claimed. Verify the local runtime and browser flow before a separate retry."),
   };
 }
 
@@ -215,6 +226,7 @@ function uncertainSaveOutcome(
   draftRowEvidence: XDraftRowEvidence | null = null,
   articleHandoff: XArticleDraftHandoff | null = null,
   nativeReference: string | null = null,
+  diagnostic: Readonly<XDraftDiagnostic> | null = null,
 ): XDraftRealRunOutcome {
   const location = nativeDraftLocation(format);
   const fact = phase === "save_delivery_unknown"
@@ -230,8 +242,10 @@ function uncertainSaveOutcome(
     articleHandoff,
     platformTouched: true,
     nativeReference,
+    diagnostic,
     message:
       `\n✗ ${fact} for the X ${format} draft. NEVER posted.\n` +
+      (diagnostic ? `  ${renderXDraftDiagnostic(diagnostic)}\n` : "") +
       (format !== "article" && draftRowEvidence?.status === "unverified"
         ? "  The calibrated scoped-row evidence did not show one exact full-content visible-multiset addition.\n"
         : "") +
@@ -249,7 +263,7 @@ function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
   const count = handoff.codeBlockCount;
   const countLabel = count === "many" ? `>${X_ARTICLE_CODE_BLOCK_COUNT_LIMIT}` : String(count);
   const heroAction = handoff.cover.verified === true
-    ? "exact preloaded cover observed after canonical draft reopen"
+    ? "hosted cover persisted after canonical draft reopen"
     : handoff.cover.set === true
       ? "exact preloaded cover set; persistence not verified"
       : handoff.cover.set === null
@@ -276,7 +290,7 @@ function renderArticleHandoff(handoff: XArticleDraftHandoff): string {
   }
   const cover = handoff.cover;
   lines.push(
-    `  Cover input: explicit ${cover.contentType}; ${cover.width}x${cover.height}; exact 5:2; no crop, resize, compression, or conversion performed.`,
+    `  Cover input: explicit ${cover.contentType}; ${cover.width}x${cover.height}; exact 5:2; the CLI stages bytes unchanged; X may resize its hosted cover.`,
     `  Cover evidence: requested=yes; resolved=yes; set=${cover.set === null ? "unknown" : cover.set ? "yes" : "no"}; uploaded=unknown; observed=${cover.observed ? "yes" : "no"}; verified=${cover.verified === null ? "unknown" : cover.verified ? "yes" : "no"}; apply=${cover.applyPhase}.`,
   );
   if (cover.verified !== true) {
@@ -553,8 +567,8 @@ export async function executeXDraftRealRun(
         return uncertainSaveOutcome(format, "save_delivery_unknown");
       }
       return stageError.savePhase === "save_not_attempted"
-        ? beforeSaveFailure(format, undefined, true)
-        : uncertainSaveOutcome(format, stageError.savePhase);
+        ? beforeSaveFailure(format, undefined, true, stageError.diagnostic)
+        : uncertainSaveOutcome(format, stageError.savePhase, null, null, null, stageError.diagnostic);
     }
     // Once the staging function was invoked, an untyped exception carries no
     // reliable Save boundary. Conservatively assume delivery may have happened.
@@ -751,7 +765,7 @@ function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
   }
   if (handoff.cover.verified !== true) {
     gotchas.push(
-      "The exact X Article cover was not positively observed after reopening the captured edit URL; compare the native draft in the exact CLI-owned profile and do not retry blindly.",
+      "The hosted X Article cover was not positively observed after reopening the captured edit URL; compare the native draft in the exact CLI-owned profile and do not retry blindly.",
     );
   } else if (
     outcome.kind === "staged" &&
@@ -759,7 +773,7 @@ function xArticleGotchas(outcome: XDraftRealRunOutcome): readonly string[] {
     handoff.cover.applyPhase !== "returned"
   ) {
     gotchas.push(
-      "Independent two-sided canonical persistence proved the exact cover and full title/body without claiming Apply returned.",
+      "Independent two-sided canonical persistence proved the same hosted cover and full title/body without claiming Apply returned.",
     );
   }
   if (handoff.bodyImages.some((image) => image.verified !== true)) {
@@ -777,10 +791,19 @@ export function receiptForXDraftOutcome(
   inputCover: Readonly<XArticleCoverPreload> | null = null,
   inputBodyImages: Readonly<XArticleBodyImagePreloadSet> = emptyXArticleBodyImagePreloadSet(),
 ): Readonly<TransportReceipt> {
+  if (isProxy(outcome)) {
+    throw new Error("The X draft outcome cannot be inspected safely.");
+  }
   const verified = outcome.kind === "staged" && outcome.savePhase === "verified";
   const saveMayExist = outcome.savePhase === "save_delivery_unknown" ||
     outcome.savePhase === "save_delivered_unverified";
   const localInvalid = outcome.exitCode === 2;
+  const diagnosticDescriptor = Object.getOwnPropertyDescriptor(outcome, "diagnostic");
+  const diagnostic = snapshotXDraftDiagnosticForPhase(
+    diagnosticDescriptor && "value" in diagnosticDescriptor ? diagnosticDescriptor.value : null,
+    outcome.savePhase,
+    outcome.saveMechanism,
+  );
   const terminalState = localInvalid
     ? "input_rejected" as const
     : verified
@@ -805,7 +828,9 @@ export function receiptForXDraftOutcome(
       ? "The closed X staging input failed local validation."
       : outcome.kind === "stage_runtime_failed"
         ? "The X staging runtime could not be initialized."
-        : "The X native draft outcome was not positively verified.",
+        : diagnostic
+          ? `${renderXDraftDiagnostic(diagnostic)} The X native draft outcome was not positively verified.`
+          : "The X native draft outcome was not positively verified.",
     classification: outcome.savePhase === "save_delivery_unknown" ? "unknown" as const : "known" as const,
     retryable: null,
     inputRelated: localInvalid ? true : null,
@@ -813,7 +838,9 @@ export function receiptForXDraftOutcome(
       ? "Compare the native draft manually in the exact CLI-owned X profile before deciding whether a separate retry is safe. Never retry blindly."
       : localInvalid
         ? "Regenerate a valid closed staging request before retrying."
-        : "Resolve the local runtime or calibrated composer failure before a separate retry.",
+        : diagnostic
+          ? xDraftDiagnosticCorrection(diagnostic)
+          : "Resolve the local runtime or calibrated composer failure before a separate retry.",
   };
   return createTransportReceipt({
     channel: "x",
@@ -1043,7 +1070,7 @@ export function registerDraftCommand(x: Command): void {
         "  Tweet/thread staging invokes the close→Save action; Article staging invokes Create/autosave.\n" +
         "  Tweet/thread success requires one calibrated native Unsent row whose full text exactly matches the intended tweet or first thread row, plus a visible scoped-row multiset equal to the read-only pre-Save baseline plus that one value.\n" +
         "  Matching background/page text, a prefix, a pre-existing identical visible row, duplicate matches, unreadable rows, or other visible-row changes remain unverified. The evidence has no stable native row id and does not prove full-list completeness or causality.\n" +
-        "  Article success requires one unique title/body editor root, a clean pre-set cover/dialog baseline, one direct returned set on its calibrated same-parent cover input, and authoritative native persistence: a unique above-title hosted cover with exact expected dimensions before canonical reopen, matching full title/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward. When one exact Apply control is observable it is clicked once; Apply provenance remains not_attempted, delivery_unknown, or returned and is never retried or rewritten. A complete native-state proof may close not_attempted or delivery_unknown without claiming Apply returned. An immediate post-Create URL is provisional; a missing/invalid late sample or conflicting positive samples are never used for navigation or verification.\n" +
+        "  Article success requires one unique title/body editor root, a clean pre-set cover/dialog baseline, one direct returned set on its calibrated same-parent cover input, and authoritative native persistence: a unique above-title hosted cover with positive bounded exact-5:2 natural dimensions before canonical reopen, matching full title/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward. X may resize the hosted cover; source dimensions and digest remain requested-input evidence, while the CLI stages the original bytes unchanged. When one exact Apply control is observable it is clicked once; Apply provenance remains not_attempted, delivery_unknown, or returned and is never retried or rewritten. A complete native-state proof may close not_attempted or delivery_unknown without claiming Apply returned. An immediate post-Create URL is provisional; a missing/invalid late sample or conflicting positive samples are never used for navigation or verification.\n" +
         "  A returned Article outcome reports bounded body/code facts, distinct cover requested/resolved/set/uploaded/observed/verified evidence at asset index 0, and occurrence-ordered body-image evidence at indexes 1 onward. A stopped image run retains truthful partial set/observed/verified facts. A rejected native cover or body-image input set leaves set unknown because delivery may have occurred; the CLI never retries or uses another upload route. The receipt uses the frozen pre-loader evidence only after exact returned-handoff comparison.\n" +
         "  A rejected Save/Create action has unknown delivery; a returned action without a positive reopen match is unverified. Both exit 1 because a draft may exist.\n" +
         "  Before retrying an unknown/unverified save, compare X Unsent/Drafts or X Articles → Drafts manually in the exact CLI-owned profile used by that run.\n" +

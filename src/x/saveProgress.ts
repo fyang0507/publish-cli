@@ -1,5 +1,10 @@
 import { isProxy } from "node:util/types";
 import {
+  snapshotXDraftDiagnosticForPhase,
+  xDraftOperationDiagnostic,
+  type XDraftDiagnostic,
+} from "./stageDiagnostic.js";
+import {
   articleCodeAdvisoryRenderSize,
   articleCodeLinkAdvisoryRenderSize,
   snapshotXArticleCodeAdvisories,
@@ -365,11 +370,13 @@ const X_DRAFT_STAGE_ERROR_INSTANCES = new WeakSet<object>();
 
 export class XDraftStageError extends Error {
   readonly code = "x_draft_save_incomplete";
+  readonly diagnostic: Readonly<XDraftDiagnostic> | null;
 
   constructor(
     readonly savePhase: XDraftSaveFailurePhase,
     /** Null only when validation cannot safely classify the native mechanism. */
     readonly saveMechanism: XDraftSaveMechanism | null,
+    diagnostic: Readonly<XDraftDiagnostic> | null = null,
   ) {
     super(
       saveMechanism === null
@@ -381,6 +388,7 @@ export class XDraftStageError extends Error {
           : "The native X Save/autosave action returned, but draft persistence was not verified.",
     );
     this.name = "XDraftStageError";
+    this.diagnostic = snapshotXDraftDiagnosticForPhase(diagnostic, savePhase, saveMechanism);
     X_DRAFT_STAGE_ERROR_INSTANCES.add(this);
   }
 }
@@ -388,6 +396,7 @@ export class XDraftStageError extends Error {
 export interface XDraftStageErrorSnapshot {
   readonly savePhase: XDraftSaveFailurePhase;
   readonly saveMechanism: XDraftSaveMechanism | null;
+  readonly diagnostic: Readonly<XDraftDiagnostic> | null;
 }
 
 /** Snapshot hostile thrown values once; never branch on mutable accessors/proxies. */
@@ -397,10 +406,12 @@ export function snapshotXDraftStageError(error: unknown): XDraftStageErrorSnapsh
   }
   let phaseDescriptor: PropertyDescriptor | undefined;
   let mechanismDescriptor: PropertyDescriptor | undefined;
+  let diagnosticDescriptor: PropertyDescriptor | undefined;
   try {
     if (isProxy(error) || !X_DRAFT_STAGE_ERROR_INSTANCES.has(error)) return null;
     phaseDescriptor = Object.getOwnPropertyDescriptor(error, "savePhase");
     mechanismDescriptor = Object.getOwnPropertyDescriptor(error, "saveMechanism");
+    diagnosticDescriptor = Object.getOwnPropertyDescriptor(error, "diagnostic");
   } catch {
     return null;
   }
@@ -419,7 +430,13 @@ export function snapshotXDraftStageError(error: unknown): XDraftStageErrorSnapsh
     saveMechanism === "article_create_autosave" ||
     (saveMechanism === null && savePhase === "save_not_attempted");
   return phaseValid && mechanismValid
-    ? Object.freeze({ savePhase, saveMechanism }) as XDraftStageErrorSnapshot
+    ? Object.freeze({
+        savePhase,
+        saveMechanism,
+        diagnostic: diagnosticDescriptor && "value" in diagnosticDescriptor
+          ? snapshotXDraftDiagnosticForPhase(diagnosticDescriptor.value, savePhase, saveMechanism)
+          : null,
+      }) as XDraftStageErrorSnapshot
     : null;
 }
 
@@ -1157,8 +1174,8 @@ export function xDraftStageError(
 ): XDraftStageError {
   const snapshot = snapshotXDraftStageError(error);
   return snapshot !== null && snapshot.saveMechanism !== null
-    ? new XDraftStageError(snapshot.savePhase, snapshot.saveMechanism)
-    : new XDraftStageError(fallbackPhase, mechanism);
+    ? new XDraftStageError(snapshot.savePhase, snapshot.saveMechanism, snapshot.diagnostic)
+    : new XDraftStageError(fallbackPhase, mechanism, xDraftOperationDiagnostic(error));
 }
 
 export interface XDraftSaveFlowOperations<T> {
@@ -1184,16 +1201,18 @@ export async function runXDraftSaveFlow<T>(
 ): Promise<XDraftSaveFlowResult<T>> {
   try {
     await operations.beforeSave();
-  } catch {
-    throw new XDraftStageError("save_not_attempted", mechanism);
+  } catch (error) {
+    throw new XDraftStageError("save_not_attempted", mechanism,
+      xDraftOperationDiagnostic(error) ?? snapshotXDraftStageError(error)?.diagnostic);
   }
 
   try {
     // Delivery becomes unknown before awaiting the click: Playwright may reject
     // after dispatching it, so a rejected promise cannot prove non-delivery.
     await operations.deliverSave();
-  } catch {
-    throw new XDraftStageError("save_delivery_unknown", mechanism);
+  } catch (error) {
+    throw new XDraftStageError("save_delivery_unknown", mechanism,
+      xDraftOperationDiagnostic(error) ?? snapshotXDraftStageError(error)?.diagnostic);
   }
 
   try {
@@ -1213,7 +1232,8 @@ export async function runXDraftSaveFlow<T>(
       savePhase: verified === true ? "verified" : "save_delivered_unverified",
       value,
     };
-  } catch {
-    throw new XDraftStageError("save_delivered_unverified", mechanism);
+  } catch (error) {
+    throw new XDraftStageError("save_delivered_unverified", mechanism,
+      xDraftOperationDiagnostic(error) ?? snapshotXDraftStageError(error)?.diagnostic);
   }
 }

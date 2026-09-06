@@ -303,7 +303,7 @@ test("free-text guidance preserves each channel's execution handoff and essentia
   assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code facts, distinct cover `requested`, `resolved`, `set`, `uploaded`, `observed`, and canonical-reopen `verified` evidence, plus the tri-state Apply provenance/);
   assert.match(x, /Apply interaction is one-shot when one exact control is observable: `not_attempted` records no click.*`delivery_unknown` records one exact click whose promise rejected.*`returned` records one fulfilled exact click/s);
   assert.match(x, /Positive Article success requires a unique title\/body editor root; zero pre-set dialogs and no pre-existing calibrated cover; one direct returned set on its calibrated same-parent cover input/);
-  assert.match(x, /authoritative native persistence at the same exact canonical edit URL: a unique above-title hosted cover with exact expected dimensions before reopen, exact complete title\/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward/);
+  assert.match(x, /authoritative native persistence at the same exact canonical edit URL: a unique above-title hosted cover with positive bounded exact-5:2 natural dimensions before reopen, exact complete title\/body after reopen, and the same hosted cover identity, box, and natural dimensions afterward/);
   assert.match(
     x,
     /For image-bearing Articles, success additionally requires every occurrence-ordered body-image receipt to show a returned exact set, exact in-body Media-atom observation, and the same domain-bound blob-byte or hosted-URL identity and dimensions after canonical reopen/,

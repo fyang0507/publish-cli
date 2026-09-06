@@ -24,10 +24,16 @@ import type { BrowserContext, ElementHandle, Page, Locator } from "playwright";
 import { createHash } from "node:crypto";
 import { isProxy } from "node:util/types";
 import { getBrowserContext, type EnsureSessionOptions } from "../session.js";
+import {
+  withXDraftDiagnostic,
+  XDraftOperationError,
+  type XDraftSubstage,
+} from "./stageDiagnostic.js";
 import type { GeneratedContent } from "./content.js";
 import {
   snapshotXArticleCoverPreload,
   xArticleCoverFilePayload,
+  X_ARTICLE_COVER_DIMENSION_REPRESENTATION_LIMIT,
   type XArticleCoverPreload,
 } from "./articleCover.js";
 import {
@@ -249,6 +255,41 @@ export async function optionalLocator(
   }
 }
 
+/** Composer controls may be acted on only when one candidate is uniquely visible. */
+export async function uniqueComposerLocator(
+  page: Page,
+  candidates: readonly string[],
+  substage: XDraftSubstage,
+  timeout = DEFAULT_TIMEOUT,
+): Promise<Locator> {
+  return withXDraftDiagnostic(substage, async () => {
+    const per = Math.max(1500, Math.floor(timeout / candidates.length));
+    for (const selector of candidates) {
+      const locator = page.locator(selector.startsWith("//") ? `xpath=${selector}` : selector)
+        .filter({ visible: true });
+      try {
+        await locator.first().waitFor({ state: "visible", timeout: per });
+      } catch (error) {
+        // Only a normal visibility timeout supports trying another candidate.
+        // Closed/detached/runtime failures carry no missing-control proof.
+        if (!(error instanceof Error) || error.name !== "TimeoutError") throw error;
+        continue;
+      }
+      const count = await locator.count();
+      if (count > 100) throw new XDraftOperationError(substage, "control_ambiguous");
+      let visible: Locator | null = null;
+      for (let index = 0; index < count; index += 1) {
+        const candidate = locator.nth(index);
+        if (!(await candidate.isVisible())) continue;
+        if (visible) throw new XDraftOperationError(substage, "control_ambiguous");
+        visible = candidate;
+      }
+      if (visible) return visible;
+    }
+    throw new XDraftOperationError(substage, "control_missing");
+  });
+}
+
 export interface StageDraftOptions extends EnsureSessionOptions {
   /** Headful + slower so a human can watch/calibrate. Maps to --inspect. */
   inspect?: boolean;
@@ -396,11 +437,11 @@ export async function stageDraft(
           inspect,
           force,
         });
-    const ctx = (await getBrowserContext({
+    const ctx = (await withXDraftDiagnostic("browser_session", () => getBrowserContext({
       inspect: articleRequestSnapshot?.inspect ?? inspect,
       force: articleRequestSnapshot?.force ?? force,
-    })) as BrowserContext;
-    const page = await ctx.newPage();
+    }))) as BrowserContext;
+    const page = await withXDraftDiagnostic("browser_page", () => ctx.newPage());
     try {
       if (articleRequestSnapshot) {
         return await stageArticleSnapshot(
@@ -440,7 +481,8 @@ async function stageTweetOrThreadDraft(
   // Read-only baseline on the same page/context. Failure is retained as
   // unverified evidence and never prevents the later Save attempt.
   const baseline = await captureDraftRowBaseline(page, intendedFirstPostText);
-  await page.goto(X_COMPOSER_SELECTORS.composeUrl, { waitUntil: "domcontentloaded" });
+  await withXDraftDiagnostic("composer_navigation", () =>
+    page.goto(X_COMPOSER_SELECTORS.composeUrl, { waitUntil: "domcontentloaded" }));
 
   await typePosts(page, posts);
 
@@ -475,24 +517,28 @@ async function stageTweetOrThreadDraft(
  * thread-append logic isn't duplicated. Does NOT save or post.
  */
 async function typePosts(page: Page, posts: readonly string[]): Promise<void> {
-  const firstBox = await tolerantLocator(page, X_COMPOSER_SELECTORS.tweetTextbox, "tweet text box");
-  await firstBox.click();
-  await typeText(page, firstBox, posts[0]);
+  const firstBox = await uniqueComposerLocator(page, X_COMPOSER_SELECTORS.tweetTextbox, "composer_textbox");
+  await withXDraftDiagnostic("composer_population", async () => {
+    await firstBox.click();
+    await typeText(page, firstBox, posts[0]);
+  });
 
   for (let i = 1; i < posts.length; i++) {
-    const addBtn = await tolerantLocator(
+    const addBtn = await uniqueComposerLocator(
       page,
       X_COMPOSER_SELECTORS.addPostButton,
-      `"add another post" button (for thread post ${i + 1})`,
+      "thread_add_control",
     );
-    await addBtn.click();
-    const box = await tolerantLocator(
+    await withXDraftDiagnostic("thread_add", () => addBtn.click());
+    const box = await uniqueComposerLocator(
       page,
       tweetTextboxSelectors(i),
-      `thread post ${i + 1} text box`,
+      "composer_textbox",
     );
-    await box.click();
-    await typeText(page, box, posts[i]);
+    await withXDraftDiagnostic("composer_population", async () => {
+      await box.click();
+      await typeText(page, box, posts[i]);
+    });
   }
 }
 
@@ -2023,8 +2069,12 @@ export async function stageArticleCover(
     }
   }
   const observed = postApplyCover.status === "observed" &&
-    postApplyCover.observation.naturalWidth === safeCover.width &&
-    postApplyCover.observation.naturalHeight === safeCover.height;
+    hasCalibratedArticleCoverDimensions(
+      postApplyCover.observation.naturalWidth,
+      postApplyCover.observation.naturalHeight,
+      safeCover.width,
+      safeCover.height,
+    );
   return coverHandoffAtEditUrl({
     ...base,
     set: true,
@@ -2365,6 +2415,25 @@ async function locateCalibratedArticleCoverApply(
   }
 }
 
+/** Source and hosted sizes may differ; both must remain bounded exact-5:2 images. */
+function hasCalibratedArticleCoverDimensions(
+  naturalWidth: number,
+  naturalHeight: number,
+  expectedWidth: number,
+  expectedHeight: number,
+): boolean {
+  const exactCoverSize = (width: number, height: number): boolean =>
+    Number.isSafeInteger(width) &&
+    Number.isSafeInteger(height) &&
+    width > 0 &&
+    height > 0 &&
+    width <= X_ARTICLE_COVER_DIMENSION_REPRESENTATION_LIMIT &&
+    height <= X_ARTICLE_COVER_DIMENSION_REPRESENTATION_LIMIT &&
+    width * 2 === height * 5;
+  return exactCoverSize(expectedWidth, expectedHeight) &&
+    exactCoverSize(naturalWidth, naturalHeight);
+}
+
 interface RawArticleCoverObservation {
   readonly src: string;
   readonly x: number;
@@ -2395,12 +2464,12 @@ function snapshotArticleCoverObservation(
       raw.height <= 0 ||
       raw.width / raw.height < 2 ||
       raw.width / raw.height > 3 ||
-      !Number.isSafeInteger(raw.naturalWidth) ||
-      !Number.isSafeInteger(raw.naturalHeight) ||
-      raw.naturalWidth <= 0 ||
-      raw.naturalHeight <= 0 ||
-      raw.naturalWidth !== expectedWidth ||
-      raw.naturalHeight !== expectedHeight
+      !hasCalibratedArticleCoverDimensions(
+        raw.naturalWidth,
+        raw.naturalHeight,
+        expectedWidth,
+        expectedHeight,
+      )
     ) return null;
     const identity = `${parsed.origin}${parsed.pathname}`;
     return Object.freeze({
@@ -2428,10 +2497,9 @@ export async function observeCalibratedArticleCover(
 ): Promise<XArticleCoverObservationResult> {
   if (
     !isExactArticleEditRoute(page, editUrl) ||
-    !Number.isSafeInteger(expectedWidth) ||
-    !Number.isSafeInteger(expectedHeight) ||
-    expectedWidth <= 0 ||
-    expectedHeight <= 0
+    !hasCalibratedArticleCoverDimensions(
+      expectedWidth, expectedHeight, expectedWidth, expectedHeight,
+    )
   ) return Object.freeze({ status: "invalid" });
   try {
     const raw = await page.locator(X_COMPOSER_SELECTORS.articleCoverPreview).evaluateAll(
@@ -2559,8 +2627,12 @@ export async function waitForCalibratedArticleCoverObservation(
       );
       if (
         candidate.status === "observed" &&
-        candidate.observation.naturalWidth === expectedWidth &&
-        candidate.observation.naturalHeight === expectedHeight
+        hasCalibratedArticleCoverDimensions(
+          candidate.observation.naturalWidth,
+          candidate.observation.naturalHeight,
+          expectedWidth,
+          expectedHeight,
+        )
       ) return candidate;
       last = candidate.status === "none"
         ? Object.freeze({ status: "none" })
@@ -2680,107 +2752,110 @@ const productionArticleDraftStageDependencies: ArticleDraftStageDependencies = {
   async settle(page) {
     await page.waitForTimeout(2_500);
   },
-  async verify(
+  verify: verifyArticleDraftPersistence,
+};
+
+/** Read-only production proof for an existing canonical Article; never creates or uploads. */
+export async function verifyArticleDraftPersistence(
+  page: Page,
+  editUrl: string,
+  expectedTitle: string,
+  expectedBody: string,
+  expectedCoverWidth: number,
+  expectedCoverHeight: number,
+  bodyImageProof?: Parameters<ArticleDraftStageDependencies["verify"]>[6],
+): ReturnType<ArticleDraftStageDependencies["verify"]> {
+  const expectedBodyImages = bodyImageProof?.images.occurrences ?? Object.freeze([]);
+  const bodyImageCount = expectedBodyImages.length;
+  const beforeReloadCover = await waitForCalibratedArticleCoverObservation(
+    page,
+    editUrl,
+    expectedCoverWidth,
+    expectedCoverHeight,
+    observeCalibratedArticleCover,
+    bodyImageProof === undefined ? 0 : null,
+  );
+  let beforeReloadBody: XArticleBodyImageObservationResult = Object.freeze({
+    status: "invalid",
+  });
+  if (bodyImageProof?.beforeReload !== null && bodyImageProof !== undefined) {
+    beforeReloadBody = await waitForCalibratedArticleBodyImages(
+      page,
+      editUrl,
+      bodyImageProof.segments,
+      expectedBodyImages,
+    );
+  }
+  const sameBeforeBody = bodyImageProof !== undefined &&
+    bodyImageProof.beforeReload !== null &&
+    beforeReloadBody.status === "observed" &&
+    sameArticleBodyImageObservations(
+      bodyImageProof.beforeReload,
+      beforeReloadBody.images,
+    );
+  const content = await verifyArticleDraftSaved(
     page,
     editUrl,
     expectedTitle,
     expectedBody,
+    bodyImageProof === undefined
+      ? undefined
+      : Object.freeze({
+          segments: bodyImageProof.segments,
+          images: expectedBodyImages,
+        }),
+  );
+  if (!isExactArticleEditRoute(page, editUrl)) {
+    return Object.freeze({
+      content: false,
+      cover: false,
+      ...(bodyImageProof === undefined
+        ? {}
+        : { bodyImages: Object.freeze(Array.from({ length: bodyImageCount }, () => false)) }),
+    });
+  }
+  // Preserve cover persistence independently when the canonical editor
+  // remains exact but full title/body comparison is negative. Overall Article
+  // success still requires both closed facts in stageArticleSnapshot.
+  const afterReloadCover = await waitForCalibratedArticleCoverObservation(
+    page,
+    editUrl,
     expectedCoverWidth,
     expectedCoverHeight,
-    bodyImageProof,
-  ) {
-    const expectedBodyImages = bodyImageProof?.images.occurrences ?? Object.freeze([]);
-    const bodyImageCount = expectedBodyImages.length;
-    const beforeReloadCover = await waitForCalibratedArticleCoverObservation(
-      page,
-      editUrl,
-      expectedCoverWidth,
-      expectedCoverHeight,
-      observeCalibratedArticleCover,
-      bodyImageProof === undefined ? 0 : null,
-    );
-    let beforeReloadBody: XArticleBodyImageObservationResult = Object.freeze({
-      status: "invalid",
-    });
-    if (bodyImageProof?.beforeReload !== null && bodyImageProof !== undefined) {
-      beforeReloadBody = await waitForCalibratedArticleBodyImages(
+    observeCalibratedArticleCover,
+    bodyImageProof === undefined ? 0 : null,
+  );
+  const afterReloadBody = sameBeforeBody && bodyImageProof !== undefined
+    ? await waitForCalibratedArticleBodyImages(
         page,
         editUrl,
         bodyImageProof.segments,
         expectedBodyImages,
-      );
-    }
-    const sameBeforeBody = bodyImageProof !== undefined &&
-      bodyImageProof.beforeReload !== null &&
-      beforeReloadBody.status === "observed" &&
-      sameArticleBodyImageObservations(
-        bodyImageProof.beforeReload,
-        beforeReloadBody.images,
-      );
-    const content = await verifyArticleDraftSaved(
-      page,
-      editUrl,
-      expectedTitle,
-      expectedBody,
-      bodyImageProof === undefined
-        ? undefined
-        : Object.freeze({
-            segments: bodyImageProof.segments,
-            images: expectedBodyImages,
-          }),
-    );
-    if (!isExactArticleEditRoute(page, editUrl)) {
-      return Object.freeze({
-        content: false,
-        cover: false,
-        ...(bodyImageProof === undefined
-          ? {}
-          : { bodyImages: Object.freeze(Array.from({ length: bodyImageCount }, () => false)) }),
-      });
-    }
-    // Preserve cover persistence independently when the canonical editor
-    // remains exact but full title/body comparison is negative. Overall Article
-    // success still requires both closed facts in stageArticleSnapshot.
-    const afterReloadCover = await waitForCalibratedArticleCoverObservation(
-      page,
-      editUrl,
-      expectedCoverWidth,
-      expectedCoverHeight,
-      observeCalibratedArticleCover,
-      bodyImageProof === undefined ? 0 : null,
-    );
-    const afterReloadBody = sameBeforeBody && bodyImageProof !== undefined
-      ? await waitForCalibratedArticleBodyImages(
-          page,
-          editUrl,
-          bodyImageProof.segments,
-          expectedBodyImages,
-        )
-      : Object.freeze({ status: "invalid" as const });
-    const bodySequenceVerified = sameBeforeBody &&
-      beforeReloadBody.status === "observed" &&
-      afterReloadBody.status === "observed" &&
-      sameArticleBodyImageObservations(beforeReloadBody.images, afterReloadBody.images) &&
-      isExactArticleEditRoute(page, editUrl);
-    return Object.freeze({
-      content,
-      cover: beforeReloadCover.status === "observed" &&
-        afterReloadCover.status === "observed" &&
-        sameArticleCoverObservation(
-          beforeReloadCover.observation,
-          afterReloadCover.observation,
-        ) &&
-        isExactArticleEditRoute(page, editUrl),
-      ...(bodyImageProof === undefined
-        ? {}
-        : {
-            bodyImages: Object.freeze(
-              Array.from({ length: bodyImageCount }, () => bodySequenceVerified),
-            ),
-          }),
-    });
-  },
-};
+      )
+    : Object.freeze({ status: "invalid" as const });
+  const bodySequenceVerified = sameBeforeBody &&
+    beforeReloadBody.status === "observed" &&
+    afterReloadBody.status === "observed" &&
+    sameArticleBodyImageObservations(beforeReloadBody.images, afterReloadBody.images) &&
+    isExactArticleEditRoute(page, editUrl);
+  return Object.freeze({
+    content,
+    cover: beforeReloadCover.status === "observed" &&
+      afterReloadCover.status === "observed" &&
+      sameArticleCoverObservation(
+        beforeReloadCover.observation,
+        afterReloadCover.observation,
+      ) &&
+      isExactArticleEditRoute(page, editUrl),
+    ...(bodyImageProof === undefined
+      ? {}
+      : {
+          bodyImages: Object.freeze(
+            Array.from({ length: bodyImageCount }, () => bodySequenceVerified),
+          ),
+        }),
+  });
+}
 
 function validatedArticleEditUrl(raw: unknown): string | null {
   if (typeof raw !== "string") return null;
@@ -2973,10 +3048,10 @@ export interface SaveAsDraftDependencies {
 
 const productionSaveAsDraftDependencies: SaveAsDraftDependencies = {
   locateClose(page) {
-    return optionalLocator(page, X_COMPOSER_SELECTORS.closeComposerButton, 5_000);
+    return uniqueComposerLocator(page, X_COMPOSER_SELECTORS.closeComposerButton, "close_control", 5_000);
   },
   locateSave(page) {
-    return optionalLocator(page, X_COMPOSER_SELECTORS.saveDraftButton, 5_000);
+    return uniqueComposerLocator(page, X_COMPOSER_SELECTORS.saveDraftButton, "save_control", 5_000);
   },
   async settle(page) {
     await page.waitForTimeout(750);
@@ -3002,24 +3077,26 @@ export async function saveAsDraft(
   let save: Locator | undefined;
   const flow = await runXDraftSaveFlow("composer_close_save", {
     async beforeSave() {
-      const close = await deps.locateClose(page);
-      if (!close) throw new Error("Close control unavailable.");
-      await close.click();
+      const close = await withXDraftDiagnostic("close_control", () => deps.locateClose(page));
+      if (!close) throw new XDraftOperationError("close_control", "control_missing");
+      await withXDraftDiagnostic("close_composer", () => close.click());
 
-      const candidate = await deps.locateSave(page);
+      const candidate = await withXDraftDiagnostic("save_control", () => deps.locateSave(page));
       if (!candidate) {
         // Do not guess at another button: a wrong click could discard or post.
-        throw new Error("Save control unavailable.");
+        throw new XDraftOperationError("save_control", "control_missing");
       }
       save = candidate;
     },
     async deliverSave() {
       if (!save) throw new Error("Save control was not prepared.");
-      await save.click();
+      await withXDraftDiagnostic("save_delivery", () => save!.click());
     },
     async afterSave() {
-      await deps.settle(page);
-      const evidence = snapshotXDraftRowEvidence(await verify());
+      const evidence = await withXDraftDiagnostic("draft_verification", async () => {
+        await deps.settle(page);
+        return snapshotXDraftRowEvidence(await verify());
+      });
       const usable = evidence?.status === "verified" || evidence?.status === "unverified"
         ? evidence
         : unavailableDraftRowEvidence("baseline_unavailable");
