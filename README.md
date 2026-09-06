@@ -207,17 +207,17 @@ See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for product scope and roadmap,
 [AGENTS.md](./AGENTS.md) for contributor invariants. Open work is tracked in
 [GitHub issues](https://github.com/fyang0507/publish-cli/issues).
 
-### Website skill handoff
+### Website subagent handoff
 
-`publish website info --json` routes the operating agent to `website/SKILL.md`
-inside the installed publish skill. The website repository owns this linked
-skill and its content tooling. The installed publish directory may itself be a
-symlink; both links resolve without depending on the agent's working directory.
-Keep the sibling checkout layout intact when moving repositories, or relink
-`skills/publish/website` to the intended website's `add-website-content` directory.
-The external skill is not bundled in the npm package. Missing links are a setup
-blocker, not a reason to invent a content workflow.
+`publish website info --json` describes the article language, metadata, tag,
+and media expectations and instructs the operating agent to launch a headless
+subagent in the selected website checkout/worktree. The subagent loads that
+repository's own `add-website-content` skill and follows its content workflow.
+No website skill is nested or linked under the publish skill.
 
-The agent selects the website checkout/worktree explicitly, follows its skill,
-and verifies a review draft locally. No website draft CLI transport or automatic
-merge/deployment is provided.
+Resolve caller-relative source/media paths before dispatch and give the subagent
+accessible inputs. The subagent verifies the content locally and returns a review
+branch/commit or draft PR plus audit and browser evidence. The parent reviews the
+result before reporting success. Missing repository-local skills or unavailable
+repository-scoped delegation are setup blockers. The CLI does not launch agents,
+stage website content, merge, or deploy.

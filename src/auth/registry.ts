@@ -90,7 +90,7 @@ function websiteDescriptor(nowMs: number): AuthReadiness {
     verificationMode: "agent_workflow",
     evidence: {
       liveProbe: "not_run",
-      note: "The operating agent must verify the website skill, target repository, tooling, and any requested remote access. No repository or GitHub access was attempted.",
+      note: "The operating agent must verify the target repository and headless delegation context; the website subagent verifies its local skill, tooling, and any requested remote access. No repository, subagent, or GitHub access was attempted.",
     },
     healed: [],
     requiresHuman: false,
@@ -103,7 +103,7 @@ function websiteDescriptor(nowMs: number): AuthReadiness {
         launch: "workflow_ref",
       },
       workflowRef: "publish website info --static",
-      instruction: "Follow the website info handoff to the linked website skill, select and verify the target repository/worktree, and continue there through a verified review draft only.",
+      instruction: "Follow website info to verify the target repository/worktree, then launch a headless subagent there to load its repository-local add-website-content skill. Pass the content inputs and review-only boundary, and review its verification evidence before reporting a draft.",
       continueInSameContext: true,
     },
   };

@@ -71,7 +71,8 @@ The platform list is always explicit and deliberate. There is no `--all`.
 - CLI-probed: `x`, `linkedin`, `reddit`, `wechat`.
 - Agent-owned repository workflow: `website` returns `agent_check_required` with
   verification mode `agent_workflow` and a local-runtime next step. It performs
-  no repository or GitHub probe; the operating agent follows the static info.
+  no repository or GitHub probe; the operating agent follows the static info to
+  launch a headless subagent in the selected website repository/worktree.
 - Agent-owned browser: `xhs` returns `agent_check_required` with the creator URL
   and static info reference.
 - Human-owned handoff: `1point3acres` returns `human_login_required`; its known

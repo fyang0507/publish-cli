@@ -364,11 +364,13 @@ before state, browser, or API access.
 
 ## Personal website handoff
 
-The website channel provides `publish website info [--json] [--static]` and an
-agent-owned repository workflow. The publish skill's `website` link routes to
-the target website's existing content skill; that repository owns its content
-schema, generators, audits, and preview verification. This checkout integration
-requires a resolvable external skill and target repository. It ships no website
-write transport and claims no repository or GitHub readiness from `info`.
-The deliverable is a verified review branch/commit or draft PR. Final merge and
-deployment remain outside publish-cli. See issue #126.
+The website channel provides `publish website info [--json] [--static]` with
+high-level bilingual text, metadata, tag, and media expectations. The operating
+agent launches a headless subagent in the selected website repository/worktree,
+where it loads the repository-local `add-website-content` skill. The website
+repository owns content formatting details, generators, audits, and preview
+verification. Publish contains no nested website skill or cross-repository link.
+The CLI neither launches agents nor claims repository or GitHub readiness.
+The parent reviews the subagent's evidence before reporting a verified review
+branch/commit or draft PR. Final merge and deployment remain outside publish-cli.
+See issue #126.
