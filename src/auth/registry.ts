@@ -81,6 +81,34 @@ function externallyOwnedDescriptor(
   };
 }
 
+function websiteDescriptor(nowMs: number): AuthReadiness {
+  return {
+    platform: "website",
+    ready: false,
+    status: "agent_check_required",
+    checkedAt: new Date(nowMs).toISOString(),
+    verificationMode: "agent_workflow",
+    evidence: {
+      liveProbe: "not_run",
+      note: "Repository, delegation, and remote access are unverified; no checks were performed.",
+    },
+    healed: [],
+    requiresHuman: false,
+    nextStep: {
+      executor: "agent",
+      recoveryContext: {
+        schemaVersion: AUTH_RECOVERY_CONTEXT_SCHEMA_VERSION,
+        venue: "local_runtime",
+        owner: "agent",
+        launch: "workflow_ref",
+      },
+      workflowRef: "publish website info --static",
+      instruction: "Delegate to a headless subagent in the website repository using its local add-website-content skill; the result is a verified review draft.",
+      continueInSameContext: true,
+    },
+  };
+}
+
 function browserConfigs(): Record<"x" | "linkedin" | "reddit", PassiveBrowserProbeConfig> {
   const paths = peekDataPaths();
   return {
@@ -174,6 +202,7 @@ export function createAuthProbeRegistry(deps: AuthProbeDependencies = {}): AuthP
     linkedin: () => probePassiveBrowserAuth(configs.linkedin, deps.browserBackend, now()),
     reddit: () => probePassiveBrowserAuth(configs.reddit, deps.browserBackend, now()),
     wechat: () => probeWechatAuth({ ...deps.wechat, now }),
+    website: async () => websiteDescriptor(now()),
     xhs: async () => externallyOwnedDescriptor("xhs", now()),
     "1point3acres": async () => externallyOwnedDescriptor("1point3acres", now()),
   };
@@ -189,6 +218,9 @@ function failureNextStep(
   platform: AuthPlatform,
   status: "network_error" | "probe_inconclusive",
 ): FailureRecovery {
+  if (platform === "website") {
+    return { requiresHuman: false, nextStep: websiteDescriptor(0).nextStep! };
+  }
   if (platform === "xhs") {
     return {
       requiresHuman: false,
@@ -301,7 +333,7 @@ export function unexpectedProbeReadiness(
     status,
     checkedAt: new Date(nowMs).toISOString(),
     verificationMode:
-      platform === "wechat" ? "api" : platform === "xhs" ? "browser_agent" : platform === "1point3acres" ? "human_handoff" : "passive_browser",
+      platform === "website" ? "agent_workflow" : platform === "wechat" ? "api" : platform === "xhs" ? "browser_agent" : platform === "1point3acres" ? "human_handoff" : "passive_browser",
     evidence: {
       liveProbe: network ? "network_error" : "inconclusive",
       note: network

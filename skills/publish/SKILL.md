@@ -1,6 +1,6 @@
 ---
 name: publish
-description: Use the publish CLI to inspect channel capabilities and readiness, perform supported discovery, and stage draft-only content for X, LinkedIn, Reddit, WeChat, Xiaohongshu, or 1point3acres. Never use it to publish, send, schedule, or make content public.
+description: Use the publish CLI to inspect channel capabilities and readiness, perform supported discovery, and stage draft-only content for X, LinkedIn, Reddit, WeChat, Xiaohongshu, 1point3acres, or a personal website. Never use it to publish, send, schedule, or make content public.
 ---
 
 # Publish
@@ -23,7 +23,7 @@ Use `publish` as the mechanical distribution layer. Editorial strategy, approval
    ```
 
 3. Treat the complete response as the execution guide. Follow its CLI boundary, authentication, platform guidance, readiness, recovery step, executor, context-continuity requirement, and stop conditions. Do not add remembered channel instructions or override the response.
-4. If the response selects a CLI action, inspect that action's `--help` and run only the requested action. If it selects an agent-browser or human-handoff path, follow the returned procedure in the required context.
+4. If the response selects a CLI action, inspect that action's `--help` and run only the requested action. If it selects an agent-owned workflow, agent-browser, or human-handoff path, follow the returned procedure in the required context.
 5. If the action is unsupported, readiness is unresolved, a required recovery step cannot be completed, or draft verification is absent, stop and report that exact state. Never turn an inconclusive result into success.
 6. Report what was inspected or changed, where a confirmed draft was saved, and what remains for human review.
 

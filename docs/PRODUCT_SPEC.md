@@ -361,3 +361,16 @@ before state, browser, or API access.
 | **Phase 4 — Send automation + measurement** | Wire the **SEND-GATE** (§5: Discord → wait ~2min → phone escalation) and outcome **measurement** into both loops | Autonomous scout/triage/draft with human-approved send; measure borrowed-reach conversion | Human-approved sends enabled |
 
 **Sequencing rationale.** X first because it is the densest AI-community surface **and** because its **browser-backed session is the reusable backbone**: the persistent-profile auto-login pattern built here is what LinkedIn (Phase 2) and 小红书 (Phase 3) inherit, and the one-login-two-consumers split (browser GraphQL capture for read, composer for write) generalizes to any no-official-API channel. Reddit and LinkedIn come next to broaden borrowed reach (Reddit via official API, LinkedIn via the X browser pattern). 小红书 and WeChat extend into Chinese-language audiences. Send automation and measurement come last, after the drafting and watch loops are trusted, because the send-gate is where autonomy meets risk and must be deliberately gated.
+
+## Personal website handoff
+
+The website channel provides `publish website info [--json] [--static]` with
+high-level bilingual text, metadata, tag, and media expectations. The operating
+agent launches a headless subagent in the selected website repository/worktree,
+where it loads the repository-local `add-website-content` skill. The website
+repository owns content formatting details, generators, audits, and preview
+verification. Publish contains no nested website skill or cross-repository link.
+The CLI neither launches agents nor claims repository or GitHub readiness.
+The parent reviews the subagent's evidence before reporting a verified review
+branch/commit or draft PR. Final merge and deployment remain outside publish-cli.
+See issue #126.

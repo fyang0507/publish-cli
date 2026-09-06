@@ -153,7 +153,7 @@ export function renderChannelInfo(envelope: ChannelInfoEnvelope): string {
 export function registerChannelInfoCommand(parent: Command, channel: AuthPlatform): void {
   const readinessHelp = channel === "wechat"
     ? "WeChat may perform its normal token exchange and report token_refreshed."
-    : channel === "xhs" || channel === "1point3acres"
+    : channel === "xhs" || channel === "1point3acres" || channel === "website"
       ? "Info returns an external handoff descriptor and does not access the platform."
       : "Browser readiness probes are passive.";
   parent

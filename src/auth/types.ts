@@ -5,6 +5,7 @@ export const AUTH_PLATFORMS = [
   "wechat",
   "xhs",
   "1point3acres",
+  "website",
 ] as const;
 
 export type AuthPlatform = (typeof AUTH_PLATFORMS)[number];
@@ -92,7 +93,7 @@ export interface AuthReadiness {
   ready: boolean;
   status: AuthStatus;
   checkedAt: string;
-  verificationMode: "passive_browser" | "api" | "browser_agent" | "human_handoff";
+  verificationMode: "passive_browser" | "api" | "browser_agent" | "human_handoff" | "agent_workflow";
   evidence: AuthEvidence;
   healed: string[];
   /** True only when the immediate next step cannot complete without human participation. */

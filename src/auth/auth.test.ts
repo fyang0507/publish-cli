@@ -708,7 +708,7 @@ test("wechat: close failure does not override a completed ready receipt", async 
 
 test("registry exposes one shared probe seam for auth check and future info commands", async () => {
   const registry = createAuthProbeRegistry({ now: () => NOW });
-  assert.deepEqual(Object.keys(registry).sort(), ["1point3acres", "linkedin", "reddit", "wechat", "x", "xhs"]);
+  assert.deepEqual(Object.keys(registry).sort(), ["1point3acres", "linkedin", "reddit", "website", "wechat", "x", "xhs"]);
   const xhs = await registry.xhs();
   const acres = await registry["1point3acres"]();
   assert.equal(xhs.status, "agent_check_required");

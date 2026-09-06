@@ -127,6 +127,11 @@ const onePointThreeAcres = program
   .description("1point3acres channel: static info + manual-handoff readiness only");
 registerChannelInfoCommand(onePointThreeAcres, "1point3acres");
 
+const website = program
+  .command("website")
+  .description("Personal website channel: info + agent-owned repository handoff only");
+registerChannelInfoCommand(website, "website");
+
 interface ParseReceiptTarget {
   channel: TransportReceiptChannel;
   action: TransportReceiptAction;
