@@ -129,6 +129,16 @@ function isCanonicalRepositoryUrl(source: string, index: number, match: string):
   return validStart && validEnd;
 }
 
+// The website capability intentionally names its public repository target.
+// Keep this exception local to that exact parenthesized repository name.
+function isWebsiteRepositoryTarget(file: string, source: string, index: number, match: string): boolean {
+  const target = `${CANONICAL_REPOSITORY_OWNER}.github.io`;
+  return file === "capabilities/website.md" &&
+    match === CANONICAL_REPOSITORY_OWNER &&
+    source[index - 1] === "(" &&
+    source.slice(index, index + target.length + 1) === `${target})`;
+}
+
 function lineNumberAt(source: string, index: number): number {
   return (source.slice(0, index).match(/\r\n|\n|\r/gu)?.length ?? 0) + 1;
 }
@@ -177,6 +187,7 @@ function scanText(
   for (const candidate of identityCandidates(source)) {
     if (!identityDigests.has(identityDigest(candidate.value))) continue;
     if (isCanonicalRepositoryUrl(source, candidate.index, candidate.value)) continue;
+    if (isWebsiteRepositoryTarget(file, source, candidate.index, candidate.value)) continue;
     findings.push({
       file,
       line: lineNumberAt(source, candidate.index),
@@ -438,6 +449,19 @@ test("public-content detector rejects private paths and identity without flaggin
         .some((finding) => finding.rule === "private_cloud_layout"),
       `private cloud layout should reject ${JSON.stringify(cloudPath)}`,
     );
+  }
+});
+
+test("website target exception rejects other identities, files, and lookalikes", () => {
+  const target = `${CANONICAL_REPOSITORY_OWNER}.github.io`;
+  assert.deepEqual(scanText("capabilities/website.md", `website (${target}) repository`), []);
+  for (const [file, source] of [
+    ["README.md", `website (${target}) repository`],
+    ["capabilities/website.md", `operator ${CANONICAL_REPOSITORY_OWNER}`],
+    ["capabilities/website.md", `website (${target}.evil) repository`],
+    ["capabilities/website.md", `website (${target}/private) repository`],
+  ]) {
+    assert.ok(scanText(file, source).some((finding) => finding.rule === "operator_identity"));
   }
 });
 
