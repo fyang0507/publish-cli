@@ -2,7 +2,7 @@
 
 `publish` is a channel-first content-distribution CLI. It provides discovery and
 draft staging for X, LinkedIn, Reddit, and WeChat, plus execution guidance for
-Xiaohongshu and 1point3acres.
+Xiaohongshu, 1point3acres, and personal websites.
 
 Every content workflow ends at a native draft for human review. The CLI never
 posts, publishes, sends, schedules, or makes a draft public.
@@ -40,6 +40,7 @@ publish reddit info --json
 publish wechat info --json
 publish xhs info --json
 publish 1point3acres info --json
+publish website info --json
 ```
 
 | Channel | Available surface |
@@ -50,6 +51,7 @@ publish 1point3acres info --json
 | WeChat | `check`, `draft` |
 | Xiaohongshu | Agent-browser workflow returned by `info` |
 | 1point3acres | Human-handoff workflow returned by `info` |
+| Website | Agent-owned repository workflow returned by `info`; verified review draft only |
 
 Use `publish --help`, `publish <channel> --help`, and action-level `--help` for
 the authoritative command and flag lists.
@@ -204,3 +206,18 @@ See [PRODUCT_SPEC.md](./docs/PRODUCT_SPEC.md) for product scope and roadmap,
 [AUTH_READINESS.md](./docs/AUTH_READINESS.md) for the readiness contract, and
 [AGENTS.md](./AGENTS.md) for contributor invariants. Open work is tracked in
 [GitHub issues](https://github.com/fyang0507/publish-cli/issues).
+
+### Website skill handoff
+
+`publish website info --json` routes the operating agent to `website/SKILL.md`
+inside the installed publish skill. The website repository owns this linked
+skill and its content tooling. The installed publish directory may itself be a
+symlink; both links resolve without depending on the agent's working directory.
+Keep the sibling checkout layout intact when moving repositories, or relink
+`skills/publish/website` to the intended website's `add-website-content` directory.
+The external skill is not bundled in the npm package. Missing links are a setup
+blocker, not a reason to invent a content workflow.
+
+The agent selects the website checkout/worktree explicitly, follows its skill,
+and verifies a review draft locally. No website draft CLI transport or automatic
+merge/deployment is provided.

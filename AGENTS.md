@@ -38,6 +38,7 @@ calling workflow, not this repository.
 | WeChat | `check`, `draft` | Official API CLI |
 | Xiaohongshu | Procedure returned by `info` | Agent-owned browser |
 | 1point3acres | Procedure returned by `info` | Human handoff |
+| Website | Procedure returned by `info` | Agent-owned repository workflow |
 
 Do not add a transport or claim readiness merely because a research spike found
 a possible route.

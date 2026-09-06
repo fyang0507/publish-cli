@@ -56,14 +56,14 @@ export function registerAuthCheckCommand(parent: Command): void {
     .description("Check side-effect-bounded auth readiness; browser probes never log in or open a composer")
     .option(
       "--platform <names>",
-      "Comma-separated platforms to check (repeatable): x,linkedin,reddit,wechat,xhs,1point3acres",
+      "Comma-separated platforms to check (repeatable): x,linkedin,reddit,wechat,xhs,1point3acres,website",
       collectPlatforms,
     )
     .addOption(new Option("--all").hideHelp())
     .option("--json", "Emit a sanitized machine-readable receipt")
     .addHelpText(
       "after",
-      "\nPlatform modes:\n  CLI-probed     x, linkedin, reddit, wechat\n  Agent-browser  xhs (returns agent_check_required with a browser-agent next step)\n  Human-login    1point3acres (the human logs in, then hands the browser to the agent)\n\nReceipt roles:\n  nextStep.executor owns and initiates the immediate step. requiresHuman=true only when that immediate step cannot finish without human participation; conditional later escalation remains false until encountered. nextStep.recoveryContext is a versioned venue/owner/launch boundary: an entry URL never authorizes switching away from the named context.\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
+      "\nPlatform modes:\n  CLI-probed     x, linkedin, reddit, wechat\n  Agent-browser  xhs (returns agent_check_required with a browser-agent next step)\n  Agent-workflow website (returns agent_check_required for repository/skill checks)\n  Human-login    1point3acres (the human logs in, then hands the browser to the agent)\n\nReceipt roles:\n  nextStep.executor owns and initiates the immediate step. requiresHuman=true only when that immediate step cannot finish without human participation; conditional later escalation remains false until encountered. nextStep.recoveryContext is a versioned venue/owner/launch boundary: an entry URL never authorizes switching away from the named context.\n\nExamples:\n  publish auth check --platform x,linkedin,reddit\n  publish auth check --platform wechat,xhs --json\n\nExit codes:\n  0  every requested platform is ready\n  1  one or more requested platforms are not ready; follow nextStep\n  2  invalid command usage\n",
     )
     .action(async (opts: AuthCheckOptions) => {
       let platforms: AuthPlatform[];
