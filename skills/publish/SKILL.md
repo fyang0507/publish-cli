@@ -1,11 +1,11 @@
 ---
 name: publish
-description: Inspect channel readiness, discover content, and stage drafts with the publish CLI. Route requests for X posts or Articles, LinkedIn, WeChat public accounts, Xiaohongshu (xhs/RedNote), Reddit, 1point3acres, and personal websites to the supported CLI or agent-owned workflow.
+description: Use the publish CLI when asked to publish posts or articles, stage drafts, or find content to engage with on X, LinkedIn, WeChat public accounts, Xiaohongshu (xhs/RedNote), Reddit, 1point3acres, or a personal website.
 ---
 
 # Publish
 
-Use `publish` for discovery and draft staging. The calling workflow owns editorial strategy, approvals, and publication.
+Use `publish` to carry out the user's content-publishing request. Read the selected channel's instructions from the CLI, prepare its inputs, follow the supported workflow, and verify the requested outcome.
 
 ## Boundaries
 
