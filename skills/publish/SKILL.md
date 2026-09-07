@@ -17,7 +17,7 @@ Use `publish` as the mechanical distribution layer. Editorial strategy, approval
 
 When the destination editor does not support hyperlinks in references, remove the hyperlink markup and destination URLs from the platform staging copy while retaining the readable reference text: author or publisher, title, date, and existing citation numbers or grouping. Plain-text references are acceptable; do not force raw URLs or generate another bibliography to compensate for unsupported links. Preserve the canonical source links locally. Follow an explicit request to display URLs instead.
 
-Keep references in one distinct, labeled section using the platform's supported formatting. Link removal must not merge references into body prose or remove their visual separation. Preserve an existing dedicated reference style where supported; verify the local rendering for both content fidelity and section presentation before staging.
+Keep references in one distinct, labeled section using the platform's supported formatting. Link removal must not merge references into body prose or remove their visual separation. Preserve an existing dedicated reference style where supported. Use the channel's documented completion evidence; this reference guidance adds no visual-verification or preview-access prerequisite.
 
 ## Route the request
 

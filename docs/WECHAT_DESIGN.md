@@ -144,7 +144,7 @@ publish wechat draft (--from <base.md> | --from - | --text "<body>")
                      [--digest "<summary>"]     # official ≤120 字; omitted => first 54 字 from body
                      --cover <image.(bmp|png|jpg|jpeg|gif)> # required permanent material
                      [--source-url <url>]       # 阅读原文 link (or frontmatter sourceUrl)
-                     [--keep-links]             # keep inline external links (default: → bottom citations, §4)
+                     [--keep-links]             # keep safe inline links (see §4 for defaults)
                      [--out <file.html>]        # write the rendered HTML for inspection
                      [--dry-run]                # render + validate only; NO network, NO uploads, NO draft/add
 ```
@@ -294,21 +294,26 @@ share the same `client.ts` code path.
 
 ### 3.4 Content generation — reuse X's parser, emit inline-styled HTML
 
-`src/wechat/content.ts` reuses the shared deterministic parser and adds the one
-genuinely new piece — a markdown → inline-styled-HTML renderer:
+`src/wechat/content.ts` reuses the shared deterministic parser and coordinates
+separate safety, bibliography-recognition, and inline-styled rendering modules:
 
 - **Reused by import:** the command uses `resolveContentInputDetails` and
   `splitLeadingFrontmatter` from `src/commands/contentInput.ts` for file/stdin
   metadata classification, then `content.ts` uses `parseBaseMarkdown` from
   `src/x/content.ts` for leading-H1 title derivation. Same reuse posture as
   LinkedIn/Reddit.
-- **New:** a `marked`-based renderer with an **overridden renderer** that emits an
+- **Rendering:** `src/wechat/render.ts` uses a `marked` renderer that emits an
   inline `style="…"` on every block/inline element (headings, paragraphs,
   blockquotes, lists, code, `<img>`, `<a>`). No `<style>`/class output — everything
   survives WeChat's sanitizer. A single **default look** (one readable typographic
   scale); themes/color presets are deferred (§8). Deterministic — same markdown in,
   same HTML out, **no LLM** (consistent with every other content generator).
-- **Safety preflight:** lex once for each exact source/body form, recursively walk
+- **Bibliographies:** `src/wechat/references.ts` recognizes one bounded authored
+  reference section from the top-level token stream. Rendering preserves its
+  numbers and grouped sources with dedicated compact styles; hyperlinks within
+  that section become readable labels by default (§4).
+- **Safety preflight:** `src/wechat/render-safety.ts` validates URLs and raw HTML.
+  Lex once for each exact source/body form, recursively walk
   Marked's rendered token tree, reject every raw-HTML token and every non-allowlisted
   link/image destination, then render the already-validated body tokens. Escaped
   HTML and HTML-looking code remain inert text. This runs before image reads,
@@ -352,22 +357,61 @@ draft assembler needs, with **no network and no LLM**:
    before any cover or body-image read.
 4. **Render body** → inline-styled HTML (§3.4). Escape every dynamic attribute and
    collect referenced **local image paths** for upload (§4.1).
-5. **Link handling (default → citations):** WeChat strips/deactivates most external
-   `<a href>` in article bodies (non-whitelisted domains are not clickable). By
-   default, ordinary external links are rewritten to **bottom citations** (a
-   numbered footnote list showing the URL as text) — the reference's default and the
-   WeChat-friendly choice. `--keep-links` opts out and leaves inline links as-is.
-   Links to `mp.weixin.qq.com` are always kept inline.
+5. **References and link handling:** WeChat deactivates most external `<a href>`
+   links in article bodies. Detect an authored bibliography from the validated
+   tokens using the bounded contract below. Within that section, remove all safe
+   hyperlink wrappers and hidden destination URLs while preserving readable
+   labels, original numbers, grouped sources, repeated destinations, and nested
+   inline formatting. These reference links add no superscripts or generated
+   citations; leave canonical Markdown unchanged. Outside that section, retain
+   the default superscript citations and generated References footer for external
+   HTTP(S) links, deduplicated by exact destination. Safe `mp.weixin.qq.com`,
+   `mailto:`, relative, and fragment links stay inline outside the section. A
+   generated footer for body links can coexist with the authored bibliography.
+   `--keep-links` retains all safe anchors and suppresses generated citations
+   while retaining any authored section's compact styling; it cannot make
+   unsupported destinations clickable.
 6. **Return** `{ title, author, digest, html, coverPath, coverValidation,
    sourceUrl, bodyImages[], linkFlags, warnings[] }`. `bodyImages[]` carry the
    exact parser source, escaped HTML source, resolved local path, and measured
    validation result the assembler must upload + rewrite.
    `warnings[]` carries advisories (omitted digest delegated to
-   WeChat, links converted to citations, remote image found) — printed for the
-   operator, never silent.
+   WeChat, reference hyperlinks rendered as text, external body links converted
+   to citations, remote image found) — printed for the operator, never silent.
 
 Everything in §4 runs in `--dry-run` (no network); the uploads in §4.1 and §5 do
 not.
+
+**Authored bibliography contract.** A top-level Markdown heading of any depth
+must have the exact visible text `Reference`, `References`, `Bibliography`,
+`参考文献`, or `参考资料`; English matching is case-insensitive and inline
+formatting is allowed. It must be followed, allowing blank lines, by one or more
+paragraphs beginning with `【N】` or `[N]` and reference text, or Markdown
+ordered/bullet lists. Consecutive entry blocks and blank lines belong to the
+section. The first other block or any heading ends it. Following creation or
+completion dates therefore need a separate, unnumbered paragraph; a continuation
+inside a numbered paragraph or list item remains part of that entry. Headings
+nested in a quote/list, arbitrary headings such as `Sources`, and matching
+headings without adjacent entries do not establish a bibliography. Multiple
+populated recognized sections fail locally with `wechat_bibliography_ambiguous`;
+the operator can combine them under one heading in a staging copy.
+
+The authored section reuses the generated footer's top divider and 14px heading,
+with 13px reference paragraphs/lists, 1.7 line height, and 2px paragraph/item
+margins. Ordered-list item values preserve authored number gaps. Following
+non-reference blocks use the normal body styles and link handling. Explicit
+visible URL labels, including GFM bare `www.example.com` autolinks, remain readable
+text when anchors are removed; rendering never adds a hidden destination to the
+label. Token-level rendering preserves nested emphasis and avoids reparsing
+visible URLs as links.
+
+Automated renderer regression tests assert the emitted HTML for the authored
+reference section, inline style values, original numbering/grouping, mixed and
+repeated links, explicit URL labels, section termination, body-link citations,
+and safe/unsafe destinations with and without `--keep-links`. These are markup
+assertions, not visual verification or an additional operator preview step.
+They do not require opening local HTML, accessing a gated URL, console login, or
+recreation of a native draft. An API receipt separately verifies draft creation.
 
 ### 4.1 Images — body uploads and the cover
 
@@ -473,7 +517,10 @@ among the consumers (no code change — the resolver is already channel-agnostic
 |---|---|
 | `src/wechat/client.ts` | WeChat API backbone (auth analog of `session.ts`, no browser): stable-token fetch + machine-local cache, `uploadBodyImage` (`media/uploadimg`), `uploadCover` (`material/add_material`), `addDraft` (`draft/add`), `40164` egress-IP parsing, and the **single egress seam** — all requests go through one wrapper that honors `WECHAT_PROXY_URL` / `WECHAT_SSH_TUNNEL` (fixed-egress-IP mode, §3.3). Documents the FORBIDDEN `freepublish/*` + `message/mass/*` endpoints it must never call. |
 | `src/wechat/egress.ts` | The proxy/tunnel helper feeding `client.ts`'s seam: build a `fetch` dispatcher for an `http(s)`/`socks5` proxy, or spawn+manage the `ssh -N -D` SOCKS5 tunnel for `WECHAT_SSH_TUNNEL` (start, wait-until-ready, tear down). Kept separate so `client.ts` stays a thin API layer and the tunnel lifecycle is testable in isolation. Uses `undici`'s `ProxyAgent` for HTTP(S) proxies and direct `socks` `SocksClient` connections inside the custom SOCKS5 dispatcher. |
-| `src/wechat/content.ts` | `generateArticle` — normalized markdown plus parsed metadata → `{title, author, digest, html, coverPath, sourceUrl, bodyImages[], linkFlags, warnings[]}`. Reuses `parseBaseMarkdown` from `src/x/content.ts`; adds the `marked`-based inline-style renderer + link→citation transform. Deterministic, no LLM. |
+| `src/wechat/content.ts` | `generateArticle` — normalized markdown plus parsed metadata → `{title, author, digest, html, coverPath, sourceUrl, bodyImages[], linkFlags, warnings[]}`. Reuses `parseBaseMarkdown` from `src/x/content.ts`; coordinates safety preflight, bibliography recognition, rendering, local-image validation, and the closed inspection snapshot. Deterministic, no LLM. |
+| `src/wechat/render-safety.ts` | Recursive raw-HTML and URL preflight plus HTML escaping and safe URL classification, shared with the renderer. Validation precedes local asset reads and applies even when hyperlink markup will be removed. |
+| `src/wechat/references.ts` | Recognizes one bounded authored bibliography in the top-level token stream; defines section boundaries and rejects ambiguous multiple populated sections. |
+| `src/wechat/render.ts` | Inline-styled body and reference rendering, authored numbering/grouping, reference hyperlinks as text, body-link citations, safe inline links, and local/remote image collection. |
 | `src/wechat/draft.ts` | Orchestration ("poster" analog, no browser): upload cover + body images via `client.ts`, rewrite `<img>` srcs, assemble + send the `draft/add` payload. |
 | `src/commands/wechat-check.ts` | `publish wechat check` — credential + token + IP-allowlist preflight through the configured egress (reports the IP the API actually sees; travel-aware `40164`). |
 | `src/commands/wechat-draft.ts` | `publish wechat draft` command body; resolves content and classifies file/stdin frontmatter through the shared seam before invoking the injected, config-owned author fallback and starting generation. |
@@ -511,15 +558,24 @@ custom SOCKS5 dispatcher). The transport dependencies are inert when
   human-gated send is future toolkit-wide scope (PRODUCT_SPEC §5), never this
   channel.
 
-## 9. Open verification risks (verify live before claiming it works)
+## 9. API completion evidence and unresolved platform behavior
 
-Compile-green + code review misses real bugs in these flows. For WeChat, successful local validation and required uploads followed by a successful real `draft/add` response with a nonempty native `media_id` are sufficient evidence of draft creation. Console login and visual verification through `mp.weixin.qq.com` are not required. Optional preview can investigate rendering, but unavailable console access does not make an API-verified draft incomplete. Neither the receipt nor a preview establishes publication.
+Successful local validation and required uploads followed by a successful real
+`draft/add` response with a nonempty native `media_id` verify WeChat draft
+creation. Opening a local HTML file or a gated draft/preview URL, console login,
+and visual verification are not required. Unavailable preview or console access
+does not make an API-verified draft incomplete. Automated renderer tests check
+emitted markup; they do not establish WeChat's visual rendering. Neither the
+API receipt nor a preview establishes publication.
 
 - **Field measurement and content limits remain unresolved.** The official title,
   author, and digest limits are 32/16/120 `字`, but exact Unicode measurement is
   unknown. Preserve sanitized live `errcode`s instead of guessing a local counter.
   The official HTML row also conflicts between 2 KB, 20,000 characters, and 1 MB.
-- **Inline-style rendering.** WeChat's editor sanitizes some inline CSS. When requested or investigating a specific rendering issue, optionally inspect headings, code blocks, lists, images, citations, and cover crops in the 草稿箱 preview. This is a separate rendering check, not a requirement for API draft verification.
+- **Inline-style rendering.** WeChat's editor sanitizes some inline CSS. If
+  requested and available, a preview can optionally help investigate a specific
+  rendering issue. Preview access and visual inspection do not gate renderer
+  changes or API draft completion.
 - **`stable_token` behavior** and the refresh-overlap window — confirm caching
   doesn't thrash and a stale cached token refreshes cleanly.
 - **IP allowlist / `40164`.** Confirm the `errmsg` IP-parsing matches the live
@@ -678,8 +734,11 @@ carrying an access token. Mode A needs an IP **you** control.
 6. Allowlist `<ip>` once (Appendix A).
 - **`thumb_media_id`** validity + permanent-material quota consumption on repeated
   runs.
-- **Link stripping** varies by account verification status — confirm the citations
-  default renders correctly for the operator's account type.
-- **The boundary.** Verify a run stages into 草稿箱 and that **no** `freepublish/*`
-  call is ever made (grep the code; watch the network in a dry run of the real
-  path).
+- **Link stripping** varies by account verification status. Automated regression
+  tests assert the selected reference mode's emitted HTML text, anchors, and
+  inline style values. They do not require visual inspection or preview access.
+  If requested and available, an optional preview can help investigate how the
+  operator's account renders retained anchors.
+- **The boundary.** Verify staging through the successful `draft/add` response
+  and nonempty native `media_id`. Check code and API transport evidence to confirm
+  that **no** `freepublish/*` call is made; opening the draft box is not required.

@@ -11,8 +11,8 @@
  * (X/LinkedIn emit plain text; Reddit keeps Markdown verbatim). WeChat's editor
  * **strips `<style>` blocks, `<link>` tags, and CSS classes**, so every visual
  * rule MUST be an inline `style="…"` attribute on the element itself. This module
- * therefore hosts the toolkit's one real markdown → inline-styled-HTML renderer
- * (a `marked` renderer override that emits only inline styles). One readable
+ * delegates to render.ts for markdown → inline-styled HTML and references.ts
+ * for bounded authored-bibliography detection. One readable
  * default look; themes/color presets are deferred (WECHAT_DESIGN §8).
  *
  * REUSE: parseBaseMarkdown() is imported from ../x/content.js for deterministic
@@ -34,17 +34,23 @@
  *     `image`. REQUIRED for article_type=news; unresolved => ERROR.
  *   - source url (阅读原文): --source-url → frontmatter `sourceUrl`/
  *     `contentSourceUrl`. Optional.
- *   - Links: external `<a href>` (host ≠ mp.weixin.qq.com) are, by default,
- *     rewritten to bottom numbered citations (WeChat deactivates most external
- *     links in article bodies). `keepLinks` opts out; mp.weixin.qq.com links are
- *     ALWAYS kept inline.
+ *   - Links: hyperlinks inside an authored bibliography render as labels.
+ *     Outside it, external links produce generated bottom citations, while
+ *     mp.weixin.qq.com links stay inline. `keepLinks` opts out of both transforms.
  *   - Images: local `<img>` paths are collected for upload+rewrite by draft.ts;
  *     remote `http(s)://` images are flagged as a warning and left as-is this phase.
  */
 
 import { parseBaseMarkdown, type LinkFlag } from "../x/content.js";
 import { resolve as resolvePath } from "node:path";
-import { marked, Renderer, type Token, type Tokens } from "marked";
+import { marked } from "marked";
+import { findReferenceSection } from "./references.js";
+import { renderWechatBody } from "./render.js";
+import {
+  assertSafeWechatTokens,
+  assertSafeWechatUrl,
+} from "./render-safety.js";
+
 import {
   LocalValidationError,
   WECHAT_IMAGE_UNVERIFIED_CONSTRAINTS,
@@ -75,8 +81,7 @@ import {
   type ClosedSnapshotContext,
 } from "../terminalOutput.js";
 
-/** WeChat's own article domain — links here are always kept inline (never cited). */
-const WECHAT_HOST = "mp.weixin.qq.com";
+export { escapeHtmlAttribute } from "./render-safety.js";
 
 /**
  * Flag overrides for generateArticle. Each metadata field falls back to a markdown
@@ -97,7 +102,7 @@ export interface GenerateArticleOptions {
   sourceUrl?: string;
   /** Parsed file/stdin metadata from the shared frontmatter seam. Inline text omits this. */
   frontmatter?: Record<string, unknown>;
-  /** false (default) => external links → bottom citations; true => leave inline. */
+  /** Keep safe links inline; default strips reference links and cites external body links. */
   keepLinks?: boolean;
   /**
    * Directory that relative cover / body-image paths resolve against — normally the
@@ -118,12 +123,6 @@ export interface BodyImage {
   path: string;
   /** Locally measured header facts; platform acceptance limits remain unknown. */
   validation: LocalImageValidationResult;
-}
-
-interface PendingBodyImage {
-  src: string;
-  htmlSrc: string;
-  path: string;
 }
 
 /** Result of a WeChat article generation run. */
@@ -210,312 +209,6 @@ function trimBlankEdges(text: string): string {
   return text.replace(/^\n+/, "").replace(/\n+$/, "");
 }
 
-/** HTML-escape text content (`&`, `<`, `>`). */
-function escapeHtml(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-/** HTML-escape an attribute value (adds `"`). */
-export function escapeHtmlAttribute(s: string): string {
-  return escapeHtml(s).replace(/"/g, "&quot;");
-}
-
-type WechatUrlUsage = "link" | "image" | "source";
-type SafeWechatUrlKind = "http" | "https" | "mailto" | "relative" | "fragment";
-
-interface WechatUrlInspection {
-  canonical: string;
-  kind: SafeWechatUrlKind | null;
-  problem:
-    | "control_character"
-    | "excessive_encoding"
-    | "malformed_encoding"
-    | "scheme_relative"
-    | "invalid"
-    | "unsupported_scheme"
-    | null;
-  actual: string;
-}
-
-const URL_NAMED_ENTITY: Readonly<Record<string, string>> = {
-  amp: "&",
-  bsol: "\\",
-  colon: ":",
-  newline: "\n",
-  sol: "/",
-  tab: "\t",
-};
-
-const REPORTABLE_URL_SCHEMES = new Set([
-  "data",
-  "file",
-  "http",
-  "https",
-  "javascript",
-  "mailto",
-  "vbscript",
-]);
-
-/** Keep caller-controlled error evidence bounded and avoid echoing arbitrary schemes. */
-function reportedUrlScheme(scheme: string): string {
-  return REPORTABLE_URL_SCHEMES.has(scheme) ? scheme : "unsupported_scheme";
-}
-
-/** Decode one entity/percent layer for the rejection probe, using strict UTF-8. */
-function decodeUrlProbeStep(value: string): { value: string; malformed: boolean } {
-  const entitiesDecoded = value
-    .replace(/&#(?:x([0-9a-f]+)|([0-9]+));?/gi, (whole, hex: string | undefined, dec: string | undefined) => {
-      const codePoint = Number.parseInt(hex ?? dec ?? "", hex ? 16 : 10);
-      if (!Number.isFinite(codePoint) || codePoint < 0 || codePoint > 0x10ffff) return whole;
-      try {
-        return String.fromCodePoint(codePoint);
-      } catch {
-        return whole;
-      }
-    })
-    .replace(/&(amp|bsol|colon|newline|sol|tab);/gi, (whole, name: string) =>
-      URL_NAMED_ENTITY[name.toLowerCase()] ?? whole);
-  try {
-    // Unlike byte-wise String.fromCharCode decoding, decodeURIComponent treats
-    // percent triplets as UTF-8: encoded CJK/punctuation remain valid Unicode,
-    // while lone continuation bytes, truncated sequences, and malformed `%`
-    // syntax fail closed instead of masquerading as C1 controls.
-    return { value: decodeURIComponent(entitiesDecoded), malformed: false };
-  } catch {
-    return { value: entitiesDecoded, malformed: true };
-  }
-}
-
-/**
- * Repeated decoding closes entity/percent nesting tricks without letting hostile
- * input force an unbounded loop. More than eight changing layers is rejected as
- * ambiguous rather than treated as a relative URL.
- */
-function canonicalizeUrlForSafety(raw: string): {
-  value: string;
-  excessive: boolean;
-  malformed: boolean;
-} {
-  let value = raw.trim();
-  for (let i = 0; i < 8; i += 1) {
-    const decoded = decodeUrlProbeStep(value);
-    if (decoded.malformed) {
-      // Malformed percent/UTF-8 in the caller's raw value is invalid. After at
-      // least one valid layer, however, an unmatched percent can be the decoded
-      // literal represented by `%25` (for example `./100%25-complete`). Stop at
-      // that derived text and still run every scheme/control/network/colon probe
-      // below; do not misclassify the valid emitted encoding as malformed.
-      return i === 0
-        ? { value: decoded.value, excessive: false, malformed: true }
-        : { value, excessive: false, malformed: false };
-    }
-    if (decoded.value === value) return { value, excessive: false, malformed: false };
-    value = decoded.value;
-  }
-  const next = decodeUrlProbeStep(value);
-  return {
-    value,
-    excessive: !next.malformed && next.value !== value,
-    // This is necessarily a derived ninth-layer value; a malformed next decode
-    // means the current terminal percent came from a valid earlier `%25` layer.
-    malformed: false,
-  };
-}
-
-/** Classify a URL/path after security canonicalization; this function never throws. */
-function inspectWechatUrl(raw: string, usage: WechatUrlUsage): WechatUrlInspection {
-  const controls = /[\u0000-\u001f\u007f-\u009f]/;
-  if (controls.test(raw)) {
-    return { canonical: "", kind: null, problem: "control_character", actual: "control_character" };
-  }
-  const emitted = raw.trim();
-  if (raw !== emitted) {
-    return { canonical: emitted, kind: null, problem: "invalid", actual: "surrounding_whitespace" };
-  }
-  if (/^[\\/]{2}/.test(emitted)) {
-    return { canonical: emitted, kind: null, problem: "scheme_relative", actual: "scheme_relative" };
-  }
-  // A drive-absolute Windows body-image path is a local asset, not a URI
-  // scheme. It still goes through the normal local-file validation below.
-  // Double-leading UNC/network paths were rejected immediately above.
-  if (usage === "image" && /^[a-z]:[\\/]/i.test(emitted)) {
-    return { canonical: emitted, kind: "relative", problem: null, actual: "relative" };
-  }
-
-  if (emitted.startsWith("#")) {
-    return usage === "link"
-      ? { canonical: emitted, kind: "fragment", problem: null, actual: "fragment" }
-      : { canonical: emitted, kind: null, problem: "unsupported_scheme", actual: "fragment" };
-  }
-  const directMatch = /^([a-z][a-z0-9+.-]*):/i.exec(emitted);
-  const directScheme = directMatch?.[1].toLowerCase() ?? null;
-
-  // An explicit scheme is evaluated against the exact emitted value. Decoding
-  // must never repair an invalid absolute URL or grant it a safe classification.
-  if (directScheme) {
-    const decodedOnce = decodeUrlProbeStep(emitted);
-    if (decodedOnce.malformed) {
-      return { canonical: emitted, kind: null, problem: "malformed_encoding", actual: "malformed_encoding" };
-    }
-    if (controls.test(decodedOnce.value)) {
-      return { canonical: emitted, kind: null, problem: "control_character", actual: "control_character" };
-    }
-    if (directScheme === "mailto") {
-      if (usage !== "link" || !emitted.slice(directMatch?.[0].length ?? 0).trim()) {
-        return { canonical: emitted, kind: null, problem: "unsupported_scheme", actual: directScheme };
-      }
-      try {
-        if (new URL(emitted).protocol.toLowerCase() !== "mailto:") throw new Error("invalid mailto");
-      } catch {
-        return { canonical: emitted, kind: null, problem: "invalid", actual: "mailto:invalid" };
-      }
-      return { canonical: emitted, kind: "mailto", problem: null, actual: directScheme };
-    }
-    if (directScheme !== "http" && directScheme !== "https") {
-      return {
-        canonical: emitted,
-        kind: null,
-        problem: "unsupported_scheme",
-        actual: reportedUrlScheme(directScheme),
-      };
-    }
-    // WHATWG URL parsing deliberately repairs inputs such as http:///host and
-    // treats backslashes as path separators for special schemes. Those bytes
-    // are not the explicit `http(s)://authority` form we promise to emit, so
-    // reject them before parsing instead of approving a normalized surrogate.
-    if (!/^https?:\/\/[^/?#\\]/i.test(emitted) || emitted.includes("\\")) {
-      return { canonical: emitted, kind: null, problem: "invalid", actual: `${directScheme}:invalid` };
-    }
-    const authority = emitted.slice(emitted.indexOf("://") + 3).split(/[/?#]/, 1)[0];
-    if (authority.includes("@")) {
-      return { canonical: emitted, kind: null, problem: "invalid", actual: "credentials_unsupported" };
-    }
-    try {
-      const parsed = new URL(emitted);
-      if (parsed.protocol.toLowerCase() !== `${directScheme}:` || !parsed.hostname) {
-        return { canonical: emitted, kind: null, problem: "invalid", actual: `${directScheme}:invalid` };
-      }
-    } catch {
-      return { canonical: emitted, kind: null, problem: "invalid", actual: `${directScheme}:invalid` };
-    }
-    return { canonical: emitted, kind: directScheme, problem: null, actual: directScheme };
-  }
-
-  // With no explicit scheme, recursively decode only as a rejection probe for
-  // an encoded/obfuscated scheme, control byte, fragment, or network-path form.
-  const decoded = canonicalizeUrlForSafety(emitted);
-  const canonical = decoded.value.trim();
-  if (decoded.malformed) {
-    return { canonical, kind: null, problem: "malformed_encoding", actual: "malformed_encoding" };
-  }
-  if (decoded.excessive) {
-    return { canonical, kind: null, problem: "excessive_encoding", actual: "excessive_encoding" };
-  }
-  if (controls.test(canonical)) {
-    return { canonical, kind: null, problem: "control_character", actual: "control_character" };
-  }
-  if (/^[\\/]{2}/.test(canonical)) {
-    return { canonical, kind: null, problem: "scheme_relative", actual: "scheme_relative" };
-  }
-  if (canonical.startsWith("#")) {
-    return { canonical, kind: null, problem: "unsupported_scheme", actual: "obfuscated_url" };
-  }
-
-  const canonicalColon = canonical.indexOf(":");
-  const canonicalPrefix = canonicalColon < 0 ? "" : canonical.slice(0, canonicalColon);
-  const compactCanonicalPrefix = canonicalPrefix.replace(/[\u0000-\u0020\u007f-\u009f]/g, "");
-  const canonicalScheme = /^[a-z][a-z0-9+.-]*$/i.test(compactCanonicalPrefix)
-    ? compactCanonicalPrefix.toLowerCase()
-    : null;
-  if (canonicalScheme) {
-    if (canonicalScheme !== "http" && canonicalScheme !== "https" && canonicalScheme !== "mailto") {
-      return {
-        canonical,
-        kind: null,
-        problem: "unsupported_scheme",
-        actual: reportedUrlScheme(canonicalScheme),
-      };
-    }
-    return { canonical, kind: null, problem: "unsupported_scheme", actual: "obfuscated_scheme" };
-  }
-
-  // A colon in the first path segment is neither an ordinary relative path nor
-  // a syntactically valid explicit scheme (e.g. java\\script: or a format-char
-  // smuggling attempt), so fail closed.
-  const firstColon = emitted.indexOf(":");
-  const firstPathSeparator = emitted.search(/[/?#]/);
-  if (firstColon >= 0 && (firstPathSeparator < 0 || firstColon < firstPathSeparator)) {
-    return { canonical, kind: null, problem: "invalid", actual: "malformed_scheme" };
-  }
-  if (usage === "source" || (usage === "image" && !emitted)) {
-    return { canonical, kind: null, problem: "invalid", actual: emitted ? "relative" : "empty" };
-  }
-  return { canonical: emitted, kind: "relative", problem: null, actual: "relative" };
-}
-
-function urlExpected(usage: WechatUrlUsage): string {
-  if (usage === "source") return "an absolute http:// or https:// URL";
-  if (usage === "image") return "an http(s) URL or local filesystem path (not a fragment or scheme-relative URL)";
-  return "http, https, mailto, a relative URL, or a fragment";
-}
-
-/** Reject one caller URL with structured, bounded actual/expected evidence. */
-function assertSafeWechatUrl(raw: string, usage: WechatUrlUsage): WechatUrlInspection {
-  const inspected = inspectWechatUrl(raw, usage);
-  if (!inspected.problem) return inspected;
-  const label = usage === "source" ? "source URL" : `Markdown ${usage} destination`;
-  const expected = urlExpected(usage);
-  throw new LocalValidationError(
-    `Unsafe or unsupported WeChat ${label} (actual: ${inspected.actual}; expected: ${expected}).`,
-    {
-      code: usage === "source" ? "wechat_source_url_unsafe" : "wechat_url_unsafe",
-      field: usage === "source" ? "source" : "body",
-      actual: inspected.actual,
-      expected,
-      unit: null,
-    },
-  );
-}
-
-/** Validate every nested Marked token before rendering or reading any asset. */
-function assertSafeWechatTokens(tokens: Token[]): void {
-  marked.walkTokens(tokens, (token) => {
-    if (token.type === "html") {
-      throw new LocalValidationError(
-        "Raw HTML is unsupported in WeChat Markdown (actual: raw_html; expected: Markdown syntax, escaped HTML text, or code).",
-        {
-          code: "wechat_raw_html_unsupported",
-          field: "body",
-          actual: "raw_html",
-          expected: "Markdown syntax, escaped HTML text, or code",
-          unit: null,
-        },
-      );
-    }
-    if (token.type === "link") {
-      assertSafeWechatUrl((token as Tokens.Link).href ?? "", "link");
-    } else if (token.type === "image") {
-      assertSafeWechatUrl((token as Tokens.Image).href ?? "", "image");
-    }
-  });
-}
-
-/** Is this a WeChat-native (mp.weixin.qq.com) link (always kept inline)? */
-function isWeChatLink(href: string): boolean {
-  const inspected = inspectWechatUrl(href, "link");
-  if (inspected.problem || (inspected.kind !== "http" && inspected.kind !== "https")) return false;
-  try {
-    return new URL(inspected.canonical).hostname.toLowerCase() === WECHAT_HOST;
-  } catch {
-    return false;
-  }
-}
-
-/** Strip HTML tags from a rendered inline fragment (for plain-text citation labels). */
-function stripTags(s: string): string {
-  return s.replace(/<[^>]+>/g, "").trim();
-}
-
 /**
  * Collect link advisory flags from the body markdown (both `[text](url)` and bare
  * URLs), deduped by URL, with a WeChat-appropriate note. Informational only —
@@ -526,8 +219,9 @@ function collectLinkFlags(body: string): LinkFlag[] {
   const seen = new Set<string>();
   const note =
     "WeChat deactivates most external links in article bodies (non-whitelisted domains " +
-    "are not clickable). By default external links are moved to bottom citations; use " +
-    "--keep-links to keep them inline. mp.weixin.qq.com links are always kept inline.";
+    "are not clickable). Links inside authored references become readable text; " +
+    "external body links are moved to bottom citations. Use --keep-links to keep links inline. " +
+    "Outside references, mp.weixin.qq.com links are always kept inline.";
 
   let m: RegExpExecArray | null;
   MD_LINK_RE.lastIndex = 0;
@@ -547,187 +241,6 @@ function collectLinkFlags(body: string): LinkFlag[] {
   }
 
   return flags;
-}
-
-// ---------------------------------------------------------------------------
-// Inline-styled HTML renderer (marked v18 token-object renderer API)
-// ---------------------------------------------------------------------------
-
-/**
- * The single readable default look. EVERY block/inline element carries an inline
- * `style="…"` (no `<style>`, no `class`, no `<link>` — WeChat strips them all).
- */
-const S = {
-  h1: "font-size:22px;font-weight:700;line-height:1.4;margin:28px 0 16px;color:#1a1a1a;",
-  h2: "font-size:20px;font-weight:700;line-height:1.4;margin:26px 0 14px;color:#1a1a1a;",
-  h3: "font-size:18px;font-weight:600;line-height:1.4;margin:22px 0 12px;color:#1a1a1a;",
-  h4: "font-size:16px;font-weight:600;line-height:1.4;margin:20px 0 10px;color:#1a1a1a;",
-  p: "font-size:16px;line-height:1.75;margin:0 0 16px;color:#333333;",
-  blockquote:
-    "margin:0 0 16px;padding:8px 16px;border-left:4px solid #d0d0d0;background:#f7f7f7;color:#666666;",
-  ul: "margin:0 0 16px;padding-left:24px;font-size:16px;line-height:1.75;color:#333333;",
-  ol: "margin:0 0 16px;padding-left:24px;font-size:16px;line-height:1.75;color:#333333;",
-  li: "margin:4px 0;",
-  pre: "margin:0 0 16px;padding:14px 16px;background:#f6f8fa;border-radius:6px;overflow-x:auto;",
-  preCode:
-    "font-family:Consolas,Menlo,Monaco,'Courier New',monospace;font-size:14px;line-height:1.5;color:#24292e;white-space:pre;",
-  code:
-    "padding:2px 6px;background:#f2f2f2;border-radius:3px;font-family:Consolas,Menlo,Monaco,'Courier New',monospace;font-size:90%;color:#c7254e;",
-  strong: "font-weight:700;",
-  em: "font-style:italic;",
-  a: "color:#576b95;text-decoration:none;",
-  img: "max-width:100%;height:auto;display:block;margin:16px auto;border-radius:4px;",
-  sup: "color:#576b95;font-size:75%;",
-  citeSection: "margin:24px 0 0;padding-top:16px;border-top:1px solid #e5e5e5;",
-  citeHeading: "font-size:14px;font-weight:600;margin:0 0 8px;color:#888888;",
-  citeList: "margin:0;padding-left:24px;font-size:13px;line-height:1.7;color:#888888;",
-  citeItem: "margin:2px 0;word-break:break-all;",
-};
-
-/** A collected bottom citation for an external link. */
-interface Citation {
-  index: number;
-  url: string;
-  label: string;
-}
-
-/** Mutable state shared across a single render pass (populated by the renderer). */
-interface RenderContext {
-  keepLinks: boolean;
-  /** Base dir for resolving relative local image paths (the markdown file's dir, or cwd). */
-  baseDir: string;
-  /** Collected during rendering; validated only after marked.parse returns. */
-  bodyImages: PendingBodyImage[];
-  remoteImages: string[];
-  citations: Citation[];
-  citeByUrl: Map<string, number>;
-}
-
-/**
- * Build a marked Renderer that emits ONLY inline-styled HTML. Methods are
- * `function`s (not arrows) so `this.parser` binds to the active parser for inline/
- * block child rendering. Link/image handling mutates `ctx` (citations, images).
- */
-function buildRenderer(ctx: RenderContext): Renderer {
-  const r = new Renderer();
-
-  // Defense in depth: the preflight rejects every HTML token before this renderer
-  // runs. If a future caller bypasses that preflight, raw markup is still emitted
-  // only as text rather than as an active element.
-  r.html = function (t) {
-    return escapeHtml(t.text);
-  };
-
-  r.heading = function (t) {
-    const lvl = Math.min(t.depth, 4);
-    const style = lvl === 1 ? S.h1 : lvl === 2 ? S.h2 : lvl === 3 ? S.h3 : S.h4;
-    return `<h${t.depth} style="${style}">${this.parser.parseInline(t.tokens)}</h${t.depth}>`;
-  };
-
-  r.paragraph = function (t) {
-    return `<p style="${S.p}">${this.parser.parseInline(t.tokens)}</p>`;
-  };
-
-  r.blockquote = function (t) {
-    return `<blockquote style="${S.blockquote}">${this.parser.parse(t.tokens)}</blockquote>`;
-  };
-
-  r.list = function (t) {
-    const tag = t.ordered ? "ol" : "ul";
-    const style = t.ordered ? S.ol : S.ul;
-    const startAttr =
-      t.ordered && typeof t.start === "number" && t.start !== 1 ? ` start="${t.start}"` : "";
-    let body = "";
-    for (const item of t.items) body += this.listitem(item);
-    return `<${tag}${startAttr} style="${style}">${body}</${tag}>`;
-  };
-
-  r.listitem = function (item) {
-    return `<li style="${S.li}">${this.parser.parse(item.tokens)}</li>`;
-  };
-
-  r.code = function (t) {
-    return `<pre style="${S.pre}"><code style="${S.preCode}">${escapeHtml(t.text)}</code></pre>`;
-  };
-
-  r.codespan = function (t) {
-    return `<code style="${S.code}">${escapeHtml(t.text)}</code>`;
-  };
-
-  r.strong = function (t) {
-    return `<strong style="${S.strong}">${this.parser.parseInline(t.tokens)}</strong>`;
-  };
-
-  r.em = function (t) {
-    return `<em style="${S.em}">${this.parser.parseInline(t.tokens)}</em>`;
-  };
-
-  r.link = function (t) {
-    const label = this.parser.parseInline(t.tokens);
-    const href = t.href || "";
-    const inspected = inspectWechatUrl(href, "link");
-    // Kept inline: WeChat-native links always; everything when --keep-links; and
-    // any non-http(s) href (relative/anchor/mailto — citations don't apply).
-    if (
-      ctx.keepLinks ||
-      isWeChatLink(href) ||
-      (inspected.kind !== "http" && inspected.kind !== "https")
-    ) {
-      return `<a href="${escapeHtmlAttribute(href)}" style="${S.a}">${label}</a>`;
-    }
-    // External link → bottom citation (deduped by URL).
-    let n = ctx.citeByUrl.get(href);
-    if (n === undefined) {
-      n = ctx.citeByUrl.size + 1;
-      ctx.citeByUrl.set(href, n);
-      ctx.citations.push({ index: n, url: href, label: stripTags(label) });
-    }
-    return `${label}<sup style="${S.sup}">[${n}]</sup>`;
-  };
-
-  r.image = function (t) {
-    const href = t.href || "";
-    const alt = escapeHtmlAttribute(t.text ?? "");
-    const inspected = inspectWechatUrl(href, "image");
-    if (inspected.kind === "http" || inspected.kind === "https") {
-      // Remote image: flagged (a published article would drop it), left as-is.
-      ctx.remoteImages.push(href);
-      return `<img src="${escapeHtmlAttribute(href)}" alt="${alt}" style="${S.img}">`;
-    }
-    // Local image: preserve the exact parser href separately from the escaped
-    // attribute emitted into HTML. draft.ts matches the escaped identity and reads
-    // `path`, so quotes/ampersands cannot create markup and do not break upload or
-    // rewrite. First-seen order and raw-source dedupe remain stable.
-    const htmlSrc = escapeHtmlAttribute(href);
-    if (!ctx.bodyImages.some((b) => b.src === href)) {
-      const path = resolvePath(ctx.baseDir, href);
-      ctx.bodyImages.push({ src: href, htmlSrc, path });
-    }
-    return `<img src="${htmlSrc}" alt="${alt}" style="${S.img}">`;
-  };
-
-  return r;
-}
-
-/** Render the trailing numbered citation list appended after the body. */
-function renderCitations(citations: Citation[]): string {
-  if (citations.length === 0) return "";
-  const items = citations
-    .map((c) => {
-      // `label` came from parseInline() over preflight-validated tokens: Marked
-      // already escaped its text, and stripTags() removed only renderer-owned
-      // tags. Emit that safe text exactly once; escaping it again would display
-      // entity source such as `&amp;` instead of the caller's ampersand.
-      const prefix = c.label ? `${c.label} — ` : "";
-      return `<li style="${S.citeItem}">${prefix}${escapeHtml(c.url)}</li>`;
-    })
-    .join("");
-  return (
-    `<section style="${S.citeSection}">` +
-    `<p style="${S.citeHeading}">References</p>` +
-    `<ol style="${S.citeList}">${items}</ol>` +
-    `</section>`
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -814,6 +327,7 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   assertSafeWechatTokens(marked.lexer(afterFm));
   const bodyTokens = marked.lexer(bodyMarkdown);
   assertSafeWechatTokens(bodyTokens);
+  const references = findReferenceSection(bodyTokens);
 
   // Asset reads happen only after caller markup and URL destinations are known
   // safe. This keeps an invalid body/source URL from touching even the cover.
@@ -821,23 +335,14 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   const coverValidation = assertWechatLocalImage(coverPath, "cover");
 
   // --- render body → inline-styled HTML ---
-  const ctx: RenderContext = {
-    keepLinks: !!opts.keepLinks,
-    baseDir,
-    bodyImages: [],
-    remoteImages: [],
-    citations: [],
-    citeByUrl: new Map(),
-  };
-  const renderer = buildRenderer(ctx);
-  const bodyHtml = marked.parser(bodyTokens, { renderer }) as string;
+  const rendered = renderWechatBody(bodyTokens, { keepLinks: !!opts.keepLinks, baseDir }, references);
   // Validate outside Marked's renderer call stack so LocalValidationError text
   // and structured actual/expected/unit evidence pass through unchanged.
-  const bodyImages: BodyImage[] = ctx.bodyImages.map((image) => ({
+  const bodyImages: BodyImage[] = rendered.bodyImages.map((image) => ({
     ...image,
     validation: assertWechatLocalImage(image.path, "body"),
   }));
-  const html = bodyHtml + renderCitations(ctx.citations);
+  const html = rendered.html;
 
   // --- digest (摘要) ---
   const explicitDigest = (opts.digest ?? data.digest)?.trim();
@@ -853,15 +358,23 @@ export function generateArticle(md: string, opts: GenerateArticleOptions = {}): 
   }
 
   // --- advisories: citations + remote images ---
-  if (!opts.keepLinks && ctx.citations.length > 0) {
+  if (!opts.keepLinks && rendered.citationCount > 0) {
     warnings.push(
-      `${ctx.citations.length} external link(s) were moved to bottom citations (WeChat deactivates ` +
+      `${rendered.citationCount} external link(s) were moved to bottom citations (WeChat deactivates ` +
         `most external links in article bodies). Use --keep-links to keep them inline.`,
     );
   }
-  if (ctx.remoteImages.length > 0) {
+  if (rendered.textLinkCount > 0) {
     warnings.push(
-      `${ctx.remoteImages.length} remote image(s) (${ctx.remoteImages
+      `${rendered.textLinkCount} reference hyperlink occurrence(s) were rendered as readable text. ` +
+        "Reference numbers and grouped sources were preserved without adding destination URLs or citations. " +
+        "Canonical Markdown links are unchanged. " +
+        "Use --keep-links to retain safe inline hyperlinks.",
+    );
+  }
+  if (rendered.remoteImages.length > 0) {
+    warnings.push(
+      `${rendered.remoteImages.length} remote image(s) (${rendered.remoteImages
         .map((u) => u)
         .join(", ")}) are left as-is — WeChat only serves images it hosts, so a published ` +
         `article would drop them. Reference local image files instead (auto reupload is a follow-up).`,

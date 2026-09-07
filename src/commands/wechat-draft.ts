@@ -363,7 +363,7 @@ export function receiptForWechatStageSuccess(
       : article.warnings,
     gotchas: cleanupFailed
       ? ["The native draft already exists. Do not restage because cleanup failure does not undo draft/add."]
-      : ["Draft creation is verified by the API response; console preview is optional. This does not verify publication."],
+      : ["The returned native media_id verifies draft creation."],
     assets: assetsForWechatProgress(article, result.progress, null),
     platformTouched: true,
     terminalState: "native_draft_verified",
@@ -391,7 +391,7 @@ export function receiptForWechatStageSuccess(
           classification: "known",
           retryable: false,
           inputRelated: false,
-          suggestedCorrection: "Treat the native draft as created, inspect it in the draft box, and do not restage blindly.",
+          suggestedCorrection: "Retain the returned native media_id as proof of draft creation. Do not restage because client cleanup failure does not undo draft/add.",
         }
       : null,
     exit: cleanupFailed
@@ -428,7 +428,7 @@ export function receiptForWechatStageFailure(
         ? ["Remote cover/body assets were created or may exist even though no native draft was confirmed."]
         : []),
       ...(draftPossible
-        ? ["A native draft may exist. Inspect the WeChat draft box before any retry; never restage blindly."]
+        ? ["A native draft may exist. Retain this receipt and do not automatically retry."]
         : []),
     ],
     assets: assetsForWechatProgress(article, failure.progress, failure.failureKind),
@@ -450,7 +450,7 @@ export function receiptForWechatStageFailure(
       suggestedCorrection: failure.platformCode === "40164"
         ? "Add the fixed egress IP to the account allowlist, run publish wechat check, then make a separate attempt. Previously uploaded asset residue remains reported."
         : draftPossible
-          ? "Inspect the WeChat draft box before deciding whether a separate attempt is safe."
+          ? "Report the outcome as unknown and retain this receipt. A new staging attempt could create a duplicate draft."
           : "Resolve the reported API or transport failure before a separate attempt; account for any reported asset residue.",
     },
     exit: { class: "runtime_or_platform_failure", code: 1 },
@@ -510,7 +510,7 @@ function receiptForWechatRuntimeFailure(input: {
     warnings: input.article?.warnings ?? [],
     gotchas: [
       ...(nativeDraftPossible
-        ? ["A native draft may exist. Inspect the draft box and do not restage blindly."]
+        ? ["A native draft may exist. Retain this receipt and do not automatically retry."]
         : []),
       ...(input.cleanupFailed ? ["Client cleanup also failed."] : []),
       ...(input.artifactResidue ? ["The local inspection artifact may be absent, partial, or replaced."] : []),
@@ -538,7 +538,7 @@ function receiptForWechatRuntimeFailure(input: {
       retryable: nativeDraftPossible ? false : null,
       inputRelated: false,
       suggestedCorrection: nativeDraftPossible
-        ? "Inspect the WeChat draft box before deciding whether a separate attempt is safe."
+        ? "Report the outcome as unknown and retain this receipt. A new staging attempt could create a duplicate draft."
         : input.artifactResidue
           ? "Choose a writable --out destination before a separate attempt. No API access occurred."
           : "Repair the local WeChat runtime or egress setup before a separate attempt.",
@@ -561,7 +561,7 @@ export function registerWechatDraftCommand(
     .option("--digest <summary>", "Digest 摘要 (documented ≤120 字; omit to let WeChat derive the first 54 字)")
     .option("--cover <image>", "Cover image path — required (or from file/stdin frontmatter coverImage/cover/image)")
     .option("--source-url <url>", "Absolute explicit http(s) 阅读原文 URL (or file/stdin sourceUrl metadata)")
-    .option("--keep-links", "Keep safe inline external links (default: rewrite external http(s) links to citations)")
+    .option("--keep-links", "Keep safe inline links (default: text in references, citations for other external links)")
     .option("--out <file.html>", "Write the rendered inline-styled HTML to a file for inspection")
     .option("--dry-run", "Render + validate only; NO network, NO token, NO upload, NO draft/add")
     .option("--json", "Emit one versioned machine-readable transport receipt")
