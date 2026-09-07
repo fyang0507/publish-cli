@@ -24,7 +24,8 @@ const S = {
   h2: "font-size:20px;font-weight:700;line-height:1.4;margin:26px 0 14px;color:#1a1a1a;",
   h3: "font-size:18px;font-weight:600;line-height:1.4;margin:22px 0 12px;color:#1a1a1a;",
   h4: "font-size:16px;font-weight:600;line-height:1.4;margin:20px 0 10px;color:#1a1a1a;",
-  p: "font-size:16px;line-height:1.75;margin:0 0 16px;color:#333333;",
+  // Keep the existing 16px paragraph gap and add one 28px body line of air.
+  p: "font-size:16px;line-height:1.75;margin:0 0 44px;color:#333333;",
   blockquote:
     "margin:0 0 16px;padding:8px 16px;border-left:4px solid #d0d0d0;background:#f7f7f7;color:#666666;",
   ul: "margin:0 0 16px;padding-left:24px;font-size:16px;line-height:1.75;color:#333333;",
@@ -207,7 +208,7 @@ function renderCitations(citations: Citation[]): string {
   );
 }
 
-/** Render around a bounded authored section without changing caller tokens. */
+/** Move the bounded bibliography to the footer without changing caller tokens. */
 export function renderWechatBody(
   tokens: Token[],
   options: { keepLinks: boolean; baseDir: string },
@@ -227,12 +228,16 @@ export function renderWechatBody(
   let html: string;
   if (references) {
     html = parse(tokens.slice(0, references.start));
+    // Parse in canonical order so image collection, uploads, and receipts keep
+    // their original first-seen order even though the bibliography moves.
     ctx.inBibliography = true;
     const heading = marked.Parser.parseInline(references.heading.tokens, { renderer });
-    html += `<section style="${S.citeSection}margin-bottom:16px;"><p style="${S.citeHeading}">${heading}</p>`;
-    html += parse(tokens.slice(references.start + 1, references.end)) + "</section>";
+    const bibliographyHtml = `<section style="${S.citeSection}margin-bottom:16px;"><p style="${S.citeHeading}">${heading}</p>` +
+      parse(tokens.slice(references.start + 1, references.end)) + "</section>";
     ctx.inBibliography = false;
-    html += parse(tokens.slice(references.end));
+    // Preserve every ordinary body block in its authored order, including
+    // afterwords and creation/completion dates, before the reference footer.
+    html += parse(tokens.slice(references.end)) + bibliographyHtml;
   } else {
     html = parse(tokens);
   }

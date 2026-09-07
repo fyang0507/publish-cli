@@ -96,7 +96,10 @@ public-repo posture):
    local body images (→ WeChat CDN URLs), assemble the `draft/add` payload, and
    stage the draft. Prints the returned draft `media_id` and the 草稿箱 URL.
 3. **Human reviews and publishes** in `mp.weixin.qq.com` — outside this tool (the
-   send-gate is future scope, PRODUCT_SPEC §5).
+   send-gate is future scope, PRODUCT_SPEC §5). For an original opinion draft,
+   if the agent could not complete the console declarations, its handoff must
+   remind the human to enable 原创声明, select 创作来源 → 个人观点，仅供参考, and
+   save and verify both **before publication** (§5).
 
 ## 2. CLI surface
 
@@ -308,6 +311,9 @@ separate safety, bibliography-recognition, and inline-styled rendering modules:
   survives WeChat's sanitizer. A single **default look** (one readable typographic
   scale); themes/color presets are deferred (§8). Deterministic — same markdown in,
   same HTML out, **no LLM** (consistent with every other content generator).
+  Body paragraphs have a 44px bottom margin: the previous 16px gap plus one
+  additional 28px line (16px text × 1.75 line height). Compact bibliography
+  paragraphs and list items retain 2px margins.
 - **Bibliographies:** `src/wechat/references.ts` recognizes one bounded authored
   reference section from the top-level token stream. Rendering preserves its
   numbers and grouped sources with dedicated compact styles; hyperlinks within
@@ -398,8 +404,13 @@ the operator can combine them under one heading in a staging copy.
 
 The authored section reuses the generated footer's top divider and 14px heading,
 with 13px reference paragraphs/lists, 1.7 line height, and 2px paragraph/item
-margins. Ordered-list item values preserve authored number gaps. Following
-non-reference blocks use the normal body styles and link handling. Explicit
+margins. Ordered-list item values preserve authored number gaps. Rendering moves
+the bounded authored bibliography after all non-reference body blocks, including
+separate 起笔于/完成于 paragraphs originally following it. Those body blocks retain
+their relative order, normal styles, and link handling; canonical Markdown and
+tokens are not rewritten. Words such as 起笔 or 完成 within a reference entry remain
+part of that entry. Generated body-link citations follow the authored section,
+so the reference material forms the article's final footer. Explicit
 visible URL labels, including GFM bare `www.example.com` autolinks, remain readable
 text when anchors are removed; rendering never adds a hidden destination to the
 label. Token-level rendering preserves nested emphasis and avoids reparsing
@@ -408,7 +419,8 @@ visible URLs as links.
 Automated renderer regression tests assert the emitted HTML for the authored
 reference section, inline style values, original numbering/grouping, mixed and
 repeated links, explicit URL labels, section termination, body-link citations,
-and safe/unsafe destinations with and without `--keep-links`. These are markup
+paragraph spacing, trailing metadata ordering, and safe/unsafe destinations with
+and without `--keep-links`. These are markup
 assertions, not visual verification or an additional operator preview step.
 They do not require opening local HTML, accessing a gated URL, console login, or
 recreation of a native draft. An API receipt separately verifies draft creation.
@@ -470,6 +482,24 @@ On a real run it:
 5. On success WeChat returns the draft's **`media_id`**; the command prints it plus
    the 草稿箱 URL and a plain **"staged a native draft — NEVER published"** line
    (same success grammar as the browser channels).
+
+**Console declarations.** The [official public draft/add schema](https://developers.weixin.qq.com/doc/subscription/api/draftbox/draftmanage/api_draft_add.html)
+does not expose 原创声明 or 创作来源 fields (checked 2026-09-07). Neither `author`
+nor `content_source_url` configures them. Successful CLI receipts state that both
+settings are unset/unverified by this command. No guessed payload fields or
+private console endpoints are added.
+
+For an operator-authored opinion draft, the calling workflow enables 原创声明 and
+selects 创作来源 → 个人观点，仅供参考 in the existing console draft, saves it, and
+verifies both selections persisted. `publish wechat info` owns this operator or
+authorized-agent handoff, including draft matching and unavailable-control or
+human-login recovery. If the agent cannot complete and verify the settings, it
+must identify what remains pending and explicitly remind the receiving human
+to enable 原创声明 and select 创作来源 → 个人观点，仅供参考 in the existing draft,
+then save and verify both **before publication**. The API receipt verifies only
+the native draft; it does not verify those console settings. This separate metadata task does not require
+restaging, gate API draft completion, introduce a CLI browser transport, or
+authorize publication. The handoff itself has not been live-verified.
 
 **The boundary, enforced structurally.** The only endpoints this channel ever
 touches are: `stable_token`, `media/uploadimg`, `material/add_material`,

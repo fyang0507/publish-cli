@@ -125,6 +125,16 @@ publish reddit draft --subreddit agents --title "Title" --from post.md
 publish wechat draft --from article.md --cover cover.png
 ```
 
+WeChat drafts add one extra body line of paragraph spacing and place the authored
+Reference section after the body, including any separate 起笔于/完成于 paragraphs.
+Canonical Markdown stays unchanged. For an original opinion draft, complete
+原创声明 and 创作来源 → 个人观点，仅供参考 in the saved console draft; the API command
+does not set these options. `publish wechat info` provides the handoff procedure,
+and successful draft receipts flag these settings as unverified.
+If the agent cannot finish these settings, it must remind the receiving human
+to enable 原创声明, select 创作来源 → 个人观点，仅供参考, and save and verify both
+in the existing draft **before publication**.
+
 X Articles require an explicit JPEG, PNG, or WebP cover at an exact 5:2 ratio. The CLI uploads its validated bytes unchanged. X may resize the hosted cover; verification requires one cover with the same hosted identity, actual dimensions, rendered size and position relative to the title before and after reopening the native draft. Source dimensions remain input evidence.
 
 X Article body images use ordinary Markdown image paragraphs in the canonical

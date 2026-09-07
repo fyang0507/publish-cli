@@ -55,7 +55,7 @@ function expectLocalError(markdown: string, code: string, keepLinks = false): vo
   }
 }
 
-test("WeChat preserves nine authored entries with twelve links and trailing metadata", () => {
+test("WeChat preserves nine authored entries and moves trailing metadata before references", () => {
   const entries = Array.from({ length: 9 }, (_, i) => {
     const n = i + 1;
     const primary = `[Source ${n}](https://example.com/source-${n})`;
@@ -87,7 +87,8 @@ test("WeChat preserves nine authored entries with twelve links and trailing meta
   assert.doesNotMatch(section, /Created:/);
   assert.match(article.html, /<p\b[^>]*font-size:16px[^>]*>Created: 2026-09-07/);
   assert.ok(article.html.startsWith(render(body).html));
-  assert.ok(article.html.endsWith(render(metadata).html));
+  assert.ok(article.html.startsWith(render(`${body}\n\n${metadata}`).html));
+  assert.ok(article.html.endsWith(section));
   assert.equal(article.title, "Authored title");
   assert.equal(article.author, "Editorial team");
   assert.equal(article.digest, "Authored digest");
@@ -95,6 +96,86 @@ test("WeChat preserves nine authored entries with twelve links and trailing meta
   assert.deepEqual(article.bodyImages, []);
   assert.ok(article.linkFlags.length >= 12);
   assert.ok(article.warnings.every((warning) => !/moved to bottom citations/.test(warning)));
+});
+
+test("WeChat adds one body line between paragraphs while keeping references compact", () => {
+  const article = render([
+    "1.0",
+    "First paragraph.",
+    "Last paragraph in the first section.",
+    "2.0",
+    "Next section.",
+    "## Reference",
+    "【1】 First reference.",
+    "【2】 Second reference.",
+  ].join("\n\n"));
+  const section = compactSection(article.html);
+  const body = article.html.slice(0, article.html.indexOf(section));
+  const paragraphs = [...body.matchAll(/<p style="([^"]*)">([^<]*)<\/p>/g)];
+  assert.deepEqual(paragraphs.map((match) => match[2]), [
+    "1.0", "First paragraph.", "Last paragraph in the first section.", "2.0", "Next section.",
+  ]);
+  for (const paragraph of paragraphs) {
+    assert.match(paragraph[1], /font-size:16px;line-height:1\.75;margin:0 0 44px;/);
+  }
+  assert.equal((section.match(/font-size:13px;line-height:1\.7;margin:2px 0;/g) ?? []).length, 2);
+  assert.doesNotMatch(section, /margin:0 0 44px/);
+});
+
+test("WeChat puts creation dates and ordinary afterword blocks before the final references", () => {
+  const before = ["Opening paragraph.", "## Main section", "Body paragraph."];
+  const after = [
+    "起笔于2026-08-28",
+    "完成于2026-08-29",
+    "An ordinary afterword mentions 起笔 and 完成 without becoming metadata.",
+    "## Appendix",
+    "Closing paragraph.",
+  ];
+  const article = render([
+    ...before,
+    "## Reference",
+    "【1】 A source titled 起笔与完成 stays in its authored reference entry.",
+    "【2】 Another source.",
+    ...after,
+  ].join("\n\n"));
+  const section = compactSection(article.html);
+  assert.equal(article.html, render([...before, ...after].join("\n\n")).html + section);
+  assert.match(section, /【1】 A source titled 起笔与完成 stays in its authored reference entry\./);
+  assert.doesNotMatch(section, /2026-08-28|2026-08-29|ordinary afterword|Appendix|Closing paragraph/);
+});
+
+test("WeChat keeps canonical image upload order when the bibliography moves after the afterword", () => {
+  const dir = mkdtempSync(join(tmpdir(), "publish-wechat-reference-images-"));
+  const sources = ["opening.png", "reference.png", "afterword.png"];
+  const header = Buffer.alloc(24);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header);
+  header.write("IHDR", 12, "ascii");
+  header.writeUInt32BE(900, 16);
+  header.writeUInt32BE(900, 20);
+  try {
+    for (const src of sources) writeFileSync(join(dir, src), header);
+    const markdown = [
+      "Opening ![opening image](opening.png).",
+      "## Reference",
+      "【1】 [Authored source](https://example.com/source) ![reference image](reference.png).",
+      "Afterword ![afterword image](afterword.png) and ![reused source](reference.png).",
+    ].join("\n\n");
+    for (const keepLinks of [false, true]) {
+      const article = render(markdown, { baseDir: dir, keepLinks });
+      const section = compactSection(article.html);
+      assert.deepEqual(article.bodyImages.map((image) => image.src), sources);
+      assert.deepEqual(article.bodyImages.map((image) => image.htmlSrc), sources);
+      assert.deepEqual(article.bodyImages.map((image) => image.path), sources.map((src) => join(dir, src)));
+      assert.equal((article.html.match(/src="reference\.png"/g) ?? []).length, 2,
+        "the reused image renders twice but is uploaded once");
+      assert.match(section, /src="reference\.png" alt="reference image"/);
+      assert.doesNotMatch(section, /opening\.png|afterword\.png|reused source/);
+      assert.ok(article.html.indexOf("Afterword") < article.html.indexOf(section));
+      assert.ok(article.html.endsWith(section));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("WeChat removes reference links while preserving citations outside the authored section", () => {
@@ -122,6 +203,8 @@ test("WeChat removes reference links while preserving citations outside the auth
   assert.match(footer, /body-only source — https:\/\/example\.com\/body/);
   assert.match(footer, /last label — https:\/\/example\.com\/after/);
   assert.doesNotMatch(footer, /First label|Second label|Renamed source|repeated body label|example\.com\/other/);
+  assert.ok(article.html.indexOf("Afterword last label") < article.html.indexOf(section));
+  assert.ok(article.html.endsWith(section + footer), "all references follow the complete body");
   assert.ok(article.warnings.some((warning) => /3 external link\(s\) were moved to bottom citations/.test(warning)));
 });
 
@@ -255,7 +338,8 @@ test("WeChat closes compact references at the first other block", () => {
     const section = compactSection(article.html);
     assert.match(section, /【1】 First source/);
     assert.doesNotMatch(section, /Following|Created:|ordinary cell|【2】/);
-    assert.ok(article.html.endsWith(render(`${boundary}\n\n【2】 Following ordinary numbered paragraph.`).html));
+    assert.equal(article.html,
+      render(`${boundary}\n\n【2】 Following ordinary numbered paragraph.`).html + section);
   }
 });
 
@@ -355,6 +439,8 @@ test("WeChat keep-links retains safe anchors while compacting the same authored 
   assert.match(section, /<strong[^>]*>Named source<\/strong>/);
   assert.doesNotMatch(section, /Created:/);
   assert.match(article.html, /font-size:16px[^>]*>Created: 2026-09-07/);
+  assert.ok(article.html.indexOf("Created: 2026-09-07") < article.html.indexOf(section));
+  assert.ok(article.html.endsWith(section));
 });
 
 test("WeChat validates authored reference HTML and link destinations before reading assets", () => {

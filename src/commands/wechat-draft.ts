@@ -361,9 +361,15 @@ export function receiptForWechatStageSuccess(
     warnings: cleanupFailed
       ? [...article.warnings, "Client cleanup failed after the native media_id was returned."]
       : article.warnings,
-    gotchas: cleanupFailed
-      ? ["The native draft already exists. Do not restage because cleanup failure does not undo draft/add."]
-      : ["The returned native media_id verifies draft creation."],
+    gotchas: [
+      cleanupFailed
+        ? "The native draft already exists. Do not restage because cleanup failure does not undo draft/add."
+        : "The returned native media_id verifies draft creation.",
+      "Original declaration (原创声明) and creation source (创作来源) are not set or verified by this API command. " +
+        "For an operator-authored opinion draft, if the agent cannot complete these settings, remind the receiving human: " +
+        "发表前，请在现有草稿中开启原创声明，并将创作来源设为「个人观点，仅供参考」；保存后确认两项设置均已生效，再发表。 " +
+        "See publish wechat info for the console handoff.",
+    ],
     assets: assetsForWechatProgress(article, result.progress, null),
     platformTouched: true,
     terminalState: "native_draft_verified",
