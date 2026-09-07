@@ -13,6 +13,12 @@ Use `publish` as the mechanical distribution layer. Editorial strategy, approval
 - Run only the channels and actions the user selected. Do not invent an unsupported transport, format, fallback, or successful verification.
 - Authorization to use this skill does not authorize unrelated platform mutations.
 
+## References across platforms
+
+When the destination editor does not support hyperlinks in references, remove the hyperlink markup and destination URLs from the platform staging copy while retaining the readable reference text: author or publisher, title, date, and existing citation numbers or grouping. Plain-text references are acceptable; do not force raw URLs or generate another bibliography to compensate for unsupported links. Preserve the canonical source links locally. Follow an explicit request to display URLs instead.
+
+Keep references in one distinct, labeled section using the platform's supported formatting. Link removal must not merge references into body prose or remove their visual separation. Preserve an existing dedicated reference style where supported; verify the local rendering for both content fidelity and section presentation before staging.
+
 ## Route the request
 
 1. Identify the selected channel and requested action. For a multi-channel request, keep one route per selected channel and do not inspect the others.
