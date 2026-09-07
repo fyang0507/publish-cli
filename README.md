@@ -4,8 +4,7 @@
 draft staging for X, LinkedIn, Reddit, and WeChat, plus execution guidance for
 Xiaohongshu, 1point3acres, and personal websites.
 
-Every content workflow ends at a native draft for human review. The CLI never
-posts, publishes, sends, schedules, or makes a draft public.
+CLI content commands end at a native draft for human review. The CLI never posts, publishes, sends, schedules, or makes a draft public. Agent-owned workflows follow the user-authorized outcome; a draft checkpoint does not end an explicitly authorized continuation.
 
 ## Start with channel info
 
