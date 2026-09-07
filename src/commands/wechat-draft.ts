@@ -363,7 +363,7 @@ export function receiptForWechatStageSuccess(
       : article.warnings,
     gotchas: cleanupFailed
       ? ["The native draft already exists. Do not restage because cleanup failure does not undo draft/add."]
-      : ["Review the native draft in the WeChat draft box before publication."],
+      : ["Draft creation is verified by the API response; console preview is optional. This does not verify publication."],
     assets: assetsForWechatProgress(article, result.progress, null),
     platformTouched: true,
     terminalState: "native_draft_verified",

@@ -108,7 +108,4 @@ node dist/cli.js --help
 npm pack --dry-run
 ```
 
-Compilation and unit tests are necessary but insufficient for platform flows.
-Live-verify browser reads/drafts against the real site, and verify WeChat through
-the real API plus the draft-box preview, before claiming an execution path works.
-Never turn an inconclusive probe or unverified save into success.
+Compilation and unit tests are necessary but insufficient for platform flows. Live-verify browser reads/drafts against the real site. For WeChat, successful local validation and required uploads followed by a successful real `draft/add` response with a nonempty native `media_id` verify draft creation. No console login or visual verification through `mp.weixin.qq.com` is required; preview is optional and does not gate draft completion. This evidence does not establish visual rendering or publication. Never turn an inconclusive probe or unverified save into success.

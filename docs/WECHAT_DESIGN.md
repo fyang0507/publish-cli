@@ -513,17 +513,13 @@ custom SOCKS5 dispatcher). The transport dependencies are inert when
 
 ## 9. Open verification risks (verify live before claiming it works)
 
-Compile-green + code review misses real bugs in these flows (AGENTS.md "Verify
-live"). For WeChat the live surface is the API + the 草稿箱 preview, not a browser:
+Compile-green + code review misses real bugs in these flows. For WeChat, successful local validation and required uploads followed by a successful real `draft/add` response with a nonempty native `media_id` are sufficient evidence of draft creation. Console login and visual verification through `mp.weixin.qq.com` are not required. Optional preview can investigate rendering, but unavailable console access does not make an API-verified draft incomplete. Neither the receipt nor a preview establishes publication.
 
 - **Field measurement and content limits remain unresolved.** The official title,
   author, and digest limits are 32/16/120 `字`, but exact Unicode measurement is
   unknown. Preserve sanitized live `errcode`s instead of guessing a local counter.
   The official HTML row also conflicts between 2 KB, 20,000 characters, and 1 MB.
-- **Inline-style rendering.** WeChat's editor sanitizes *some* inline CSS. Stage a
-  real draft and eyeball it in the 草稿箱 preview — headings, code blocks, lists,
-  images, and citations must render as intended. This is the highest-risk item and
-  cannot be caught by compile.
+- **Inline-style rendering.** WeChat's editor sanitizes some inline CSS. When requested or investigating a specific rendering issue, optionally inspect headings, code blocks, lists, images, citations, and cover crops in the 草稿箱 preview. This is a separate rendering check, not a requirement for API draft verification.
 - **`stable_token` behavior** and the refresh-overlap window — confirm caching
   doesn't thrash and a stale cached token refreshes cleanly.
 - **IP allowlist / `40164`.** Confirm the `errmsg` IP-parsing matches the live
