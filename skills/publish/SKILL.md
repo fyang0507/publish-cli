@@ -1,36 +1,41 @@
 ---
 name: publish
-description: Use the publish CLI to inspect channel capabilities and readiness, perform supported discovery, and stage content for X, LinkedIn, Reddit, WeChat, Xiaohongshu, 1point3acres, or a personal website. Route agent-owned workflows according to the requested outcome.
+description: Inspect channel readiness, discover content, and stage drafts with the publish CLI. Route requests for X posts or Articles, LinkedIn, WeChat public accounts, Xiaohongshu (xhs/RedNote), Reddit, 1point3acres, and personal websites to the supported CLI or agent-owned workflow.
 ---
 
 # Publish
 
-Use `publish` as the mechanical distribution layer. Editorial strategy, approval, and the final send remain with the calling workflow and the human.
+Use `publish` for discovery and draft staging. The calling workflow owns editorial strategy, approvals, and publication.
 
 ## Boundaries
 
-- CLI content commands end at verified native drafts; this skill does not add final-send transports. For an agent-owned workflow, a verified draft is a checkpoint when the user has authorized further preparation or publication. Continue the authorized work using live controls and the applicable execution permissions; do not treat the default draft boundary as overriding explicit user instructions. Without publication authorization, stop before final submission.
-- Run only the channels and actions the user selected. Do not invent an unsupported transport, format, fallback, or successful verification.
-- Authorization to use this skill does not authorize unrelated platform mutations.
-
-## References across platforms
-
-When the destination editor does not support hyperlinks in references, remove the hyperlink markup and destination URLs from the platform staging copy while retaining the readable reference text: author or publisher, title, date, and existing citation numbers or grouping. Plain-text references are acceptable; do not force raw URLs or generate another bibliography to compensate for unsupported links. Preserve the canonical source links locally. Follow an explicit request to display URLs instead.
-
-Keep references in one distinct, labeled section using the platform's supported formatting. Link removal must not merge references into body prose or remove their visual separation. Preserve an existing dedicated reference style where supported. Use the channel's documented completion evidence; this reference guidance adds no visual-verification or preview-access prerequisite.
+CLI content commands stop at verified native drafts and provide no final-send transport. In an agent-owned workflow, continue beyond that checkpoint when the user has authorized further preparation or publication, using live controls within execution permissions. Otherwise, stop before final submission.
 
 ## Route the request
 
-1. Identify the selected channel and requested action. For a multi-channel request, keep one route per selected channel and do not inspect the others.
-2. Resolve command spelling with `publish --help`, then run this for each selected channel:
+1. Identify the requested channels and outcome. Handle selected channels sequentially; skip unrequested channels.
+2. Resolve command spelling with `publish --help`, then read each selected channel's guide:
 
    ```bash
    publish <channel> info --json
    ```
 
-3. Treat the complete response as the execution guide. Follow its CLI boundary, authentication, platform guidance, readiness, recovery step, executor, context-continuity requirement, and stop conditions. Use current channel facts rather than remembered procedures. Explicit user instructions take precedence over workflow defaults, but do not create missing transport capabilities or successful verification.
-4. If the response selects a CLI action, inspect that action's `--help` and run only the requested action. If it selects an agent-owned workflow, agent-browser, or human-handoff path, follow the returned procedure in the required context.
-5. If the action is unsupported, readiness is unresolved, a required recovery step cannot be completed, or a requested terminal result cannot be verified, report that exact blocker after completing independent authorized preparation. Never turn an inconclusive result into success.
-6. Report what was inspected or changed, the last verified state (editor, saved draft, submitted, or published), and any remaining work.
+3. Follow the full response: capabilities, readiness, authentication and recovery, executor, browser-context requirements, and completion checks. User instructions override workflow defaults, but cannot supply missing capabilities or verification.
+4. For a CLI action, read its `--help` before running it. For an agent-owned or human-handoff workflow, follow the returned procedure in the required context.
+5. If the guide is unavailable, an action is unsupported, or recovery or verification is blocked, complete independent authorized preparation and report the exact blocker. An inconclusive result is not success.
+6. Report what changed, the last verified state (editor, saved draft, submitted, or published), and remaining work.
 
-If `publish` or the selected `info` response is unavailable, report that the current channel contract could not be resolved. Do not search for repository files or substitute another copy of channel guidance.
+## References across platforms
+
+When reference hyperlinks are unsupported, retain readable reference text in the staging copy and remove link markup and destination URLs, unless the user requests visible URLs. Do not generate a replacement bibliography. Preserve the linked canonical source locally.
+
+Keep references in a distinct, labeled section and preserve their existing style where supported. Use the channel's completion checks; reference formatting adds no preview or visual-verification requirement.
+
+## Workflow order
+
+For agent-owned browser work, open a fresh tab for each channel task in the required browser profile, then preserve that context through save and verification. For CLI-owned browsers, follow the channel's launch and recovery procedure.
+
+Use these ordering examples only for channels the user selected, following any requested order:
+
+- Long essay, usually supplied in Chinese: Xiaohongshu → WeChat → English translation using an available translation skill → personal website → optional X Article or Reddit.
+- Short post, usually supplied in English: X tweet → LinkedIn.

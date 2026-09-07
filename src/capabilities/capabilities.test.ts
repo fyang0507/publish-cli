@@ -134,311 +134,123 @@ Platform guidance.
   assert.throws(() => parseChannelInfoMarkdown(valid, "fixture", "reddit"), /expected channel/);
 });
 
-test("free-text guidance preserves each channel's execution handoff and essential gotchas", () => {
-  const x = `${CHANNEL_INFO_SOURCES.x.cliBoundary}\n${CHANNEL_INFO_SOURCES.x.authentication}\n${CHANNEL_INFO_SOURCES.x.platformGuidance}`;
-  assert.match(x, /watch List/);
-  assert.match(x, /tweet, thread, Article, or reply drafts/);
-  assert.match(x, /Before any non-dry-run `create-watch-list`, inspect the proposed member delta with `--dry-run`/);
-  assert.match(
-    x,
-    /large first build.*account-wide member-add lock.*native UI across every List/s,
-  );
-  assert.match(
-    x,
-    /live observation on 2026-07-01.*72-member build.*about 350 ms per add.*recovery around 24 hours/s,
-  );
-  assert.match(x, /recovery time and all current server limits remain X-authoritative, not a retry timer/);
-  assert.match(x, /command stops; do not retry member adds until X allows them again/);
-  assert.match(x, /adds only the missing delta, throttled at about three seconds per add.*safer.*not a guarantee/s);
-  assert.match(x, /Account watching uses an X List timeline, not one profile load per account/);
-  assert.match(x, /caller owns editorial selection strategy/);
-  assert.match(
-    x,
-    /rubric must be self-contained because the classifier receives only that rubric and each candidate post.*does not receive a source essay, campaign brief, workspace files, or ambient agent context/s,
-  );
-  assert.match(x, /`history` reads only live posts and replies.*staged tweet\/thread\/reply drafts and Article drafts are never history results/s);
-  assert.match(x, /successful empty result requires a usable profile-timeline capture and extraction.*fails nonzero and loud rather than reporting an empty history/s);
-  assert.match(x, /5:2/);
-  assert.match(x, /280/);
-  assert.match(x, /publish x draft --format article --from/);
-  assert.match(x, /top-level backtick or tilde fenced block with zero through three leading spaces may close explicitly or at end of input/);
-  assert.match(x, /EOF-closed block preserves its LF-normalized code payload, including trailing spaces and blank or whitespace-only lines/);
-  assert.match(x, /recognized top-level Article fenced block has one advisory, is excluded from the native rich-HTML paste, and is counted in both verified and unverified Article handoff receipts/);
-  assert.match(x, /80-code-point info projection, a 120-code-point deindented first-line preview, explicit truncation booleans, and SHA-256 of the exact LF-normalized fence slice/);
-  assert.match(x, /EOF-closed slice includes a caller-owned terminal LF/);
-  assert.match(x, /unpaired surrogate in fenced source rejects locally.*valid paired astral scalars remain supported/s);
-  assert.match(x, /terminal inspection replaces each entire excluded fence with its block number and complete digest/);
-  assert.match(x, /URL evidence limited to 512 code points and link-label evidence to 240 code points/);
-  assert.match(x, /complete remaining Markdown is canonical.*retains the consumed title line plus every body byte/s);
-  assert.match(x, /documented `Plain title` followed immediately by a body line is supported/);
-  assert.match(x, /native title content is limited to plain or escaped text with representable edge characters/);
-  assert.match(x, /title formatting, links, code, entity-like spellings, and caller-owned edge whitespace\/format characters reject locally/);
-  assert.match(x, /A consumed H1 never causes a following body H1\/H2 to disappear/);
-  assert.match(x, /lossless Article Markdown subset is closed/);
-  assert.match(x, /native editor exposes exactly two heading levels, Heading and Subheading.*ATX H1\/H2 body headings; inline-code styling is unsupported/s);
-  assert.match(x, /Body blocks may be paragraphs, parser-confirmed standalone local image paragraphs, ATX H1\/H2 headings, flat single-paragraph quotes, one tight flat bullet or start-at-1 ordered list group at a time, and top-level backtick\/tilde fences/);
-  assert.match(x, /Inline content may be plain or escaped text, emphasis, strong emphasis, soft breaks, and title-free exact safe absolute HTTP\(S\) links/);
-  assert.match(x, /Active links use ordinary `\[label\]\(destination\)` syntax whose raw destination bytes equal the staged href/);
-  assert.match(x, /angle-bracket, padded, multiline, titled, or backslash-normalized destinations reject locally/);
-  assert.match(x, /checkbox-looking bullet text.*remains literal CommonMark list text rather than a task-list semantic/);
-  assert.match(x, /nonempty spaces\/tabs-only physical line rejects when the parser swallows it into a root paragraph or supported quote child.*tabs that remain content inside a paragraph, heading, quote, or fenced payload are preserved/s);
-  assert.match(x, /Literal tabs anywhere in a list root\/item reject locally because the CommonMark list tokenizer can expand them/);
-  assert.match(x, /caller-owned Unicode trim\/control\/format edges on body ATX headings, parser-trimmed non-CommonMark-blank list edges or continuation lines, and other source-normalized link destinations also stop before artifacts or native staging/);
-  assert.match(x, /H3-H6, Setext headings, thematic breaks, unrelated or ambiguous reference definitions, raw HTML, indented code.*adjacent distinct same-kind list groups.*inline code, hard breaks, mixed or nested images, titled or remote\/URL-backed images, U\+0000, unescaped entity-like spellings.*exit 2 locally/s);
-  assert.match(x, /body image must be one parser-confirmed image token with empty alt text.*complete top-level paragraph/s);
-  assert.match(x, /Real staging for an Article with body images requires headed `--inspect`/);
-  assert.match(x, /X may deterministically rewrite uploaded bytes.*same-origin X `blob:` preview must fetch as a nonempty native representation.*first positive native digest is domain-bound.*source digest and size remain requested-input evidence/s);
-  assert.match(x, /same identity kind and digest.*same dimensions both before and after reopening/s);
-  assert.match(x, /Private preview URLs are never emitted/);
-  assert.match(x, /before inspection rendering, artifact writes, staging-runtime\/profile\/browser imports, or platform\/state access/);
-  assert.match(x, /Invalid backtick info is not classified as a fence and must still fit the closed ordinary-inline subset/);
-  assert.match(x, /short\/escaped fence-looking text can remain literal prose.*Mixed, shorter, or trailing-text pseudo-closers remain payload/s);
-  assert.match(x, /CommonMark removes up to that many literal spaces from every payload line.*fewer literal spaces followed by a tab exits 2 locally with exact line evidence/s);
-  assert.match(x, /structured payload is CommonMark-deindented.*canonical clean artifact retains the exact normalized caller Markdown/s);
-  assert.match(x, /separate `\.x-article\.inspection\.txt` receipt/);
-  assert.match(x, /before any authenticated X action.*create-watch-list.*watch.*draft.*reply.*history/);
-  assert.match(x, /Every Article requires one explicit `--cover <path>`/);
-  assert.match(x, /never scans neighboring files and never crops, resizes, compresses, or converts the cover/);
-  assert.match(
-    x,
-    /rejected native cover or body-image input set leaves `set` unknown.*never retried, routed through another input, or replaced by a different upload route/s,
-  );
-  assert.match(
-    x,
-    /leading H1.*later heading lines.*image-only lines.*`Key: value`-shaped lines among the first eight lines of the normalized Markdown body/s,
-  );
-  assert.match(
-    x,
-    /when file\/stdin frontmatter is removed.*applies the removed-line offset.*points to the original input line/s,
-  );
-  assert.doesNotMatch(x, /first eight source lines/);
-  assert.match(x, /exact source-line fidelity warning/);
-  assert.match(x, /closed empty or YAML mapping block is metadata only/);
-  assert.match(x, /tweet, thread, reply, reply-thread, or Article generation/);
-  assert.match(x, /every key is ignored/);
-  assert.match(x, /Article title is derived from the normalized Markdown body/);
-  assert.match(x, /scalar\/sequence blocks and thematic-break prose remain literal Markdown/);
-  assert.match(x, /leading transport BOM/);
-  assert.match(x, /actual\/expected evidence before artifacts, state, profiles, browser, or API imports or writes/);
-  assert.match(x, /Inline `--text` remains literal/);
-  assert.match(x, /replaces every parser-confirmed top-level fenced code block with an exact numbered placeholder/);
-  assert.match(
-    x,
-    /`\[code block #1 → screenshot\]`.*29 `twitter-text` weighted characters.*28 Unicode code points under `--long`/,
-  );
-  assert.match(x, /caller transport prose matching the reserved `\[code block #N → screenshot\]` syntax exits 2 locally/);
-  assert.match(x, /same literal inside transformed code or an omitted heading is not transported and does not collide/);
-  assert.match(x, /closed `code_block` fidelity warning with the original inclusive source-line range/);
-  assert.match(x, /SHA-256 digest of the complete LF-normalized removed segment/);
-  assert.match(x, /URLs inside removed code are not link advisories/);
-  assert.match(x, /valid unclosed top-level fence consumes through end of input/);
-  assert.match(x, /nested in quote\/list containers exit 2 locally/);
-  assert.match(x, /closer must use the same marker.*only trailing spaces or tabs/);
-  assert.match(x, /Mixed-marker pseudo-closers remain fenced payload/);
-  assert.match(x, /dedicated parser resolves stock-parser closer differences under this documented local grammar/);
-  assert.match(x, /Parser exceptions, source-token boundaries that cannot be mapped exactly.*nested in quote\/list containers exit 2 locally with bounded evidence/s);
-  assert.match(x, /optional voice pass is skipped whenever a code transform exists/);
-  assert.match(x, /Replace every placeholder with a reviewed screenshot\/image during the human draft review/);
-  assert.match(x, /reply --to` uses a closed local target allowlist/);
-  assert.match(x, /input is exact: whitespace, BOM\/control characters, and backslashes are rejected/);
-  assert.match(x, /raw ID is 5–25 ASCII digits matching `\[1-9\]\[0-9\]\{4,24\}`; leading zeroes are rejected/);
-  assert.match(x, /URL must use HTTPS with the exact apex host `x\.com` or `twitter\.com`/);
-  assert.match(x, /without credentials, an explicit port \(including `:443`\), a trailing-dot host, or any subdomain/);
-  assert.match(x, /Scheme and host are case-insensitive/);
-  assert.match(
-    x,
-    /exact case-sensitive paths are `\/<handle>\/status\/<id>`, `\/<handle>\/statuses\/<id>`, `\/i\/status\/<id>`, or `\/i\/web\/status\/<id>`/,
-  );
-  assert.match(x, /`<handle>` is 1–15 ASCII letters, digits, or underscores, and one trailing slash is allowed/);
-  assert.match(x, /Percent encoding in the status path, dot\/extra path segments, and URL-normalized path forms are rejected/);
-  assert.match(x, /query and fragment are allowed and ignored only after the path validates; the reply ID always comes from the path/);
-  assert.match(
-    x,
-    /reply --dry-run` validates the reply content and target ID\/URL syntax, then generates and renders a tweet or a reply thread that losslessly splits the normalized reply prose/,
-  );
-  assert.match(x, /Target existence, visibility, and reply eligibility are not verified by dry-run/);
-  assert.match(x, /X remains authoritative for those checks during a real run/);
-  assert.match(x, /Reply-ledger claim\/finalization is deliberately skipped/);
-  assert.match(x, /later real run first claims the normalized target and may refuse finalized history unless `--force`/);
-  assert.match(x, /`--force` never bypasses an in-flight or retained reservation/);
-  assert.match(x, /coordinate only on one machine-local X profile origin and the same live SQLite file/);
-  assert.match(x, /configured durable reply database.*binds to it atomically before browser loading/s);
-  assert.match(x, /copied database.*fails before browser work.*not cross-machine coordination/s);
-  assert.match(x, /UUID identifies the originating local profile, not a physical machine, and copied profiles are unsupported/);
-  assert.match(x, /unbound legacy database is bound prospectively.*legacy row remains origin-unknown/s);
-  assert.match(x, /`info`, action help, and `--dry-run` do not create or read this identity/);
-  assert.match(x, /Origin-unknown or origin-mismatched history is never force-bypassed/);
-  assert.match(x, /24-hour-old matching-origin claim is only eligible for explicit recovery/);
-  assert.match(x, /origin-unknown or origin-mismatched reservation cannot be recovered/);
-  assert.match(x, /Recovery receipts expose only the originating opaque UUID and `matched`, `unknown`, or `mismatch`/);
-  assert.match(x, /ensure the prior process stopped and check X Unsent\/Drafts in the exact CLI-owned profile used by that run/);
-  assert.match(x, /If a matching draft exists or the comparison is uncertain, leave the reservation in place/);
-  assert.match(x, /`--recover-stale-reservation-after-confirming-no-draft` clears the stale claim and exits without staging/);
-  assert.match(x, /one closed save phase: `save_not_attempted`, `save_delivery_unknown`, `save_delivered_unverified`, or `verified`/);
-  assert.match(x, /Tweet\/thread\/reply staging treats the close→Save click as the persistence action/);
-  assert.match(x, /Article staging treats Create as the first may-create\/autosave action/);
-  assert.match(x, /Article verification reopens only that post-settle canonical edit URL and matches the complete intended title and body.*prefixes, truncation, or extra tails are not positive evidence/s);
-  assert.match(
-    x,
-    /Before a real Article run loads the staging runtime, profile, or browser, it validates and freezes one closed request snapshot containing the title, canonical Markdown, block\/run\/mark\/link\/image, excluded-code, advisory, count, detached cover-byte facts, and ordered detached body-image byte facts/,
-  );
-  assert.match(
-    x,
-    /reparses canonical Markdown with the same Article parser and requires the complete code-block, code-advisory, code-link-advisory, and body-image occurrence sets to correspond/,
-  );
-  assert.match(x, /More than 10,000 Article code blocks, or more than 1,000,000 UTF-16 code units.*rejects locally/s);
-  assert.match(x, /Malformed, throwing\/accessor\/proxy, cyclic, sparse\/oversized, count-inconsistent, or unsafe-active-href structures fail locally with bounded `save_not_attempted` evidence and exit 2/);
-  assert.match(x, /format cannot be classified safely, that local failure remains a typed generic `save_not_attempted` boundary and names no Article or composer save mechanism/);
-  assert.match(x, /Active hrefs must use exact absolute HTTP\(S\) syntax without credentials, raw whitespace\/control\/format characters, ambiguous backslashes, or unsafe schemes/);
-  assert.match(x, /lone percent characters and percent-encoded path\/query text, are retained exactly and are not decoded during safety validation/);
-  assert.match(x, /URL-looking advisories from excluded code are detached and bounded but are never rendered as anchors/);
-  assert.match(x, /every active href must still have an exact matching advisory string/);
-  assert.match(x, /Staging-runtime failures and native Save\/autosave uncertainty remain exit 1 outcomes/);
-  assert.match(x, /read-only baseline in the same CLI-owned browser context/);
-  assert.match(x, /exactly one row whose dedicated content field equals the full intended tweet or first thread\/reply row/);
-  assert.match(x, /post-Save visible scoped-row multiset equal to the baseline plus exactly that full-text value/);
-  assert.match(x, /Background feed, navigation, modal labels, prefixes, substring matches/);
-  assert.match(x, /pre-existing identical visible rows, duplicate post-Save matches/);
-  assert.match(x, /no stable native row ID.*does not prove the rendered rows are the complete drafts list or that this run caused the added value/s);
-  assert.match(x, /Returned Article outcomes preserve bounded body-input mode, excluded-code facts, distinct cover `requested`, `resolved`, `set`, `uploaded`, `observed`, and canonical-reopen `verified` evidence, plus the tri-state Apply provenance/);
-  assert.match(x, /Apply interaction is one-shot when one exact control is observable: `not_attempted` records no click.*`delivery_unknown` records one exact click whose promise rejected.*`returned` records one fulfilled exact click/s);
-  assert.match(x, /Positive Article success requires a unique title\/body editor root; zero pre-set dialogs and no pre-existing calibrated cover; one direct returned set on its calibrated same-parent cover input/);
-  assert.match(x, /authoritative native persistence at the same exact canonical edit URL: a unique above-title hosted cover with positive bounded exact-5:2 natural dimensions before reopen, exact complete title\/body after reopen, and the same hosted cover identity, rendered box relative to the title, and natural dimensions afterward/);
-  assert.match(
-    x,
-    /For image-bearing Articles, success additionally requires every occurrence-ordered body-image receipt to show a returned exact set, exact in-body Media-atom observation, and the same domain-bound blob-byte or hosted-URL identity and dimensions after canonical reopen/,
-  );
-  assert.match(x, /Complete cover proof may close an Apply phase of `not_attempted` or `delivery_unknown` without claiming Apply returned/);
-  assert.match(x, /missing returned-set or any weak, missing, or mismatched content\/cover\/body-image evidence remains unverified/);
-  assert.match(x, /Every returned Article JSON receipt retains the exact Apply phase and its closed meaning in a bounded gotcha/);
-  assert.match(x, /immediate post-Create URL sample is provisional.*missing\/invalid late sample or two conflicting positive samples is never used for navigation or verification/s);
-  assert.match(
-    x,
-    /rejected native cover or body-image input set leaves `set` unknown.*never retried, routed through another input, or replaced by a different upload route/s,
-  );
-  assert.match(x, /receipt uses the frozen pre-loader copy after exact returned-handoff comparison/);
-  assert.match(x, /Reply target identity is a separate closed fact/);
-  assert.match(x, /Live calibration on 2026-09-03 found no exact numeric target-id signal/);
-  assert.match(x, /returned real reply Save finalizes `staged-unverified` history and exits 1 even when its content row verifies/);
-  assert.match(x, /requested compose URL, `Replying to` label, content\/background links, and caller intent are never target proof/);
-  assert.doesNotMatch(x, /reply target preserved|target preserved|Already staged a reply to/i);
-  assert.match(x, /Only positive content and exact-target facts together could finalize `staged` and exit 0/);
-  assert.match(x, /Save-progress errors and failure receipts are bounded and do not expose raw selectors, page text, credentials, private paths/);
-  assert.match(x, /typed `save_not_attempted` error releases only that run's owner- and origin-matched reservation/);
-  assert.match(x, /`save_delivery_unknown`, an untyped error, or a malformed whole result retains the reservation/);
-  assert.match(x, /target-unverified result, or a typed `save_delivered_unverified` error without row details, atomically finalizes durable `staged-unverified` history/);
-  assert.match(x, /Only after confidently finding no matching draft.*separate explicit `--force`/s);
-  assert.match(x, /finalization throws after Save-phase evidence, the finalized-history and reservation outcome is unknown/);
-  assert.match(x, /finalization returns but close fails, the finalized status is known/);
-  assert.match(x, /Never retry automatically.*compare X Unsent\/Drafts manually in the exact CLI-owned profile used by that run/s);
-  assert.match(x, /Selector calibration and `--inspect` do not repair a ledger failure/);
-  assert.match(x, /intended authenticated action with `--inspect`/);
-  assert.match(x, /do not stage a draft merely to authenticate read\/list work/);
-  assert.match(x, /never (posts|publishes)|must not (post|publish)/i);
-  assert.match(x, /credentials are missing or rejected/);
-  assert.doesNotMatch(x, /Run `publish x info`|readiness\.ready/);
+test("channel guides retain operator handoffs, verification limits, and recovery", () => {
+  const guidance = (channel: (typeof AUTH_PLATFORMS)[number]): string => {
+    const source = CHANNEL_INFO_SOURCES[channel];
+    return [source.cliBoundary, source.authentication, source.platformGuidance].join("\n");
+  };
 
-  const linkedin = `${CHANNEL_INFO_SOURCES.linkedin.cliBoundary}\n${CHANNEL_INFO_SOURCES.linkedin.authentication}\n${CHANNEL_INFO_SOURCES.linkedin.platformGuidance}`;
-  assert.match(linkedin, /personal-feed text post/);
-  assert.match(linkedin, /3,?000/);
-  assert.match(linkedin, /3:1/);
-  assert.match(linkedin, /4:5/);
-  assert.match(linkedin, /credentials are missing or rejected/);
-  assert.match(linkedin, /intended draft with `--inspect`/);
-  assert.match(linkedin, /recognized JPEG, PNG, GIF, or WebP magic\/header/);
-  assert.match(linkedin, /dimension-unreadable, and extension-mismatch inputs are rejected locally/);
-  assert.match(linkedin, /deterministic CommonMark\/GFM parser owns link conversion and evidence/);
-  assert.match(linkedin, /full\/collapsed\/shortcut reference links, bare URLs, autolinks/);
-  assert.match(linkedin, /character references decode once/);
-  assert.match(linkedin, /Parser-confirmed raw HTML exits 2 before profile\/browser access/);
-  assert.match(linkedin, /Image evidence uses parser-normalized alt text/);
-  assert.match(linkedin, /exit 2 identifies only the constructs actually omitted/);
-  assert.match(linkedin, /one LinkedIn-local closed save phase: `save_not_attempted`, `save_delivery_unknown`, `save_delivered_unverified`, or `verified`/);
-  assert.match(linkedin, /rejected Save click has unknown delivery/);
-  assert.match(linkedin, /complete text does not equal the complete intended text after only line-ending and NFC normalization/);
-  assert.match(linkedin, /Only positive full-text verification after reopening the composer exits 0/);
-  assert.match(linkedin, /Before any retry, reopen the composer in the exact same CLI-owned LinkedIn profile at `https:\/\/www\.linkedin\.com\/feed\/\?shareActive=true` or through feed `Start a post`/);
-  assert.match(linkedin, /Only after that comparison may `--inspect` help diagnose selector drift/);
-  assert.match(linkedin, /Raw browser errors, selectors, page text, credentials, cookies, private paths/);
-  assert.doesNotMatch(linkedin, /Run `publish linkedin info`|readiness\.ready/);
+  // Check operational disclosures, not whole paragraphs or implementation details.
+  // Parser, staging, receipt, and action-help contracts are tested separately.
+  const essentials: Record<(typeof AUTH_PLATFORMS)[number], RegExp[]> = {
+    x: [
+      /never publishes or schedules/,
+      /intended authenticated action with `--inspect`/,
+      /do not stage a draft merely to authenticate/,
+      /member delta with `--dry-run`/,
+      /account-wide member-add lock/,
+      /triage rubric must be self-contained/,
+      /history.*never includes staged drafts/s,
+      /280-character limit/,
+      /--format article.*--cover/,
+      /exact 5:2 ratio/,
+      /fences are excluded from the native/,
+      /save_not_attempted/,
+      /save_delivery_unknown/,
+      /save_delivered_unverified/,
+      /first thread row/,
+      /whitespace\/case normalization/,
+      /cannot prove the exact numeric target ID/,
+      /`staged-unverified` and exits 1/,
+      /Never retry automatically/,
+      /exact CLI-owned profile/,
+      /same live SQLite file.*same machine-local X profile origin/,
+      /never bypasses.*reservation.*origin is unknown or mismatched/s,
+      /24 hours old.*explicit recovery/,
+      /--recover-stale-reservation-after-confirming-no-draft/,
+      /clears the claim and exits without staging/,
+    ],
+    linkedin: [
+      /personal-feed text post/,
+      /intended draft with `--inspect`/,
+      /3,000 UTF-16 code units/,
+      /3:1 through 4:5/,
+      /complete text match after reopening/,
+      /Text verification does not reliably prove image persistence/,
+      /exact same CLI-owned LinkedIn profile/,
+      /matching draft exists or the comparison is uncertain, do not retry/,
+      /published:false/,
+    ],
+    reddit: [
+      /search for communities.*inspect a community/s,
+      /intended draft with `--inspect`/,
+      /CAPTCHA/,
+      /300 title code points and 40,000 body code points/,
+      /dry-run.*skips the live subreddit preflight/,
+      /4-space-indented code/,
+      /Inline body images are not uploaded or verified/,
+      /absent before and visible after/,
+      /fresh toast does not prove that the draft can be reopened/,
+      /same CLI-owned profile/,
+      /Never retry automatically or blindly/,
+      /no draft idempotency ledger/,
+    ],
+    wechat: [
+      /never calls publication or mass-messaging APIs/,
+      /WECHAT_SSH_TUNNEL/,
+      /WECHAT_PROXY_URL/,
+      /40164/,
+      /32 字.*16 字.*120 字/,
+      /2\.35:1 and 1:1/,
+      /nonempty.*media_id/,
+      /visual inspection are optional/,
+      /API success does not prove visual rendering or publication/,
+      /renewal is reported in the receipt/,
+      /do not rewrite or retry automatically/,
+      /原创声明/,
+      /创作来源/,
+      /reuse it instead of creating another draft/,
+    ],
+    xhs: [
+      /no Xiaohongshu read or write transport/,
+      /user explicitly requests publication/,
+      /same browser profile through save and verification/,
+      /Drafts are browser-local/,
+      /image-text save\/reopen and automated publication were not verified/,
+      /一键排版.*下一步/,
+      /native topic entity/,
+      /草稿箱/,
+      /reconcile the result before any retry/,
+    ],
+    "1point3acres": [
+      /CLI offers no functionality to access or write/,
+      /human must always perform login/,
+      /same context when automation is available; otherwise the human follows/,
+      /fid=98/,
+      /fid=29/,
+      /fid=28/,
+      /保存草稿.*草稿箱.*compare the full title and body/,
+      /publication is explicitly authorized.*verified live/,
+    ],
+    website: [
+      /CLI provides discovery only/,
+      /subagent.*repository\/worktree/,
+      /add-website-content/,
+      /agent_check_required/,
+      /merge and deployment remain outside publish/,
+      /archive-audit and real-browser preview evidence/,
+    ],
+  };
 
-  const reddit = `${CHANNEL_INFO_SOURCES.reddit.cliBoundary}\n${CHANNEL_INFO_SOURCES.reddit.authentication}\n${CHANNEL_INFO_SOURCES.reddit.platformGuidance}`;
-  assert.match(reddit, /search for communities/);
-  assert.match(reddit, /inspect a community/);
-  assert.match(reddit, /Save Draft/);
-  assert.match(reddit, /CAPTCHA/);
-  assert.match(reddit, /publish reddit draft --subreddit <name> --title <title>/);
-  assert.match(reddit, /intended draft with `--inspect`/);
-  assert.match(reddit, /only accepted keys are string-valued `subreddit`, `title`, and `flair`/);
-  assert.match(reddit, /empty `--subreddit` or `--title` values reject.*empty `--flair` intentionally clears/s);
-  assert.match(reddit, /`nsfw` and `spoiler` are flag-only/);
-  assert.match(reddit, /only the first substantive block.*later key-shaped prose cannot retroactively/s);
-  assert.match(reddit, /scalar\/sequence blocks remain literal thematic-break Markdown/);
-  assert.match(reddit, /only a leading transport BOM removed.*following bytes\/line endings retained/s);
-  assert.match(reddit, /4-space-indented code instead of fenced code/);
-  assert.match(reddit, /Tables render through both parsers.*leading and trailing pipes/s);
-  assert.match(reddit, /does not upload or verify inline body images/);
-  assert.match(reddit, /returns `unconfirmed`.*Both paths exit 1/s);
-  assert.match(reddit, /absent before and visible after/);
-  assert.match(reddit, /inconclusive pre-click visibility probe also fails closed/);
-  assert.match(reddit, /no native draft was confirmed/);
-  assert.match(reddit, /same CLI-owned profile/);
-  assert.match(reddit, /Never retry automatically or blindly.*no draft idempotency ledger/s);
-  assert.doesNotMatch(reddit, /Run `publish reddit info`|readiness\.ready/);
-
-  const wechat = `${CHANNEL_INFO_SOURCES.wechat.cliBoundary}\n${CHANNEL_INFO_SOURCES.wechat.authentication}\n${CHANNEL_INFO_SOURCES.wechat.platformGuidance}`;
-  assert.match(wechat, /draft\/add/);
-  assert.match(wechat, /freepublish\/\*/);
-  assert.match(wechat, /32.*16.*120.*字/s);
-  assert.match(wechat, /2\.35:1/);
-  assert.match(wechat, /1:1/);
-  assert.match(wechat, /WECHAT_SSH_TUNNEL/);
-  assert.match(wechat, /WECHAT_PROXY_URL/);
-  assert.match(wechat, /socks5:\/\//);
-  assert.match(wechat, /40164/);
-  assert.match(wechat, /Header-invalid, dimension-unreadable, and extension-mismatch inputs/);
-  assert.match(wechat, /covers then allow BMP\/GIF\/JPEG\/PNG.*body images allow only JPEG\/PNG/s);
-  assert.match(wechat, /file\/stdin input.*empty or YAML mapping frontmatter block.*removed before rendering/s);
-  assert.match(wechat, /description.*summary.*digest.*coverImage.*cover.*image.*sourceUrl.*contentSourceUrl.*source_url/s);
-  assert.match(wechat, /BOM and LF, CRLF, or lone-CR delimiters are recognized/);
-  assert.match(wechat, /Mapping-intent malformed or unterminated frontmatter exits 2 before `--out`, token exchange, uploads, or API access/);
-  assert.match(wechat, /Valid scalar\/sequence blocks and thematic-break prose remain literal Markdown/);
-  assert.match(wechat, /Inline `--text` is always literal/);
-  assert.match(
-    wechat,
-    /explicit `--author`.*nonblank string `author`.*validated file\/stdin frontmatter.*`WECHAT_AUTHOR`.*empty/s,
-  );
-  assert.match(wechat, /blank or whitespace-only `--author` intentionally clears/);
-  assert.match(wechat, /blank, whitespace-only, and non-string frontmatter authors are ignored/);
-  assert.match(wechat, /Caller raw HTML is unsupported.*nested list, quote, table.*exits 2/s);
-  assert.match(wechat, /escaped angle brackets\/entities or inside a code span\/block/);
-  assert.match(wechat, /before cover\/body-image reads.*`--out`.*token\/client imports.*API access/s);
-  assert.match(wechat, /links allow explicit `http:\/\/`, `https:\/\/`, `mailto:`, relative URLs, and fragments/);
-  assert.match(wechat, /images allow explicit HTTP\(S\) URLs or local filesystem paths/);
-  assert.match(wechat, /`sourceUrl`\/`--source-url` requires an absolute explicit HTTP\(S\) URL/);
-  assert.match(wechat, /`javascript:`.*`data:`.*`vbscript:`.*`file:`.*scheme-relative/s);
-  assert.match(wechat, /IPv6\/ports.*HTTP\(S\) userinfo.*malformed absolute\/backslash/s);
-  assert.match(wechat, /drive-absolute Windows image paths.*UNC\/network image paths/s);
-  assert.match(wechat, /Every generated dynamic HTML attribute is escaped.*exact parser\/path identity/s);
-
-  const xhs = CHANNEL_INFO_SOURCES.xhs;
-  assert.match(xhs.cliBoundary, /Publish-cli has no Xiaohongshu read or write transport/);
-  assert.match(xhs.authentication, /same browser profile through save and verification/);
-  assert.doesNotMatch(JSON.stringify(xhs), /docs\/XHS_(?:DESIGN|HANDOFF)\.md/);
-
-  const acres = `${CHANNEL_INFO_SOURCES["1point3acres"].cliBoundary}\n${CHANNEL_INFO_SOURCES["1point3acres"].authentication}\n${CHANNEL_INFO_SOURCES["1point3acres"].platformGuidance}`;
-  assert.match(acres, /CLI offers no functionality to access or write 1point3acres/);
-  assert.match(acres, /human must always perform login/);
-  assert.match(acres, /automation is available and the user has explicitly authorized it/);
-  assert.match(acres, /otherwise the human (?:follows|continues)/);
-  assert.doesNotMatch(acres, /agent takes over/);
-  assert.match(acres, /98/);
-  assert.match(acres, /29/);
-  assert.match(acres, /28/);
-  assert.match(acres, /Observed theme choices: 职场感言, 请问贵司, 管理, 晋升, 老板相处, 辞职, 扩张, 绩效, 换组, 跳槽, 改行, 自我提升, 裁员, 新组上路, 同事协作, 带新人, 实习体验, 求比较\./);
-  assert.match(acres, /Observed theme choices: 其他, 求职简历, 找工就业, 实习, 选组选Offer, 应届生NG, ICC合同工, EE硬件, TeamMatch\./);
-  assert.match(acres, /保存草稿/);
-  assert.match(acres, /No calibrated authenticated\/save-success marker/);
+  for (const channel of AUTH_PLATFORMS) {
+    const text = guidance(channel);
+    for (const disclosure of essentials[channel]) {
+      assert.match(text, disclosure, `${channel} guide must disclose ${disclosure}`);
+    }
+    assert.doesNotMatch(text, /readiness\.ready|Run `publish \w+ info`/);
+  }
+  assert.doesNotMatch(guidance("xhs"), /docs\/XHS_(?:DESIGN|HANDOFF)\.md/);
+  assert.doesNotMatch(guidance("x"), /reply target preserved|target preserved|Already staged a reply to/i);
 });
 
 test("X Article cover selection is explicit and never scans neighboring images", () => {
@@ -970,7 +782,7 @@ test("info CLI has no --format and non-ready external info exits zero", () => {
   assert.equal(receipt.schemaVersion, CHANNEL_INFO_SCHEMA_VERSION);
   assert.equal(receipt.channel, "xhs");
   assert.match(receipt.info.cliBoundary, /no Xiaohongshu read or write transport/);
-  assert.match(receipt.info.authentication, /one persistent agent-owned browser/);
+  assert.match(receipt.info.authentication, /same browser profile through save and verification/);
   assert.equal(receipt.info.platformGuidance, CHANNEL_INFO_SOURCES.xhs.platformGuidance);
   assert.doesNotMatch(JSON.stringify(receipt.info), /XHS_DESIGN|XHS_HANDOFF|docs\//);
   assert.equal(receipt.readiness.ready, false);
