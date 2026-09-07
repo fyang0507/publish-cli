@@ -7,13 +7,9 @@ checkout compatibility symlink; never maintain a second copy.
 
 ## Product boundary
 
-`publish` is a channel-first discovery and draft-staging CLI. Every content
-workflow must stop at a verified native draft for human review. Never click or
-call Post, Publish, Send, scheduling, private-publication, `freepublish/*`,
-`message/mass/*`, or any equivalent final-send surface.
+`publish` is a channel-first discovery and draft-staging CLI. CLI content commands stop at verified native drafts and expose no final-send transport. Do not add Post, Publish, Send, scheduling, private-publication, `freepublish/*`, or `message/mass/*` calls as part of guidance maintenance.
 
-Editorial strategy, personas, approvals, and final publication belong to the
-calling workflow, not this repository.
+Editorial strategy, approvals, and final publication belong to the calling workflow. Agent-owned browser guidance must respect explicit user authorization to continue beyond a draft checkpoint, subject to the agent's execution permissions and live verification. The default draft boundary does not override that authorization.
 
 ## Sources of truth
 
