@@ -82,7 +82,7 @@ bundled fallback once:
 npx playwright install chromium
 ```
 
-The build keeps the CLI executable and, when a data workspace resolves, installs relative symlinks for `publish` and `article-references` into `<data_repo>/.agents/skills/`. Edit the canonical files under `skills/` in this repository; workspace links reflect edits immediately. Set `PUBLISH_SKILLS_DIR` to choose an explicit skill destination. Keep the checkout available, and rerun the build if the repositories move relative to one another. Existing skill installations are overwritten with the source symlinks.
+The build compiles the CLI and keeps it executable without reading workspace configuration or installing skills. The consuming workspace owns linking or installing the complete `skills/publish/` and `skills/article-references/` bundles; edit their canonical source in this repository. Keep the source checkout available when using links.
 
 ## Configuration
 
@@ -96,7 +96,6 @@ Common paths and overrides:
   the default is `~/.publish-cli`.
 - `PUBLISH_DATA_REPO` selects the durable data workspace. Resolution otherwise
   uses `publish.config.dev.yaml`, then a `.agents/workspace.yaml` walk-up.
-- `PUBLISH_SKILLS_DIR` overrides only the skill installation destination.
 - `WECHAT_PROXY_URL` or `WECHAT_SSH_TUNNEL` supplies WeChat's fixed egress path.
 
 Run a passive, sanitized authentication preflight when needed:
