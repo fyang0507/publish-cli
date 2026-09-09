@@ -1,5 +1,7 @@
 # publish-cli
 
+[![Release](https://img.shields.io/github/v/release/fyang0507/publish-cli)](https://github.com/fyang0507/publish-cli/releases/latest) [![Runtime](https://img.shields.io/badge/node-%E2%89%A522.19.0-339933?logo=nodedotjs&logoColor=white)](package.json) [![Agent-native](https://img.shields.io/badge/design-agent--native-8A2BE2)](skills/publish/SKILL.md) [![Works with](https://img.shields.io/badge/works%20with-Codex%20%C2%B7%20Claude%20Code-black)](skills/publish/SKILL.md)
+
 `publish` is a channel-first content-distribution CLI. It provides discovery and
 draft staging for X, LinkedIn, Reddit, and WeChat, plus execution guidance for
 Xiaohongshu, 1point3acres, and personal websites.
