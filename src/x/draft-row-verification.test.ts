@@ -107,6 +107,7 @@ test("production probe is scoped to the live-calibrated modal, Unsent row, and c
       assert.match(source, /\[role=["']dialog["']\]\[aria-modal=["']true["']\]/);
       assert.match(source, /\[data-testid=["']unsentTweet["']\]/);
       assert.match(source, /\[data-testid=["']tweetText["']\]/);
+      assert.match(source, /\[data-testid=["']emptyState["']\]/);
       assert.doesNotMatch(source, /cellInnerDiv|querySelectorAll\(["']body["']\)/);
       return evaluations === 1
         ? observed("older row")
@@ -257,6 +258,127 @@ test("pre-existing or duplicate exact rows and unrelated row churn remain ambigu
   }
 });
 
+async function evidenceForSteps(expected: string, steps: SnapshotStep[]) {
+  const harness = probeHarness(steps);
+  const baseline = await captureDraftRowBaseline(harness.page, expected, harness.deps);
+  return verifyDraftSaved(harness.page, expected, baseline, harness.deps);
+}
+
+test("X's empty state held on two snapshots is an observed empty baseline; zero rows without it stay unavailable (#135)", async () => {
+  const expected = "first draft in an empty list";
+  const empty = observed();
+
+  const verified = await evidenceForSteps(expected, [empty, empty, observed(expected)]);
+  assert.equal(verified.status, "verified");
+  assert.equal(verified.contentMatch, "visible_scoped_multiset_plus_one");
+  assert.deepEqual(verified.baseline, observedFact(0, 0));
+  assert.deepEqual(verified.postSave, observedFact(1, 1));
+  assert.deepEqual(snapshotXDraftRowEvidence(verified), verified);
+
+  for (const fixture of [
+    { post: empty, match: "post_exact_missing" },
+    { post: observed(expected, "other row"), match: "visible_scoped_multiset_changed" },
+    { post: observed(expected, expected), match: "post_exact_ambiguous" },
+  ]) {
+    const evidence = await evidenceForSteps(expected, [empty, empty, fixture.post]);
+    assert.equal(evidence.status, "unverified", fixture.match);
+    assert.equal(evidence.contentMatch, fixture.match);
+  }
+
+  // A transient empty state that gives way to a loaded list never becomes the
+  // baseline: a pre-existing identical draft is still caught.
+  const transient = await evidenceForSteps(expected, [empty, observed(expected), observed(expected)]);
+  assert.equal(transient.status, "unverified");
+  assert.equal(transient.contentMatch, "preexisting_exact");
+
+  const unloaded = await evidenceForSteps(expected, [{ kind: "rows_missing" }, observed(expected)]);
+  assert.equal(unloaded.status, "unverified");
+  assert.equal(unloaded.contentMatch, "baseline_unavailable");
+  assert.equal(unloaded.baseline.outcome, "rows_missing");
+});
+
+interface FakeNode {
+  attrs: Record<string, string>;
+  visible: boolean;
+  innerText?: string;
+  children: FakeNode[];
+}
+
+function fakeNode(attrs: Record<string, string>, children: FakeNode[] = [], visible = true): FakeNode {
+  return { attrs, visible, children };
+}
+
+function fakeQuery(root: FakeNode, selector: string): FakeNode[] {
+  const wanted = Array.from(selector.matchAll(/\[([\w-]+)="([^"]*)"\]/g), (m) => [m[1], m[2]]);
+  const out: FakeNode[] = [];
+  const walk = (node: FakeNode) => {
+    for (const child of node.children) {
+      if (wanted.every(([name, value]) => child.attrs[name] === value)) out.push(child);
+      walk(child);
+    }
+  };
+  walk(root);
+  return out.map((node) => Object.assign(node, {
+    querySelectorAll: (inner: string) => fakeQuery(node, inner),
+  }));
+}
+
+/** Run the production browser-side snapshot against a fake drafts DOM. */
+async function baselineOutcomeForDom(modalChildren: FakeNode[]) {
+  const root = fakeNode({}, [fakeNode({ role: "dialog", "aria-modal": "true" }, modalChildren)]);
+  let currentUrl = "about:blank";
+  const page = {
+    async goto(url: string) { currentUrl = url; },
+    async waitForTimeout() {},
+    url() { return currentUrl; },
+    async evaluate(fn: (arg: unknown) => unknown, arg: unknown) {
+      const globals = globalThis as Record<string, unknown>;
+      const saved = { document: globals.document, window: globals.window, location: globals.location };
+      globals.document = { querySelectorAll: (selector: string) => fakeQuery(root, selector) };
+      globals.window = {
+        getComputedStyle: (node: FakeNode) => ({ display: node.visible ? "block" : "none", visibility: "visible" }),
+      };
+      globals.location = { href: currentUrl };
+      for (const node of [root, ...fakeQuery(root, "*")]) {
+        Object.assign(node, {
+          getBoundingClientRect: () => ({ width: node.visible ? 10 : 0, height: node.visible ? 10 : 0 }),
+        });
+      }
+      try {
+        return fn(arg);
+      } finally {
+        Object.assign(globals, saved);
+      }
+    },
+  } as unknown as Page;
+  const baseline = await captureDraftRowBaseline(page, "expected");
+  return baseline.observation;
+}
+
+test("the production snapshot reports an empty set only for one visible empty state with nothing loading", async () => {
+  const emptyState = (visible = true) => fakeNode({ "data-testid": "emptyState" }, [], visible);
+  const progress = fakeNode({ role: "progressbar" });
+
+  const empty = await baselineOutcomeForDom([emptyState()]);
+  assert.deepEqual(empty, observedFact(0, 0));
+
+  for (const [name, children] of [
+    ["no empty state", []],
+    ["hidden empty state", [emptyState(false)]],
+    ["two empty states", [emptyState(), emptyState()]],
+    ["still loading", [emptyState(), progress]],
+  ] as const) {
+    const observation = await baselineOutcomeForDom([...children]);
+    assert.equal(observation.outcome, "rows_missing", name);
+  }
+
+  const row = fakeNode({ "data-testid": "unsentTweet" }, [
+    Object.assign(fakeNode({ "data-testid": "tweetText" }), { innerText: "older row" }),
+  ]);
+  const loaded = await baselineOutcomeForDom([emptyState(), row]);
+  assert.deepEqual(loaded, observedFact(1, 0));
+});
+
 test("missing or ambiguous calibrated structure is bounded and fail-closed", async () => {
   const expected = "scoped row";
   const failures: Array<{ snapshot: unknown; outcome: string }> = [
@@ -351,7 +473,6 @@ test("malformed, throwing, and stateful snapshot getters cannot manufacture evid
   const malformed = [
     null,
     {},
-    { kind: "observed", texts: [] },
     { kind: "observed", texts: ["x", 1] },
     {
       kind: "rows_unreadable",
