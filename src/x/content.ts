@@ -959,17 +959,39 @@ function packChunks(
   return chunks;
 }
 
-const SENTENCES = new Intl.Segmenter(undefined, { granularity: "sentence" });
+// Pinned so the split never depends on the host's locale.
+const SENTENCES = new Intl.Segmenter("en", { granularity: "sentence" });
+const TITLE_OR_INITIALISM_END_RE = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|etc)\.|\b(?:\p{L}\.){2,})\s+$/u;
 
 /**
- * Sentences with their following whitespace, in order. Generated code
- * placeholders stay atomic pieces even though their fixed human-readable
- * representation contains spaces.
+ * Whether a post may end after `piece`. Intl.Segmenter also breaks inside
+ * URLs (after ? or !) and after titles and initialisms (Mr., U.S.), so a
+ * break counts only after whitespace or CJK end punctuation, and not after
+ * a title or initialism.
+ */
+function endsSentence(piece: string): boolean {
+  return /(?:\s|[。！？])$/u.test(piece) && !TITLE_OR_INITIALISM_END_RE.test(piece);
+}
+
+/**
+ * Sentences with their following whitespace, in order. A whitespace-only
+ * segment joins the sentence before it, so no post is only whitespace.
+ * Generated code placeholders stay atomic pieces even though their fixed
+ * human-readable representation contains spaces.
  */
 function sentencePieces(prose: string): string[] {
   const pieces: string[] = [];
   const pushSentences = (text: string) => {
-    for (const { segment } of SENTENCES.segment(text)) pieces.push(segment);
+    let sentence = "";
+    for (const { segment } of SENTENCES.segment(text)) {
+      if (sentence && (!endsSentence(sentence) || segment.trim() === "")) {
+        sentence += segment;
+        continue;
+      }
+      if (sentence) pieces.push(sentence);
+      sentence = segment;
+    }
+    if (sentence) pieces.push(sentence);
   };
   let cursor = 0;
   for (const match of prose.matchAll(xCodePlaceholderRegex())) {

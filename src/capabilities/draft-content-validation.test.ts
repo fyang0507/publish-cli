@@ -391,6 +391,52 @@ test("X thread packing without author breaks splits between sentences, not mid-s
   assert.equal(longPosts.map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""), longSentence);
 });
 
+test("X thread packing never splits a URL, never leaves a whitespace-only post, and stays lossless (#136 review)", async () => {
+  const filler = "This sentence is filler for the packing check and runs on for a while";
+  const url = "https://example.com/issues?q=is%3Aopen+label%3Abug&wow!yes";
+  const source = `We shipped it today. ${`${filler}, `.repeat(3)}see ${url} for the list. Thanks for reading.`;
+  const posts = (await generateContent(source, { format: "thread" })).thread ?? [];
+  assert.ok(posts.length > 1);
+  assert.ok(posts.some((post) => post.text.includes(url)), "the URL stays whole in one post");
+  assert.equal(posts.map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""), source);
+
+  const exact = `Short. ${"b".repeat(263)}.\n\n${"word ".repeat(70).trim()}.`;
+  const exactPosts = (await generateContent(exact, { format: "thread" })).thread ?? [];
+  for (const post of exactPosts) assert.match(post.text.replace(/ \d+\/\d+$/, ""), /\S/, JSON.stringify(post.text));
+  assert.equal(exactPosts.map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""), exact);
+
+  const titles = `${"Filler words keep this sentence going for a while. ".repeat(4)}Mr. Smith met the U.S. Army team at noon today.`;
+  for (const post of (await generateContent(titles, { format: "thread" })).thread ?? []) {
+    assert.doesNotMatch(post.text, /(?:Mr\.|U\.S\.) \d+\/\d+$/, post.text);
+  }
+
+  // Seeded mixed input: every post has text, no URL is split, and the rows join back.
+  let seed = 7;
+  const next = (n: number) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const parts = ["A short sentence.", "Is this a question?", "Wow!", "这是中文句子。", "好！",
+    "https://example.com/a?b=1!c", "Mr. Lee arrived.", "\n\n", "word", "e.g. this one."];
+  for (let round = 0; round < 40; round += 1) {
+    const text = Array.from({ length: 60 }, () => parts[next(parts.length)]).join(" ").trim();
+    const rows = (await generateContent(text, { format: "thread" })).thread ?? [];
+    const payloads = rows.map((post) => post.text.replace(/ \d+\/\d+$/, ""));
+    assert.equal(payloads.join(""), text.replace(/\r\n?/g, "\n").trim());
+    for (const payload of payloads) assert.match(payload, /\S/);
+    const urls = text.match(/https:\/\/\S+/g) ?? [];
+    for (const found of urls) assert.ok(payloads.some((payload) => payload.includes(found)), found);
+  }
+});
+
+test("X --- breaks: Setext titles and spaced breaks split; a placeholder beside a break stays its own post", async () => {
+  const source = "Title line\n---\nBody post\n- - -\n```js\nrun()\n```\n---\nLast";
+  const generated = await generateContent(source, { format: "thread" });
+  assert.deepEqual((generated.thread ?? []).map((post) => post.text), [
+    "Title line 1/4",
+    "Body post 2/4",
+    "[code block #1 → screenshot] 3/4",
+    "Last 4/4",
+  ]);
+});
+
 test("X rejects a grapheme that cannot fit losslessly in a numbered thread post", async () => {
   const indivisible = `a${"\u0301".repeat(300)}`;
   await assert.rejects(

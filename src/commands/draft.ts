@@ -95,7 +95,8 @@ import {
  *      canonical base markdown file via --from under publish/<date>-<slug>/.
  *   2. DETERMINISTIC content generation (src/x/content.ts; plain code, no LLM for
  *      formatting): tweet (char-validated; default 280, --long up to 25000),
- *      thread (hook-first numbered split each within limit), or article markdown.
+ *      thread (the author's --- posts, else a split between sentences; each
+ *      numbered and within the limit), or article markdown.
  *      Code blocks are flagged (screenshot on X) and links surfaced with notes.
  *   3. --dry-run: generate content ONLY, write an artifact next to --from (only
  *      when --from was given; --text has no file), print it, no browser.
