@@ -75,6 +75,7 @@ const blocked = ${JSON.stringify([
       "/dist/db.js",
       "/dist/linkedin/session.js",
       "/dist/linkedin/draftPoster.js",
+      "/dist/linkedin/composer.js",
       "/dist/reddit/session.js",
       "/dist/reddit/reader.js",
       "/dist/reddit/draftPoster.js",

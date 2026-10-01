@@ -166,7 +166,10 @@ output is reproducible and verifiable.
 1. `getBrowserContext()` (persistent LinkedIn profile) → new page → open the
    share composer (`linkedin.com/feed/?shareActive=true`, or the "Start a post"
    modal).
-2. `tolerantLocator` the composer contenteditable → `typeText(...)` the generated
+2. If the composer restored a saved draft (text or a link-preview card), discard
+   it through its own close → Discard confirmation and reopen until empty: a
+   saved draft keeps its first preview card even when cleared (#137). Then
+   `tolerantLocator` the composer contenteditable → `typeText(...)` the generated
    post (emoji + newlines intact).
 3. **Media (optional):** validate each `--media` path locally in caller order
    (readability, magic/header type, extension match, bytes, dimensions, and
@@ -180,8 +183,10 @@ output is reproducible and verifiable.
    documented forbidden selector, exactly as X's `tweetButton` does.
 5. **Verify:** reopen the share composer in the same CLI-owned profile and
    require its complete restored editor text to equal the complete intended
-   text after only line-ending and NFC normalization. Prefixes, substrings,
-   case folding, and whitespace collapse are not proof.
+   text after only line-ending and NFC normalization, with LinkedIn's
+   `https://lnkd.in/<code>` short links accepted in place of intended links. A
+   composer that stays empty is reopened up to five times. Prefixes,
+   substrings, case folding, and whitespace collapse are not proof.
 6. Return the closed result `{ format: "post", saveMechanism,
    savePhase, verified, mediaAttached }`. Only a coherent `verified` phase exits
    0. A rejected Save click is delivery-unknown; settle/reopen failure or a
@@ -189,7 +194,7 @@ output is reproducible and verifiable.
    same-profile LinkedIn Drafts comparison before retry. Fixed command receipts
    carry link/media guidance without rendering browser errors or poster notes.
 
-Every selector lives in one `LI_COMPOSER_SELECTORS` block, commented
+Every selector lives in one `LI_COMPOSER_SELECTORS` block (`src/linkedin/selectors.ts`), commented
 **best-effort / needs live calibration** — LinkedIn's DOM drifts like X's. Per
 AGENTS.md "Verify live," none of it is trustworthy until run headful
 (`--inspect`) against real LinkedIn.
@@ -211,7 +216,9 @@ AGENTS.md "Verify live," none of it is trustworthy until run headful
 | `src/browser/composer.ts` | shared `tolerantLocator` / `optionalLocator` / `typeText` / close→Save (lifted from `x/draftPoster.ts`) |
 | `src/linkedin/session.ts` | LinkedIn profile + login selectors bound to the factory |
 | `src/linkedin/content.ts` | `generatePost` — LinkedIn rules (§4) |
-| `src/linkedin/draftPoster.ts` | `stagePost` + `LI_COMPOSER_SELECTORS` |
+| `src/linkedin/draftPoster.ts` | `stagePost`, media, close → Save as draft |
+| `src/linkedin/composer.ts` | opening the composer, discarding a restored draft, the preview card, reopen verification |
+| `src/linkedin/selectors.ts` | `LI_COMPOSER_SELECTORS` |
 | `src/commands/linkedin-draft.ts` | `registerLinkedInDraftCommand` |
 
 Rows 1–3 are pure refactors (X behavior unchanged) so LinkedIn is not a fork of X.

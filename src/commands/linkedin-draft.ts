@@ -129,7 +129,7 @@ function linkedInBeforeSaveFailure(
       "\n✗ LinkedIn draft staging stopped before the native Save as draft action was invoked. NEVER posted.\n" +
       "  No native Save as draft action was invoked by this attempt.\n" +
       (progress.composerModified
-        ? "  The composer may retain changed text or media state. Open feed/?shareActive=true in the exact CLI-owned LinkedIn profile (or choose Start a post on the feed) and inspect it before retrying."
+        ? "  The composer may retain changed text or media state, and a draft it restored may have been discarded. Open feed/?shareActive=true in the exact CLI-owned LinkedIn profile (or choose Start a post on the feed) and inspect it before retrying."
         : "  Resolve the local runtime or composer problem before a separate retry; --inspect may help calibrate selectors."),
   };
 }
@@ -436,7 +436,7 @@ export function receiptForLinkedInDraftOutcome(
     );
   } else if (outcome.exitCode !== 0 && outcome.composerModified) {
     gotchas.push(
-      "The composer may retain changed text or media state; inspect feed/?shareActive=true in the exact CLI-owned LinkedIn profile before retrying.",
+      "The composer may retain changed text or media state, and a draft it restored may have been discarded; inspect feed/?shareActive=true in the exact CLI-owned LinkedIn profile before retrying.",
     );
   }
   const remoteResidue = [];
@@ -595,7 +595,9 @@ export function registerLinkedInDraftCommand(linkedin: Command): void {
         "  thematic breaks, or whitespace. Run publish linkedin info for the full contract.\n" +
         "\nNative-save outcome:\n" +
         "  Only a returned Save as draft action followed by a full intended-text match\n" +
-        "  after reopening the composer is success. A rejected Save click has unknown\n" +
+        "  after reopening the composer is success; LinkedIn's lnkd.in short links count as\n" +
+        "  the links they replace. A restored draft is discarded before typing, because a\n" +
+        "  saved draft keeps its link-preview card. A rejected Save click has unknown\n" +
         "  delivery; a settle/reopen failure or negative match is delivered but unverified.\n" +
         "  Both uncertain states exit 1 because a native draft may exist. Before retrying,\n" +
         "  open feed/?shareActive=true in the exact same CLI-owned LinkedIn profile, or\n" +

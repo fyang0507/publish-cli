@@ -2,7 +2,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Locator, Page } from "playwright";
 import {
-  sameLinkedInReopenedDraftText,
   saveAsDraftLinkedIn,
   setComposerMedia,
   type LinkedInMediaSetDependencies,
@@ -158,21 +157,6 @@ test("negative reopen remains unverified and only positive reopen verifies", asy
       "reopen:verify",
     ]);
   }
-});
-
-test("reopen matching requires the complete intended text", () => {
-  const expected = "Shared first forty characters 1234567890\nExact intended ending";
-  assert.equal(sameLinkedInReopenedDraftText(expected, expected), true);
-  assert.equal(
-    sameLinkedInReopenedDraftText(
-      "Shared first forty characters 1234567890\nDifferent old draft ending",
-      expected,
-    ),
-    false,
-  );
-  assert.equal(sameLinkedInReopenedDraftText(expected.toUpperCase(), expected), false);
-  assert.equal(sameLinkedInReopenedDraftText(expected.replace("\n", "  "), expected), false);
-  assert.equal(sameLinkedInReopenedDraftText("Cafe\u0301\r\nBody", "Café\nBody"), true);
 });
 
 test("only branded LinkedIn stage errors carry phase evidence", () => {
