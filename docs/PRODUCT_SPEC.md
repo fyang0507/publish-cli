@@ -268,7 +268,7 @@ Takes a **canonical base draft** (a markdown file path, `--from`), generates X-r
 
 From the canonical base markdown, produce one of three formats (`--format`):
 - **`tweet`** — a single tweet, **character-validated**. Default limit **280**; **`--long`** raises it to the Premium long-post cap (configurable, default up to **25000**).
-- **`thread`** — a **hook-first** ordered split into multiple posts, **each within the limit**, **numbered/sequenced** (the strongest opener leads).
+- **`thread`** — the author's posts, separated by lines holding only `---`, or else a split between sentences; **each within the limit** and **numbered/sequenced**.
 - **`article`** — long-form **Article** markdown suitable for X's Articles composer.
 
 Generation rules (all in plain code, **not** an LLM, so output is reproducible and verifiable):

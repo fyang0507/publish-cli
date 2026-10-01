@@ -11,7 +11,9 @@
  *
  * Three formats:
  *   - tweet:   a single post, char-validated (default 280; --long up to 25000).
- *   - thread:  hook-first ordered split, each post within the limit, numbered.
+ *   - thread:  the author's posts where lines holding only `---` mark post
+ *              breaks; otherwise a split between sentences. Each post is
+ *              within the limit and numbered.
  *   - article: long-form Article markdown for X's Articles composer.
  *
  * Two cross-cutting concerns surfaced as advisory flags (NOT auto-applied):
@@ -150,7 +152,7 @@ export function renderXLinkFlag(flag: LinkFlag): string {
  * the loss only after opening the staged draft.
  */
 export interface ProseOmissionFlag {
-  kind: "title_heading" | "section_heading" | "metadata_like" | "markdown_image";
+  kind: "title_heading" | "section_heading" | "markdown_image";
   /** Exact caller-supplied line, without its trailing newline. */
   source: string;
   /** 1-based source line. */
@@ -270,7 +272,7 @@ interface ParsedDoc {
   title: string;
   /** Body markdown with the leading title line removed. */
   body: string;
-  /** Body with fenced code blocks and front-matter-ish metadata stripped, for prose splitting. */
+  /** Body with fenced code replaced and headings/image-only lines removed, for prose splitting. */
   prose: string;
   codeFlags: CodeBlockFlag[];
   linkFlags: LinkFlag[];
@@ -366,29 +368,20 @@ export function parseBaseMarkdown(md: string, sourceLineOffset = 0): ParsedDoc {
     bodyLines.push(line);
 
     // From the PROSE stream (used for tweet/thread splitting) drop:
-    //   - leading metadata pairs ("Draft: v0.4", "Primary target: ...")
     //   - image-only lines (images become attachments, not body text)
     //   - section headings (bare labels like "Working Thesis" make weak hooks /
     //     thread filler) — they stay in `body` for body-rendering consumers.
-    // Everything else flows into the hook-first prose stream.
-    // Metadata pairs have a SHORT label key (1-3 words) at the very top, e.g.
-    // "Draft: v0.4", "Platforms: X, LinkedIn". Restrict the key to ≤3 words so a
-    // normal prose sentence with an early colon ("The pattern I keep hitting: …")
-    // is NOT mistaken for metadata and dropped.
-    const isMetaPair = /^[A-Z][\w/]*(?: [\w/]+){0,2}:\s+\S/.test(line) && i < 8;
+    // Everything else, including `Key: value`-looking lines, is caller prose;
+    // metadata belongs in leading frontmatter.
     const isImageOnly = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line);
     const isHeading = /^#{1,6}\s/.test(line);
-    if (isMetaPair || isImageOnly || isHeading) {
-      const kind: ProseOmissionFlag["kind"] = isMetaPair
-        ? "metadata_like"
-        : isImageOnly
-          ? "markdown_image"
-          : "section_heading";
-      const note = isMetaPair
-        ? "Matched the leading metadata-like Key: value heuristic and was omitted from tweet/thread transport text."
-        : isImageOnly
-          ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
-          : "Section headings are omitted from the tweet/thread prose stream.";
+    if (isImageOnly || isHeading) {
+      const kind: ProseOmissionFlag["kind"] = isImageOnly
+        ? "markdown_image"
+        : "section_heading";
+      const note = isImageOnly
+        ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
+        : "Section headings are omitted from the tweet/thread prose stream.";
       proseOmissions.push({
         kind,
         source: line,
@@ -823,20 +816,15 @@ function parseXTransportMarkdown(md: string, sourceLineOffset = 0): ParsedDoc {
 
     bodyLines.push(line);
     linkLines.push(line);
-    const isMetaPair = /^[A-Z][\w/]*(?: [\w/]+){0,2}:\s+\S/.test(line) && i < 8;
     const isImageOnly = /^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(line);
     const isHeading = /^#{1,6}\s/.test(line);
-    if (isMetaPair || isImageOnly || isHeading) {
-      const kind: ProseOmissionFlag["kind"] = isMetaPair
-        ? "metadata_like"
-        : isImageOnly
-          ? "markdown_image"
-          : "section_heading";
-      const note = isMetaPair
-        ? "Matched the leading metadata-like Key: value heuristic and was omitted from tweet/thread transport text."
-        : isImageOnly
-          ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
-          : "Section headings are omitted from the tweet/thread prose stream.";
+    if (isImageOnly || isHeading) {
+      const kind: ProseOmissionFlag["kind"] = isImageOnly
+        ? "markdown_image"
+        : "section_heading";
+      const note = isImageOnly
+        ? "Markdown images are not transported in X tweet/thread text; supply and verify the intended attachment separately."
+        : "Section headings are omitted from the tweet/thread prose stream.";
       proseOmissions.push({ kind, source: line, sourceLine: lineOffset + i + 1, note });
       continue;
     }
@@ -911,9 +899,11 @@ const countXPostChars = countXWeightedLength;
 type TextMeasure = (text: string) => number;
 
 /**
- * Greedily pack contiguous source pieces into chunks that each fit within
- * `limit`. Every whitespace byte belongs to exactly one chunk: tabs, single
- * newlines, and repeated blank lines are never normalized while splitting.
+ * Greedily pack whole sentences into chunks that each fit within `limit`, so a
+ * chunk ends between sentences. Only a sentence longer than one chunk is split,
+ * between words, starting in a fresh chunk. Every whitespace byte belongs to
+ * exactly one chunk: tabs, single newlines, and repeated blank lines are never
+ * normalized while splitting.
  *
  * `reserve` characters are held back from the limit on every chunk to leave room
  * for the " n/N" numbering suffix added later.
@@ -933,52 +923,84 @@ function packChunks(
     current = "";
   };
 
-  // Each piece is a non-whitespace run plus its exact following separator,
-  // except generated code placeholders: those stay atomic even though their
-  // fixed human-readable representation contains spaces. Concatenating chunks
-  // after removing numbering still reconstructs `prose` byte-for-byte.
-  const pieces = packingPieces(prose);
-  for (const piece of pieces) {
-    if (measure(current + piece) <= effective) {
-      current += piece;
+  // Concatenating the chunks after removing numbering still reconstructs
+  // `prose` byte-for-byte.
+  for (const sentence of sentencePieces(prose)) {
+    if (measure(current + sentence) <= effective) {
+      current += sentence;
       continue;
     }
     flush();
-    if (measure(piece) <= effective) {
-      current = piece;
+    if (measure(sentence) <= effective) {
+      current = sentence;
       continue;
     }
-
-    const slices = hardSlice(piece, effective, measure);
-    for (const slice of slices.slice(0, -1)) chunks.push(slice);
-    const last = slices.at(-1);
-    if (last) current = last;
-    if (slices.length === 0) {
-      throw new Error("Internal X thread packing error: source piece made no progress.");
+    for (const word of sentence.matchAll(/\S+\s*|\s+/gu)) {
+      const piece = word[0];
+      if (measure(current + piece) <= effective) {
+        current += piece;
+        continue;
+      }
+      flush();
+      if (measure(piece) <= effective) {
+        current = piece;
+        continue;
+      }
+      const slices = hardSlice(piece, effective, measure);
+      for (const slice of slices.slice(0, -1)) chunks.push(slice);
+      const last = slices.at(-1);
+      if (last) current = last;
+      if (slices.length === 0) {
+        throw new Error("Internal X thread packing error: source piece made no progress.");
+      }
     }
   }
   flush();
   return chunks;
 }
 
-function packingPieces(prose: string): string[] {
+// Pinned so the split never depends on the host's locale.
+const SENTENCES = new Intl.Segmenter("en", { granularity: "sentence" });
+const TITLE_OR_INITIALISM_END_RE = /(?:\b(?:Mr|Mrs|Ms|Dr|Prof|St|Jr|Sr|vs|etc)\.|\b(?:\p{L}\.){2,})\s+$/u;
+
+/**
+ * Whether a post may end after `piece`. Intl.Segmenter also breaks inside
+ * URLs (after ? or !) and after titles and initialisms (Mr., U.S.), so a
+ * break counts only after whitespace or CJK end punctuation, and not after
+ * a title or initialism.
+ */
+function endsSentence(piece: string): boolean {
+  return /(?:\s|[。！？])$/u.test(piece) && !TITLE_OR_INITIALISM_END_RE.test(piece);
+}
+
+/**
+ * Sentences with their following whitespace, in order. A whitespace-only
+ * segment joins the sentence before it, so no post is only whitespace.
+ * Generated code placeholders stay atomic pieces even though their fixed
+ * human-readable representation contains spaces.
+ */
+function sentencePieces(prose: string): string[] {
   const pieces: string[] = [];
+  const pushSentences = (text: string) => {
+    let sentence = "";
+    for (const { segment } of SENTENCES.segment(text)) {
+      if (sentence && (!endsSentence(sentence) || segment.trim() === "")) {
+        sentence += segment;
+        continue;
+      }
+      if (sentence) pieces.push(sentence);
+      sentence = segment;
+    }
+    if (sentence) pieces.push(sentence);
+  };
   let cursor = 0;
   for (const match of prose.matchAll(xCodePlaceholderRegex())) {
     const matchIndex = match.index;
-    if (matchIndex > cursor) {
-      for (const piece of prose.slice(cursor, matchIndex).matchAll(/\S+\s*|\s+/gu)) {
-        pieces.push(piece[0]);
-      }
-    }
+    if (matchIndex > cursor) pushSentences(prose.slice(cursor, matchIndex));
     pieces.push(match[0]);
     cursor = matchIndex + match[0].length;
   }
-  if (cursor < prose.length) {
-    for (const piece of prose.slice(cursor).matchAll(/\S+\s*|\s+/gu)) {
-      pieces.push(piece[0]);
-    }
-  }
+  if (cursor < prose.length) pushSentences(prose.slice(cursor));
   return pieces;
 }
 
@@ -1190,16 +1212,76 @@ function buildTweet(
   );
 }
 
-function buildThread(prose: string, limit: number): ThreadPost[] {
-  if (!prose.trim()) {
-    throw new LocalValidationError("X thread text is empty after Markdown normalization.", {
-      code: "x_text_empty",
-      field: "text",
-      actual: 0,
-      expected: "> 0",
-      unit: "twitter_text_weighted",
-    });
+/** A line holding only a thematic break (`---`, `***`, `___`) marks an author's post break. */
+const THREAD_POST_BREAK_RE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+
+/** The author's posts when the prose marks post breaks, else null. Empty posts are skipped. */
+function authoredThreadPosts(prose: string): string[] | null {
+  const lines = prose.split("\n");
+  if (!lines.some((line) => THREAD_POST_BREAK_RE.test(line))) return null;
+  const posts: string[] = [];
+  let current: string[] = [];
+  for (const line of lines) {
+    if (!THREAD_POST_BREAK_RE.test(line)) {
+      current.push(line);
+      continue;
+    }
+    posts.push(current.join("\n").trim());
+    current = [];
   }
+  posts.push(current.join("\n").trim());
+  return posts.filter((post) => post !== "");
+}
+
+function emptyThreadError(): LocalValidationError {
+  return new LocalValidationError("X thread text is empty after Markdown normalization.", {
+    code: "x_text_empty",
+    field: "text",
+    actual: 0,
+    expected: "> 0",
+    unit: "twitter_text_weighted",
+  });
+}
+
+function numberedThreadPosts(chunks: readonly string[]): ThreadPost[] {
+  const total = chunks.length;
+  return chunks.map((text, i) => {
+    const body = `${text} ${i + 1}/${total}`;
+    return { index: i + 1, total, text: body, chars: countXPostChars(body) };
+  });
+}
+
+/**
+ * Author-marked posts are kept whole: each becomes exactly one numbered post,
+ * and one that doesn't fit fails locally instead of being re-split.
+ */
+function buildAuthoredThread(authored: readonly string[], limit: number): ThreadPost[] {
+  if (authored.length === 0) throw emptyThreadError();
+  const posts = numberedThreadPosts(authored);
+  for (const post of posts) {
+    if (post.chars > limit) {
+      throw new LocalValidationError(
+        `X thread post ${post.index}/${post.total} is ${post.chars} weighted chars with its ` +
+          `" ${post.index}/${post.total}" number, but the X post limit is ${limit}. Shorten it or add ` +
+          "a post break (a line holding only ---); the CLI never re-splits an author's post. " +
+          "No partial thread was generated.",
+        {
+          code: "x_thread_post_too_long",
+          field: "text",
+          actual: post.chars,
+          expected: `<= ${limit}`,
+          unit: "twitter_text_weighted",
+        },
+      );
+    }
+  }
+  return posts;
+}
+
+function buildThread(prose: string, limit: number): ThreadPost[] {
+  if (!prose.trim()) throw emptyThreadError();
+  const authored = authoredThreadPosts(prose);
+  if (authored) return buildAuthoredThread(authored, limit);
 
   // N is unknown until packing, so grow the suffix reserve and repack until the
   // actual " n/N" suffix fits. This preserves every source token even for very
@@ -1223,15 +1305,12 @@ function buildThread(prose: string, limit: number): ThreadPost[] {
     reserve = requiredReserve;
   }
 
-  const total = chunks.length;
-  const posts: ThreadPost[] = chunks.map((text, i) => {
-    const suffix = ` ${i + 1}/${total}`;
-    const body = `${text}${suffix}`;
-    if (countXPostChars(body) > limit) {
-      throw new Error(`Internal X thread packing error at post ${i + 1}/${total}.`);
+  const posts = numberedThreadPosts(chunks);
+  for (const post of posts) {
+    if (post.chars > limit) {
+      throw new Error(`Internal X thread packing error at post ${post.index}/${post.total}.`);
     }
-    return { index: i + 1, total, text: body, chars: countXPostChars(body) };
-  });
+  }
   return posts;
 }
 

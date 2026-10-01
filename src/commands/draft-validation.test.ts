@@ -1097,14 +1097,16 @@ test("X file/stdin frontmatter normalizes before tweet, thread, reply-thread, an
     assert.equal(literal.status, 0, output(literal));
     assert.match(literal.stdout, /│ ---\n│ title: Literal inline content\n│ ---\n│ Inline body/);
 
+    // Inline text is never frontmatter: in a thread its --- lines are post
+    // breaks, and the mapping-looking line stays as its own post.
     const literalThreadSource =
       "---\ntitle: Literal inline thread\n---\n" +
-      `${"Inline thread body.\n\n".repeat(20)}tail`;
+      `${"Inline thread body.\n\n".repeat(5)}tail`;
     const literalThread = runCli(fixture, [
       "x", "draft", "--format", "thread", "--text", literalThreadSource, "--dry-run",
     ]);
     assert.equal(literalThread.status, 0, output(literalThread));
-    assert.match(literalThread.stdout, /│ ---\n│ title: Literal inline thread\n│ ---/);
+    assert.match(literalThread.stdout, /│ title: Literal inline thread 1\/2\n/);
     assert.doesNotMatch(output(literalThread), /PLATFORM_IMPORT_BLOCKED/);
 
     const literalReply = runCli(

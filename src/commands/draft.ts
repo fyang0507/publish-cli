@@ -95,7 +95,8 @@ import {
  *      canonical base markdown file via --from under publish/<date>-<slug>/.
  *   2. DETERMINISTIC content generation (src/x/content.ts; plain code, no LLM for
  *      formatting): tweet (char-validated; default 280, --long up to 25000),
- *      thread (hook-first numbered split each within limit), or article markdown.
+ *      thread (the author's --- posts, else a split between sentences; each
+ *      numbered and within the limit), or article markdown.
  *      Code blocks are flagged (screenshot on X) and links surfaced with notes.
  *   3. --dry-run: generate content ONLY, write an artifact next to --from (only
  *      when --from was given; --text has no file), print it, no browser.
@@ -1039,6 +1040,9 @@ export function registerDraftCommand(x: Command): void {
         "\nArticle native authoring:\n" +
         "  The native editor exposes exactly two heading levels, Heading and Subheading, represented by ATX H1/H2 body headings. H3-H6 and Setext headings reject locally.\n" +
         "  Inline backtick-code styling is unsupported and rejects locally; use a top-level fenced block and complete its explicit manual handoff during human review.\n" +
+        "\nThread posts:\n" +
+        "  A line holding only --- (or *** or ___) ends one thread post and starts the next. Each marked post is staged whole with its \" n/N\" number; one that doesn't fit exits 2 locally and is never re-split.\n" +
+        "  Without marked breaks, the text is split between sentences, and inside a sentence only when one sentence can't fit a post. A tweet keeps --- as literal text.\n" +
         "\nTweet/thread code-block transport:\n" +
         "  Every parser-confirmed top-level backtick/tilde fenced block becomes an exact numbered [code block #N → screenshot] placeholder; #1 counts as 29 twitter-text weighted characters normally and 28 Unicode code points with --long.\n" +
         "  Literal caller transport prose matching the reserved [code block #N → screenshot] syntax exits 2 locally before platform/state access; occurrences inside transformed code or an omitted heading do not collide.\n" +
