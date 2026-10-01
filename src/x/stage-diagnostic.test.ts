@@ -5,6 +5,7 @@ import { executeXDraftRealRun, receiptForXDraftOutcome } from "../commands/draft
 import { generateContent } from "./content.js";
 import {
   saveAsDraft,
+  tweetTextboxSelectors,
   uniqueComposerLocator,
   X_COMPOSER_SELECTORS,
   type SaveAsDraftDependencies,
@@ -187,7 +188,11 @@ function composeRoutePage(): Page {
 }
 
 test("composer lookups are scoped to the compose modal, so the timeline's inline box behind it is not a candidate (#128)", async () => {
-  for (const selector of [...X_COMPOSER_SELECTORS.tweetTextbox, ...X_COMPOSER_SELECTORS.addPostButton]) {
+  for (const selector of [
+    ...X_COMPOSER_SELECTORS.tweetTextbox,
+    ...X_COMPOSER_SELECTORS.addPostButton,
+    ...tweetTextboxSelectors(1),
+  ]) {
     assert.ok(
       selector.startsWith(COMPOSE_MODAL) || selector.startsWith('//*[@role="dialog"][@aria-modal="true"]//'),
       selector,

@@ -85,14 +85,14 @@ import {
 // Preserve the existing public import while keeping parsing in a browser-free module.
 export { extractTweetId } from "../capabilities/validation.js";
 
+/** The compose modal that owns the tweet/thread/reply composer (#128). */
+const X_COMPOSE_MODAL = '[role="dialog"][aria-modal="true"]';
+
 /**
  * Centralized composer/draft selectors. Candidate arrays use tolerantLocator;
  * the calibrated Article editor/cover selectors are singleton strings whose
  * uniqueness and DOM relationships are checked explicitly below.
  */
-/** The compose modal that owns the tweet/thread/reply composer (#128). */
-const X_COMPOSE_MODAL = '[role="dialog"][aria-modal="true"]';
-
 export const X_COMPOSER_SELECTORS = {
   composeUrl: "https://x.com/compose/post",
   // Articles composer entry point (X Premium "Articles"). VERY likely to drift
@@ -206,7 +206,7 @@ export const X_COMPOSER_SELECTORS = {
 } as const;
 
 /** Per-post textbox selector for the i-th (0-based) post in a thread. */
-function tweetTextboxSelectors(i: number): string[] {
+export function tweetTextboxSelectors(i: number): string[] {
   return [
     `${X_COMPOSE_MODAL} div[data-testid="tweetTextarea_${i}"]`,
     // fall back to the n-th generic textbox if the testid index drifts
@@ -3230,7 +3230,10 @@ const productionDraftRowProbeDependencies: DraftRowProbeDependencies = {
         const emptyStates = Array.from(
           modals[0].querySelectorAll('[data-testid="emptyState"]'),
         ).filter(isVisible);
-        return emptyStates.length === 1
+        const loading = Array.from(
+          modals[0].querySelectorAll('[role="progressbar"]'),
+        ).some(isVisible);
+        return emptyStates.length === 1 && !loading
           ? { kind: "observed", texts: [] }
           : { kind: "rows_missing" };
       }
@@ -3514,6 +3517,16 @@ export async function captureDraftRowBaseline(
     result = openFailure
       ? { observation: openFailure, rowFingerprints: null }
       : await probeDraftRows(page, expected, deps);
+    if (result.observation.outcome === "observed" && result.observation.visibleRowCount === 0) {
+      // X may show its empty state before the rows load. An empty baseline
+      // must hold on a second snapshot; a list that has loaded since wins.
+      try {
+        await deps.wait(page, 1_000);
+        result = await probeDraftRows(page, expected, deps);
+      } catch {
+        result = { observation: failedDraftRowsProbe(), rowFingerprints: null };
+      }
+    }
   }
   const baseline: XDraftRowBaseline = Object.freeze({
     kind: "x_unsent_drafts_baseline" as const,
