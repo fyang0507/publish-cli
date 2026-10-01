@@ -19,7 +19,7 @@ Drafts are browser-local. Preserve the same browser profile through save and ver
 
 ## Platform specification and gotchas
 
-The following behavior was observed on 2026-08-30 and 2026-09-06, and for video notes on 2026-09-30. Re-check current controls and counters before acting. Plain long-article save/reopen was verified; image-text save/reopen and automated publication were not verified in the latest follow-up. These gaps do not block otherwise authorized composer preparation and review.
+The following behavior was observed on 2026-08-30 and 2026-09-06, and for video notes on 2026-09-30. Re-check current controls and counters before acting. Plain long-article save/reopen was verified, and one video note was published by the agent under explicit authorization; image-text save/reopen and automated publication of long articles and image-text posts were not verified. These gaps do not block otherwise authorized composer preparation and review.
 
 ### Import the article
 
@@ -44,10 +44,11 @@ Before saving, publishing, or handing off, review the exact title, all images, c
 
 ### Video note
 
-1. Open `发布笔记` → `上传视频` and upload the file through the page's own upload control. The page states up to 4 hours and 20 GB, common formats with mp4 or mov recommended, and higher than 1080P uploads more clearly from the web. It gives no aspect-ratio guidance. Wait until processing finishes before editing.
+1. Open `发布笔记` → `上传视频` and upload the file through the page's own upload control. The page states up to 4 hours and 20 GB, common formats with mp4 or mov recommended, and that videos above 1080P upload more clearly from the web. It gives no aspect-ratio guidance. Wait until processing finishes before editing.
 2. Fill the title and body, then add topics through the live `话题` suggestions as for the image-text composer: each must become a native topic entity.
-3. Check the cover. The default is the video's first frame, which can be black or unrepresentative; choose a representative frame and confirm the preview.
-4. Review the title, video, cover, body, topics and declarations as below. The `发布` button sits inside a closed shadow root, so selectors and the accessibility tree don't reach it. Take a screenshot, confirm the button under the intended position, click that position once, and confirm the note in `笔记管理` (one copy, its title and duration). A video-note draft save was not verified.
+3. Check the cover. The default is the video's first frame, which can be black or unrepresentative. Choosing another frame is an editorial choice, the operator's unless delegated; confirm the preview.
+4. Review the title, video, cover, body, topics and declarations as in the image-text composer above. A video-note draft save was not verified; without publication authorization, stop at this review and hand off.
+5. Only when publication is explicitly authorized: the `发布` button sits inside a closed shadow root, which the browser tool's selectors and snapshot did not reach. Take a fresh screenshot right before clicking, confirm the button is under the intended position, and click that position once. Confirm in `笔记管理` that exactly one copy exists with the accepted title, and report its state as shown; `审核中` means under review, not live. If it does not show exactly one copy, reconcile as for an uncertain submission below and do not click again.
 
 ### Save or publish and verify
 
