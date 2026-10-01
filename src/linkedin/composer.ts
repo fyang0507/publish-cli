@@ -50,7 +50,8 @@ function normalizeReopenedDraftText(value: string): string {
   return value.replace(/\r\n?/g, "\n").normalize("NFC");
 }
 
-const HTTP_URL_RE = /https?:\/\/\S+/gu;
+// ASCII URL characters only: CJK text and punctuation right after a link end it.
+const HTTP_URL_RE = /https?:\/\/[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/giu;
 const URL_TRAILING_PUNCTUATION_RE = /[.,;:!?'")\]]+$/u;
 /** LinkedIn rewrites every link in a saved draft to its own shortener (#137). */
 const LINKEDIN_SHORT_LINK_SOURCE = "https://lnkd\\.in/[A-Za-z0-9_-]+";
@@ -75,7 +76,7 @@ export function sameLinkedInReopenedDraftText(
   let cursor = 0;
   for (const match of expected.matchAll(HTTP_URL_RE)) {
     const url = match[0].replace(URL_TRAILING_PUNCTUATION_RE, "");
-    if (!/^https?:\/\/./u.test(url)) continue;
+    if (!/^https?:\/\/./iu.test(url)) continue;
     pattern += `${escapeRegExp(expected.slice(cursor, match.index))}` +
       `(?:${escapeRegExp(url)}|${LINKEDIN_SHORT_LINK_SOURCE})`;
     cursor = match.index + url.length;
@@ -87,7 +88,7 @@ export function sameLinkedInReopenedDraftText(
 
 /**
  * Dismiss the link-preview card LinkedIn generates for a link in the new text.
- * The composer renders no Photo control while a card is attached, so this runs
+ * The composer renders no Media control while a card is attached, so this runs
  * only when media is requested, after typing and before the media is set. The
  * card appears asynchronously; no card within three seconds means none.
  */
@@ -126,22 +127,28 @@ export interface StartEmptyComposerDependencies {
   wait(page: Page, milliseconds: number): Promise<void>;
 }
 
+/**
+ * The Discard button of LinkedIn's Save as draft confirmation: exactly one
+ * visible Discard and exactly one visible Save as draft, else null.
+ */
+export async function locateRestoredDraftDiscard(page: Page): Promise<Locator | null> {
+  const discard = page.locator(`xpath=${LI_COMPOSER_SELECTORS.discardDraftButton}`).filter({ visible: true });
+  const save = page.locator(LI_COMPOSER_SELECTORS.saveDraftButton[0]);
+  try {
+    await discard.first().waitFor({ state: "visible", timeout: 5_000 });
+  } catch {
+    return null;
+  }
+  return (await discard.count()) === 1 && (await save.count()) === 1 ? discard : null;
+}
+
 const productionStartEmptyComposerDependencies: StartEmptyComposerDependencies = {
   open: openComposer,
   restored: restoredDraftPresent,
   locateClose(page) {
     return optionalLocator(page, LI_COMPOSER_SELECTORS.closeComposerButton, 5_000);
   },
-  async locateDiscard(page) {
-    const discard = page.locator(`xpath=${LI_COMPOSER_SELECTORS.discardDraftButton}`).filter({ visible: true });
-    const save = page.locator(LI_COMPOSER_SELECTORS.saveDraftButton[0]);
-    try {
-      await discard.first().waitFor({ state: "visible", timeout: 5_000 });
-    } catch {
-      return null;
-    }
-    return (await discard.count()) === 1 && (await save.count()) === 1 ? discard : null;
-  },
+  locateDiscard: locateRestoredDraftDiscard,
   async wait(page, milliseconds) {
     await page.waitForTimeout(milliseconds);
   },
@@ -173,17 +180,16 @@ export async function startEmptyComposer(
   beforeDiscard();
   await discard.click();
 
-  // A discarded draft can still be restored for a few seconds (live 2026-10):
-  // reopen until the composer comes back empty. Saving a draft that gets a
-  // link-preview card failed ("We encountered a problem sharing your post")
-  // when it followed a Discard too closely; after ten seconds it saved.
+  // Saving a draft that gets a link-preview card failed ("We encountered a
+  // problem sharing your post") when it followed a Discard too closely; after
+  // ten seconds it saved (live 2026-10). A discarded draft can also still be
+  // restored for a moment, so the composer is then reopened until it is
+  // empty, right before the new text is typed.
+  await deps.wait(page, 10_000);
   for (let attempt = 0; attempt < 5; attempt += 1) {
     if (attempt > 0) await deps.wait(page, 1_000);
     const fresh = await deps.open(page);
-    if (!(await deps.restored(page, fresh))) {
-      await deps.wait(page, 10_000);
-      return fresh;
-    }
+    if (!(await deps.restored(page, fresh))) return fresh;
   }
   throw new Error("Composer still holds a draft after Discard.");
 }

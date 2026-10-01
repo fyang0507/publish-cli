@@ -85,7 +85,7 @@ export const LI_COMPOSER_SELECTORS = {
   ],
   // CALIBRATED LIVE 2026-10 (#137): the link-preview card in the composer. A
   // saved draft keeps the first card it got: dismissing it in the composer does
-  // not survive Save. While a card is attached the composer renders no Photo control.
+  // not survive Save. While a card is attached the composer renders no Media control.
   previewCard: '[componentkey="ShareBoxpreviewCard"]',
   // CALIBRATED LIVE 2026-07: closing a non-empty composer raises a dialog with two
   // TEXT buttons — "Save as draft" and "Discard" (NO aria-labels), so match by

@@ -10,7 +10,8 @@
  * code path that locates or clicks the Post button; it appears in
  * LI_COMPOSER_SELECTORS (./selectors.ts) ONLY as a documented FORBIDDEN selector, exactly as X's
  * tweetButton does in src/x/draftPoster.ts. The send action is future scope behind
- * the SEND-GATE (PRODUCT_SPEC §5).
+ * the SEND-GATE (PRODUCT_SPEC §5). The one Discard click allowed is on a draft the
+ * composer restored, before any new text is typed (./composer.ts, #137).
  *
  * REUSE: the tolerant/optional locator primitives and the contenteditable typing
  * helper are channel-agnostic and imported from ../x/draftPoster.js
@@ -280,6 +281,9 @@ export async function stagePost(
       if (!allMediaSet) {
         throw new Error("LinkedIn did not accept every requested media file-setting call.");
       }
+      // Let a link preview or image upload finish before Save: LinkedIn
+      // sometimes rejected a Save made while one was loading (live 2026-10).
+      if (media.length > 0 || /https?:\/\//iu.test(text)) await page.waitForTimeout(3_000);
     } catch (error) {
       throw linkedInDraftStageError(error, "save_not_attempted", progress());
     }
