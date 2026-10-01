@@ -107,6 +107,7 @@ test("production probe is scoped to the live-calibrated modal, Unsent row, and c
       assert.match(source, /\[role=["']dialog["']\]\[aria-modal=["']true["']\]/);
       assert.match(source, /\[data-testid=["']unsentTweet["']\]/);
       assert.match(source, /\[data-testid=["']tweetText["']\]/);
+      assert.match(source, /\[data-testid=["']emptyState["']\]/);
       assert.doesNotMatch(source, /cellInnerDiv|querySelectorAll\(["']body["']\)/);
       return evaluations === 1
         ? observed("older row")
@@ -257,6 +258,33 @@ test("pre-existing or duplicate exact rows and unrelated row churn remain ambigu
   }
 });
 
+test("X's explicit empty state is an observed empty baseline; zero rows without it stay unavailable (#135)", async () => {
+  const expected = "first draft in an empty list";
+  const empty = observed();
+
+  const verified = await evidenceFor(expected, empty, observed(expected));
+  assert.equal(verified.evidence.status, "verified");
+  assert.equal(verified.evidence.contentMatch, "visible_scoped_multiset_plus_one");
+  assert.deepEqual(verified.evidence.baseline, observedFact(0, 0));
+  assert.deepEqual(verified.evidence.postSave, observedFact(1, 1));
+  assert.deepEqual(snapshotXDraftRowEvidence(verified.evidence), verified.evidence);
+
+  for (const fixture of [
+    { post: empty, match: "post_exact_missing" },
+    { post: observed(expected, "other row"), match: "visible_scoped_multiset_changed" },
+    { post: observed(expected, expected), match: "post_exact_ambiguous" },
+  ]) {
+    const { evidence } = await evidenceFor(expected, empty, fixture.post);
+    assert.equal(evidence.status, "unverified", fixture.match);
+    assert.equal(evidence.contentMatch, fixture.match);
+  }
+
+  const unloaded = await evidenceFor(expected, { kind: "rows_missing" }, observed(expected));
+  assert.equal(unloaded.evidence.status, "unverified");
+  assert.equal(unloaded.evidence.contentMatch, "baseline_unavailable");
+  assert.equal(unloaded.evidence.baseline.outcome, "rows_missing");
+});
+
 test("missing or ambiguous calibrated structure is bounded and fail-closed", async () => {
   const expected = "scoped row";
   const failures: Array<{ snapshot: unknown; outcome: string }> = [
@@ -351,7 +379,6 @@ test("malformed, throwing, and stateful snapshot getters cannot manufacture evid
   const malformed = [
     null,
     {},
-    { kind: "observed", texts: [] },
     { kind: "observed", texts: ["x", 1] },
     {
       kind: "rows_unreadable",

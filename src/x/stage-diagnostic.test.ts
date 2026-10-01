@@ -3,7 +3,12 @@ import assert from "node:assert/strict";
 import type { Locator, Page } from "playwright";
 import { executeXDraftRealRun, receiptForXDraftOutcome } from "../commands/draft.js";
 import { generateContent } from "./content.js";
-import { saveAsDraft, uniqueComposerLocator, type SaveAsDraftDependencies } from "./draftPoster.js";
+import {
+  saveAsDraft,
+  uniqueComposerLocator,
+  X_COMPOSER_SELECTORS,
+  type SaveAsDraftDependencies,
+} from "./draftPoster.js";
 import { runXDraftSaveFlow, snapshotXDraftStageError, XDraftStageError } from "./saveProgress.js";
 import {
   snapshotXDraftDiagnostic,
@@ -163,6 +168,39 @@ test("composer control lookup distinguishes missing, ambiguous and rejected obse
     );
   }
   assert.ok(await uniqueComposerLocator(locatorPage([false, true]), ["[calibrated]"], "save_control"));
+});
+
+const COMPOSE_MODAL = '[role="dialog"][aria-modal="true"]';
+
+/** The live #128 DOM: the compose modal's box plus the timeline's box behind it, both visible. */
+function composeRoutePage(): Page {
+  const boxes = [{ inModal: true }, { inModal: false }];
+  return { locator(selector: string) {
+    const items = boxes.filter((box) => box.inModal || !selector.includes(COMPOSE_MODAL));
+    return {
+      filter() { return this; },
+      first() { return { async waitFor() {} }; },
+      async count() { return items.length; },
+      nth() { return { async isVisible() { return true; } }; },
+    };
+  } } as unknown as Page;
+}
+
+test("composer lookups are scoped to the compose modal, so the timeline's inline box behind it is not a candidate (#128)", async () => {
+  for (const selector of [...X_COMPOSER_SELECTORS.tweetTextbox, ...X_COMPOSER_SELECTORS.addPostButton]) {
+    assert.ok(
+      selector.startsWith(COMPOSE_MODAL) || selector.startsWith('//*[@role="dialog"][@aria-modal="true"]//'),
+      selector,
+    );
+  }
+  assert.ok(await uniqueComposerLocator(composeRoutePage(), X_COMPOSER_SELECTORS.tweetTextbox, "composer_textbox"));
+  await assert.rejects(
+    () => uniqueComposerLocator(composeRoutePage(), ['div[data-testid="tweetTextarea_0"]'], "composer_textbox"),
+    (error: unknown) => {
+      assert.deepEqual(xDraftOperationDiagnostic(error), { substage: "composer_textbox", reason: "control_ambiguous" });
+      return true;
+    },
+  );
 });
 
 test("diagnostic evidence rejects hostile fields and contradictions with the independently proven Save phase", async () => {

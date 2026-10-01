@@ -90,6 +90,9 @@ export { extractTweetId } from "../capabilities/validation.js";
  * the calibrated Article editor/cover selectors are singleton strings whose
  * uniqueness and DOM relationships are checked explicitly below.
  */
+/** The compose modal that owns the tweet/thread/reply composer (#128). */
+const X_COMPOSE_MODAL = '[role="dialog"][aria-modal="true"]';
+
 export const X_COMPOSER_SELECTORS = {
   composeUrl: "https://x.com/compose/post",
   // Articles composer entry point (X Premium "Articles"). VERY likely to drift
@@ -109,20 +112,23 @@ export const X_COMPOSER_SELECTORS = {
     `https://x.com/compose/post?in_reply_to=${encodeURIComponent(tweetId)}`,
 
   // The main tweet text box. data-testid is the most stable hook X exposes, but
-  // it still drifts — keep the role/contenteditable fallbacks.
+  // it still drifts — keep the role/contenteditable fallbacks. LIVE-CALIBRATED
+  // 2026-10 (#128): /compose/post also renders the home timeline's inline
+  // composer, with its own visible tweetTextarea_0, behind the compose modal.
+  // Every composer lookup is scoped to that modal.
   tweetTextbox: [
-    'div[data-testid="tweetTextarea_0"]',
-    'div[role="textbox"][contenteditable="true"]',
-    'div[aria-label="Post text"]',
+    `${X_COMPOSE_MODAL} div[data-testid="tweetTextarea_0"]`,
+    `${X_COMPOSE_MODAL} div[role="textbox"][contenteditable="true"]`,
+    `${X_COMPOSE_MODAL} div[aria-label="Post text"]`,
   ],
   // For thread post N (0-based testid suffix that X uses for added posts).
   // tweetTextbox_n(i) builds the per-post selector below.
   // "Add another post" (+) button that appends a new composer row in a thread.
   addPostButton: [
-    'button[data-testid="addButton"]',
-    'a[data-testid="addButton"]',
-    'div[data-testid="addButton"]',
-    '//button[.//span[text()="Add"]]',
+    `${X_COMPOSE_MODAL} button[data-testid="addButton"]`,
+    `${X_COMPOSE_MODAL} a[data-testid="addButton"]`,
+    `${X_COMPOSE_MODAL} div[data-testid="addButton"]`,
+    '//*[@role="dialog"][@aria-modal="true"]//button[.//span[text()="Add"]]',
   ],
 
   // ---- Draft saving ----
@@ -202,9 +208,9 @@ export const X_COMPOSER_SELECTORS = {
 /** Per-post textbox selector for the i-th (0-based) post in a thread. */
 function tweetTextboxSelectors(i: number): string[] {
   return [
-    `div[data-testid="tweetTextarea_${i}"]`,
+    `${X_COMPOSE_MODAL} div[data-testid="tweetTextarea_${i}"]`,
     // fall back to the n-th generic textbox if the testid index drifts
-    `div[role="textbox"][contenteditable="true"] >> nth=${i}`,
+    `${X_COMPOSE_MODAL} div[role="textbox"][contenteditable="true"] >> nth=${i}`,
   ];
 }
 
@@ -3217,7 +3223,17 @@ const productionDraftRowProbeDependencies: DraftRowProbeDependencies = {
       const rows = Array.from(
         modals[0].querySelectorAll('[data-testid="unsentTweet"]'),
       ).filter(isVisible);
-      if (rows.length === 0) return { kind: "rows_missing" };
+      if (rows.length === 0) {
+        // Live-calibrated 2026-10 (#135): an empty Unsent list renders X's
+        // empty state in the modal. Only that signal makes zero rows an
+        // observed empty set; otherwise the rows may not have loaded yet.
+        const emptyStates = Array.from(
+          modals[0].querySelectorAll('[data-testid="emptyState"]'),
+        ).filter(isVisible);
+        return emptyStates.length === 1
+          ? { kind: "observed", texts: [] }
+          : { kind: "rows_missing" };
+      }
       if (rows.length > limits.rowLimit) {
         return {
           kind: "rows_unreadable",
@@ -3347,7 +3363,7 @@ function snapshotAtomicDraftRows(value: unknown): DraftRowsAtomicSnapshot | null
         : null;
     }
     if (kind !== "observed" || !Array.isArray(texts)) return null;
-    if (texts.length < 1 || texts.length > X_DRAFT_ROW_OBSERVATION_LIMIT) return null;
+    if (texts.length > X_DRAFT_ROW_OBSERVATION_LIMIT) return null;
     const copied: string[] = [];
     for (const item of texts) {
       if (typeof item !== "string" || item.length > DRAFT_ROW_TEXT_LIMIT) return null;

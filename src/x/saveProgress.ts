@@ -548,7 +548,7 @@ function snapshotXDraftRowObservation(value: unknown): XDraftRowObservation | nu
           candidate.modal === "single_visible" &&
           candidate.rows === "all_readable" &&
           candidate.visibleModalCount === 1 &&
-          isBoundedInteger(candidate.visibleRowCount, 1) &&
+          isBoundedInteger(candidate.visibleRowCount) &&
           isBoundedInteger(candidate.exactFullTextMatches) &&
           (candidate.exactFullTextMatches as number) <= (candidate.visibleRowCount as number)
           ? candidate as XDraftRowObservation
