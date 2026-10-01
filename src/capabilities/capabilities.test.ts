@@ -221,6 +221,10 @@ test("channel guides retain operator handoffs, verification limits, and recovery
       /native topic entity/,
       /草稿箱/,
       /reconcile the result before any retry/,
+      /上传视频/,
+      /first frame/,
+      /closed shadow root/,
+      /笔记管理/,
     ],
     "1point3acres": [
       /CLI offers no functionality to access or write/,
