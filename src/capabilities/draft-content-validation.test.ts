@@ -185,10 +185,10 @@ test("X file-backed mapping frontmatter normalizes before every format without l
       { kind: "title_heading", sourceLine: 4 },
       { kind: "code_block", sourceLine: 6 },
       { kind: "section_heading", sourceLine: 9 },
-      { kind: "metadata_like", sourceLine: 10 },
       { kind: "markdown_image", sourceLine: 11 },
     ],
   );
+  assert.match(offset.thread?.[0]?.text ?? "", /^\[code block #1 → screenshot\]\nDraft: v1\n/);
 });
 
 test("X mapping-only ambiguity preserves thematic source bytes through the shared seam", async () => {
@@ -274,7 +274,6 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
     }),
     [
       { kind: "title_heading", sourceLine: 1, source: "# Launch notes" },
-      { kind: "metadata_like", sourceLine: 3, source: "Update: we shipped the parser today." },
       { kind: "section_heading", sourceLine: 5, source: "## What changed" },
       { kind: "markdown_image", sourceLine: 7, source: "![diagram](./diagram.png)" },
     ],
@@ -290,7 +289,8 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
   }
   assert.equal(
     (generated.thread ?? []).map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""),
-    "The transported body remains intact.",
+    "Update: we shipped the parser today.\n\n\n\nThe transported body remains intact.",
+    "a Key: value-looking sentence is caller prose, never omitted (#136)",
   );
 
   await assert.rejects(
@@ -315,6 +315,80 @@ test("X surfaces every heuristic prose omission with exact fidelity evidence", a
       return true;
     },
   );
+});
+
+test("X thread posts follow the author's --- breaks, keep multi-paragraph posts whole, and never re-split them (#136)", async () => {
+  const source = [
+    "First post. A short opener.",
+    "",
+    "---",
+    "",
+    "Second post. One idea.",
+    "",
+    "Its second paragraph stays in the same post.",
+    "",
+    "***",
+    "Status: draft",
+    "Owner: example team",
+    "   ___   ",
+    "---",
+    "Final post https://example.com/notes",
+  ].join("\n");
+  const generated = await generateContent(source, { format: "thread" });
+  assert.deepEqual((generated.thread ?? []).map((post) => post.text), [
+    "First post. A short opener. 1/4",
+    "Second post. One idea.\n\nIts second paragraph stays in the same post. 2/4",
+    "Status: draft\nOwner: example team 3/4",
+    "Final post https://example.com/notes 4/4",
+  ]);
+  assert.deepEqual(generated.warnings, []);
+
+  const tooLong = `Short opener.\n---\n${"word ".repeat(60).trim()}`;
+  await assert.rejects(
+    generateContent(tooLong, { format: "thread" }),
+    (error: unknown) => {
+      assert.ok(error instanceof LocalValidationError);
+      assert.equal(error.problem.phase, "local");
+      assert.equal(error.problem.code, "x_thread_post_too_long");
+      assert.equal(error.problem.actual, 303);
+      assert.equal(error.problem.expected, "<= 280");
+      assert.match(error.message, /post 2\/2/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    generateContent("---\n\n***\n", { format: "thread" }),
+    (error: unknown) => error instanceof LocalValidationError && error.problem.code === "x_text_empty",
+  );
+
+  const tweet = await generateContent("one\n---\ntwo", { format: "tweet" });
+  assert.equal(tweet.tweet?.text, "one\n---\ntwo", "tweets keep --- literally");
+});
+
+test("X thread packing without author breaks splits between sentences, not mid-sentence (#136)", async () => {
+  const paragraph = (n: number) =>
+    `Paragraph ${n} opens with a full sentence about the example project. ` +
+    "It adds a second sentence with more detail so the paragraph runs long. " +
+    `A third sentence closes paragraph ${n} cleanly.`;
+  const source = [1, 2, 3].map(paragraph).join("\n\n");
+  const posts = (await generateContent(source, { format: "thread" })).thread ?? [];
+  assert.equal(posts.length, 3);
+  for (const post of posts) {
+    assert.match(post.text.replace(/ \d+\/\d+$/, "").trimEnd(), /[.!?]$/, post.text);
+  }
+  assert.equal(posts.map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""), source);
+
+  const cjk = `${"这是一个测试句子，用来检查中文的断句是否正确。".repeat(12)}`;
+  const cjkPosts = (await generateContent(cjk, { format: "thread" })).thread ?? [];
+  assert.ok(cjkPosts.length > 1);
+  for (const post of cjkPosts) assert.match(post.text, /。 \d+\/\d+$/);
+
+  // One sentence longer than a post still splits between words.
+  const longSentence = `${"word ".repeat(80).trim()}.`;
+  const longPosts = (await generateContent(longSentence, { format: "thread" })).thread ?? [];
+  assert.equal(longPosts.length, 2);
+  assert.equal(longPosts.map((post) => post.text.replace(/ \d+\/\d+$/, "")).join(""), longSentence);
 });
 
 test("X rejects a grapheme that cannot fit losslessly in a numbered thread post", async () => {

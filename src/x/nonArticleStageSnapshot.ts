@@ -521,7 +521,6 @@ function snapshotLinkFlags(
 const PROSE_OMISSION_KINDS = new Set<ProseOmissionFlag["kind"]>([
   "title_heading",
   "section_heading",
-  "metadata_like",
   "markdown_image",
 ]);
 
