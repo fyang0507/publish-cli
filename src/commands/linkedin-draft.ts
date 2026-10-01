@@ -595,7 +595,9 @@ export function registerLinkedInDraftCommand(linkedin: Command): void {
         "  thematic breaks, or whitespace. Run publish linkedin info for the full contract.\n" +
         "\nNative-save outcome:\n" +
         "  Only a returned Save as draft action followed by a full intended-text match\n" +
-        "  after reopening the composer is success. A rejected Save click has unknown\n" +
+        "  after reopening the composer is success; LinkedIn's lnkd.in short links count as\n" +
+        "  the links they replace. A restored draft is discarded before typing, because a\n" +
+        "  saved draft keeps its link-preview card. A rejected Save click has unknown\n" +
         "  delivery; a settle/reopen failure or negative match is delivered but unverified.\n" +
         "  Both uncertain states exit 1 because a native draft may exist. Before retrying,\n" +
         "  open feed/?shareActive=true in the exact same CLI-owned LinkedIn profile, or\n" +

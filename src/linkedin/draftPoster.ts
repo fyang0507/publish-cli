@@ -8,7 +8,7 @@
  * DRAFT via LinkedIn's own "Save as draft" affordance — so the result sits one
  * click from publishing, and a human takes that click. There is intentionally NO
  * code path that locates or clicks the Post button; it appears in
- * LI_COMPOSER_SELECTORS ONLY as a documented FORBIDDEN selector, exactly as X's
+ * LI_COMPOSER_SELECTORS (./selectors.ts) ONLY as a documented FORBIDDEN selector, exactly as X's
  * tweetButton does in src/x/draftPoster.ts. The send action is future scope behind
  * the SEND-GATE (PRODUCT_SPEC §5).
  *
@@ -31,8 +31,10 @@
 
 import type { BrowserContext, Page, Locator } from "playwright";
 import { getBrowserContext, type EnsureSessionOptions } from "./session.js";
-import { tolerantLocator, optionalLocator, typeText } from "../x/draftPoster.js";
+import { optionalLocator, typeText } from "../x/draftPoster.js";
 import { snapshotLinkedInGeneratedPost, type GeneratedPost } from "./content.js";
+import { dismissPreviewCard, startEmptyComposer, verifyDraftSaved } from "./composer.js";
+import { LI_COMPOSER_SELECTORS } from "./selectors.js";
 import {
   createLinkedInMediaStageEvidence,
   LINKEDIN_DRAFT_SAVE_MECHANISM,
@@ -43,106 +45,6 @@ import {
   type LinkedInDraftStageResult,
 } from "./saveProgress.js";
 
-/**
- * Centralized composer/draft/media selectors. EVERY entry NEEDS LIVE CALIBRATION.
- * Each value is an ordered list of candidate strategies; lookups try them in order
- * until one resolves within the timeout (see tolerantLocator()).
- */
-export const LI_COMPOSER_SELECTORS = {
-  // Opening the share composer directly. The shareActive query param opens the
-  // "Start a post" modal on the feed. BEST-EFFORT.
-  shareUrl: "https://www.linkedin.com/feed/?shareActive=true",
-  feedUrl: "https://www.linkedin.com/feed/",
-
-  // Fallback entry point: the "Start a post" trigger on the feed, if the
-  // shareActive URL doesn't auto-open the modal. BEST-EFFORT.
-  startPostTrigger: [
-    'button[aria-label*="Start a post"]',
-    "button.share-box-feed-entry__trigger",
-    'div.share-box-feed-entry__trigger',
-    '//span[normalize-space()="Start a post"]/ancestor::*[@role="button"][1]',
-  ],
-
-  // The composer's contenteditable text area. CALIBRATED LIVE 2026-07: LinkedIn's
-  // composer is now a TipTap/ProseMirror editor — div.ProseMirror[contenteditable]
-  // with role="textbox". (The old Quill `div.ql-editor` is gone.) Reached by
-  // navigating to shareUrl (feed/?shareActive=true), which opens the composer
-  // overlay; NOTE /sharing/compose is a 404 as a direct URL.
-  editor: [
-    'div.ProseMirror[contenteditable="true"]',
-    'div[role="textbox"][contenteditable="true"]',
-    'div[data-placeholder][contenteditable="true"]',
-  ],
-
-  // ---- Media (optional; images, ratio-flexible — NO 5:2 gate) ----
-  // CALIBRATED LIVE 2026-07: the media control is button[aria-label="Photo"]
-  // (capital P — CSS attribute matching is case-sensitive, so the old
-  // [aria-label*="photo"] missed it). Clicking it opens the OS file chooser (there
-  // is NO visible input[type=file] in the composer), so attachMedia's filechooser
-  // path is the primary one; the hidden-input path is a fallback.
-  mediaButton: [
-    'button[aria-label="Photo"]',
-    'button[aria-label*="Add media"]',
-    'button[aria-label*="photo" i]',
-  ],
-  mediaFileInput: [
-    'input[type="file"][accept*="image"]',
-    "input.share-creation-state__file-input",
-    'input[type="file"]',
-  ],
-  // The media editor dialog raises a "Next"/"Done" affordance to return to the
-  // composer with the image(s) attached. BEST-EFFORT.
-  mediaNextButton: [
-    'button[aria-label="Next"]',
-    'button[aria-label="Done"]',
-    '//button[normalize-space()="Next"]',
-    '//button[normalize-space()="Done"]',
-  ],
-  // Candidate preview selectors retained for future live calibration. They are
-  // intentionally unused here: a generic preview is not attributable evidence
-  // for every caller-ordered image and must not promote `set` to `observed`.
-  mediaAttachedSignal: [
-    'div.share-images',
-    "img.share-creation-state__preview-image",
-    'div[data-test-id*="media"]',
-  ],
-
-  // ---- Save as draft (the ONLY save path — never Post) ----
-  // Closing the composer with content raises LinkedIn's "Save this post as a
-  // draft?" dialog. We click Close, then the dialog's "Save as draft". Both are
-  // centralized. HIGHEST-RISK selectors — a mis-click must NEVER fall through to
-  // Post (mirror X's saveAsDraft safeguard: if the Save affordance doesn't
-  // resolve, do NOT guess another button — bail and leave it to a human).
-  // CALIBRATED LIVE 2026-07: the composer close control is button[aria-label="Dismiss"].
-  closeComposerButton: [
-    'button[aria-label="Dismiss"]',
-    'button[aria-label="Close"]',
-    '//button[@aria-label="Dismiss"]',
-  ],
-  // CALIBRATED LIVE 2026-07: closing a non-empty composer raises a dialog with two
-  // TEXT buttons — "Save as draft" and "Discard" (NO aria-labels), so match by
-  // text. The old aria-label="Save as draft" never matched.
-  saveDraftButton: [
-    'button:has-text("Save as draft"):visible',
-    '//button[normalize-space()="Save as draft"]',
-    '//span[normalize-space()="Save as draft"]/ancestor::button[1]',
-  ],
-  // The "Discard" affordance in the SAME dialog — listed so we are explicit about
-  // what we must NEVER click (it throws the post away). CALIBRATED: text-only button.
-  // discard (FORBIDDEN): 'button:has-text("Discard")' / //button[normalize-space()="Discard"]
-
-  // ---- Draft verification ----
-  // CALIBRATED LIVE 2026-07: LinkedIn has no drafts-list URL or labelled "drafts"
-  // control. Instead, REOPENING the share composer (shareUrl) AUTO-RESTORES the
-  // most recent saved draft into the editor — so verification just reopens the
-  // composer and matches the staged text inside the editor (see verifyDraftSaved).
-
-  // The PUBLISH/POST button — listed ONLY so we are explicit about what we must
-  // NEVER click. Nothing in this module ever locates+clicks it. CALIBRATED LIVE
-  // 2026-07: it is a text button matched by //button[normalize-space()="Post"].
-  // post (FORBIDDEN): //button[normalize-space()="Post"] / 'button[aria-label="Post"]'
-} as const;
-
 export interface StagePostOptions extends EnsureSessionOptions {
   /** Headful + slower so a human can watch/calibrate. Maps to --inspect. */
   inspect?: boolean;
@@ -151,31 +53,6 @@ export interface StagePostOptions extends EnsureSessionOptions {
 }
 
 export type StagePostResult = LinkedInDraftStageResult;
-
-const OPEN_TIMEOUT = 15_000;
-
-/** Platform select-all modifier for keyboard shortcuts (Cmd on macOS, Ctrl else). */
-function modifier(): "Meta" | "Control" {
-  return process.platform === "darwin" ? "Meta" : "Control";
-}
-
-/**
- * Open the LinkedIn share composer and return the focused editor locator. Tries
- * the shareActive URL first, then the feed's "Start a post" trigger.
- */
-async function openComposer(page: Page): Promise<Locator> {
-  await page.goto(LI_COMPOSER_SELECTORS.shareUrl, { waitUntil: "domcontentloaded" });
-
-  let editor = await optionalLocator(page, LI_COMPOSER_SELECTORS.editor, 8_000);
-  if (editor) return editor;
-
-  // Fallback: click the feed's "Start a post" trigger to raise the modal.
-  const trigger = await optionalLocator(page, LI_COMPOSER_SELECTORS.startPostTrigger, 6_000);
-  if (trigger) await trigger.click();
-
-  editor = await tolerantLocator(page, LI_COMPOSER_SELECTORS.editor, "LinkedIn share composer editor", OPEN_TIMEOUT);
-  return editor;
-}
 
 /**
  * Resolve the composer's file input WITHOUT a visibility gate.
@@ -352,49 +229,6 @@ export async function saveAsDraftLinkedIn(
   });
 }
 
-/** Preserve only browser line-ending and Unicode normalizations for equality. */
-function normalizeReopenedDraftText(value: string): string {
-  return value.replace(/\r\n?/g, "\n").normalize("NFC");
-}
-
-export function sameLinkedInReopenedDraftText(
-  actualText: string,
-  expectedText: string,
-): boolean {
-  return normalizeReopenedDraftText(actualText) === normalizeReopenedDraftText(expectedText);
-}
-
-/**
- * Verify a draft was ACTUALLY saved by requiring the complete reopened editor
- * text to equal the complete intended text after only CR/LF and NFC
- * normalization. Prefixes, substrings, case folds, and whitespace collapse are
- * not positive evidence.
- *
- * CALIBRATED LIVE 2026-07: LinkedIn has no drafts-list URL, but REOPENING the
- * share composer (shareUrl) AUTO-RESTORES the most recent saved draft into the
- * editor. So we reopen the composer, read the editor's own text, and require the
- * full staged text to appear there (scoped to the editor, not the whole page, so
- * the feed behind the modal can't false-positive). A clean negative observation
- * returns false; navigation or observation failures throw and become
- * `save_delivered_unverified` at the save-flow boundary.
- */
-export async function verifyDraftSaved(page: Page, expectedText: string): Promise<boolean> {
-  const expected = normalizeReopenedDraftText(expectedText);
-  if (!expected) return false;
-  await page.goto(LI_COMPOSER_SELECTORS.shareUrl, { waitUntil: "domcontentloaded" });
-  const editor = await optionalLocator(page, LI_COMPOSER_SELECTORS.editor, 15_000);
-  if (!editor) return false;
-
-  // The composer restores the draft asynchronously — poll the editor text.
-  const deadline = Date.now() + 6_000;
-  while (Date.now() < deadline) {
-    const text = await editor.innerText();
-    if (sameLinkedInReopenedDraftText(text, expected)) return true;
-    await page.waitForTimeout(500);
-  }
-  return false;
-}
-
 /**
  * Stage `content` as a NATIVE LinkedIn feed-post DRAFT using the persistent
  * logged-in profile. NEVER posts. Returns a result describing what was staged +
@@ -430,16 +264,17 @@ export async function stagePost(
       platformTouched = true;
       const ctx = (await getBrowserContext({ inspect: opts.inspect, force: opts.force })) as BrowserContext;
       page = await ctx.newPage();
-      const editor = await openComposer(page);
+      // LinkedIn AUTO-RESTORES the most recent saved draft into the composer
+      // (verified live). Discard it so every run types one clean post. From the
+      // Discard click on, a rejection may leave changed native state; the
+      // receipt must retain that unknown residue.
+      const editor = await startEmptyComposer(page, () => {
+        composerModified = true;
+      });
       await editor.click();
-      // LinkedIn AUTO-RESTORES the most recent saved draft into the composer editor
-      // (verified live). Clear it so every run types one clean post.
-      await editor.press(`${modifier()}+a`);
-      // From this point a rejection may leave changed text in the native
-      // composer. The receipt must retain that unknown residue.
       composerModified = true;
-      await editor.press("Backspace");
       await typeText(page, editor, text);
+      if (media.length > 0) await dismissPreviewCard(page);
 
       const allMediaSet = await setComposerMedia(page, media, updateMediaSetState);
       if (!allMediaSet) {
