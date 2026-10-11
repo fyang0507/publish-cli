@@ -20,6 +20,7 @@ Add sources without turning the reference list into commentary. Do not rewrite t
 - Prefer primary or official sources: the organization’s own announcement, product page, paper, filing, or the original social post.
 - For secondary reporting, use major Chinese or U.S. media. Do not substitute a foreign outlet or an aggregator merely because it is easier to find.
 - A non-Chinese/U.S. source is appropriate when the article itself contains clearly relevant material in another language or that source is uniquely primary to the claim.
+- Match the source language to the subject, not the article: for an English-speaking person or company, look first for the English original (the post, announcement, or U.S. report) even when the article is Chinese and Chinese coverage is easier to find. Use a Chinese source only for what the English record lacks, such as an announcement made only on a Chinese channel.
 - Use one source per marker by default. Add another only when no single source covers distinct subclaims that the marker must support. Each retained source must contribute non-duplicative evidence.
 - Prefer the original source over a repost, mirror, recap, search result, or article summarizing a social post.
 - If no adequate source exists, report the unsupported marker instead of padding it with a weak citation.
@@ -32,13 +33,18 @@ Add sources without turning the reference list into commentary. Do not rewrite t
 
 ## Compact Format
 
-Keep the title as a clickable hyperlink; never replace it with a bare URL. Do not add an explanation or summary.
+Keep the title as a clickable hyperlink; never replace it with a bare URL. Do not add an explanation or summary of your own.
+
+When a marker contains the author's own text, such as `【这是一个很火的github agent skill】`, treat it as a footnote request: replace it in the body with a plain numbered marker and carry the content into that reference entry, rewritten or condensed into a clean note rather than copied verbatim, followed by the source if the note makes a checkable claim. A note that is commentary or explanation and needs no evidence stands alone without a source. Text that is only an instruction to you, such as `【这些都需引用官方资料】`, is not note content; just resolve it with a source.
 
 - English website or publication: `*Google*, “[I/O 2026: Welcome to the agentic Gemini era](URL),” 2026-05-19.`
 - English social post: `Evan Otero, “[What if Ox Alpha was the friends we made along the way](URL),” 2026-08-22.`
 - Chinese website or publication: `*新浪财经*，[《文章标题》](URL)，2026-02-23。`
 - Chinese social post: `孙宇晨，[《我的女友景甜》](URL)，2026-08-27。`
 
+- Note with source: `同事.skill 是一个在中文圈走红的开源 agent skill。titanwings，[《colleague-skill》](URL)，2026-03-30。`
+- Note only: `“倒不如说”对应轻小说中常见的“というより、むしろ……”句式。`
+
 Use the publication date when available. Omit access dates. Only when no publication date can be established, use `retrieved on YYYY-MM-DD` in its place.
 
-Place entries under `## Reference`, keep labels aligned with the article’s markers, and use one paragraph per label. Separate genuinely complementary English sources with `; ` and Chinese sources with `；`.
+Place entries under `## Reference`, keep labels aligned with the article’s markers, and use one paragraph per label. When a later marker cites the same source as an earlier one, reuse the earlier label instead of creating a duplicate entry. Separate genuinely complementary English sources with `; ` and Chinese sources with `；`.
