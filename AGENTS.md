@@ -17,10 +17,7 @@ Editorial strategy, approvals, and final publication belong to the calling workf
   platform guidance, readiness, recovery, executor ownership, and stop
   conditions. Its Markdown source lives in `capabilities/`.
 - Action-level `--help` owns command flags.
-- `skills/publish/SKILL.md` is a thin, standalone router. Do not duplicate
-  channel facts there or link it to repository files. The post-build installer
-  links shipped skill directories into `.agents/skills` with relative checkout
-  symlinks; edit the source skills here, not workspace copies.
+- `skills/publish/SKILL.md` is a thin, standalone router. Do not duplicate channel facts there or link it to repository files. The consuming workspace owns installation of the complete shipped skill bundles; edit the source skills here, not workspace copies. Build hooks must not read workspace configuration or install skills outside this checkout; tests use isolated fixtures.
 - `README.md` owns user setup and examples. `docs/PRODUCT_SPEC.md` owns the
   product vision and roadmap.
 
